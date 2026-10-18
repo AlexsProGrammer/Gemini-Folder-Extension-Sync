@@ -1,4 +1,4 @@
-import { ChatRef, Project, PromptTemplate, StoredState, TagMeta, WorkspacePayload } from './types';
+import { ChatRef, Project, PromptTemplate, StoredState, TagMeta, UiPrefs, WorkspacePayload } from './types';
 import { storageLocalGet, storageLocalSet } from './webext';
 import { WorkspacePayloadSchema } from './schemas';
 
@@ -45,7 +45,15 @@ export function createEmptyState(): StoredState {
     schemaVersion: CURRENT_SCHEMA_VERSION,
     projects: [],
     chatIndex: {},
-    uiPrefs: { projectsCollapsed: false }
+    uiPrefs: { projectsCollapsed: false, foldersCollapsed: false }
+  };
+}
+
+export function normalizeUiPrefs(raw: unknown): { projectsCollapsed: boolean; foldersCollapsed: boolean } {
+  const candidate = raw && typeof raw === 'object' ? (raw as Partial<UiPrefs>) : {};
+  return {
+    projectsCollapsed: candidate.projectsCollapsed === true,
+    foldersCollapsed: candidate.foldersCollapsed === true
   };
 }
 
@@ -101,7 +109,7 @@ export function migrateState(raw: unknown): StoredState {
     };
   });
 
-  const uiPrefs = candidate.uiPrefs || { projectsCollapsed: false };
+  const uiPrefs = normalizeUiPrefs(candidate.uiPrefs);
 
   return {
     schemaVersion: CURRENT_SCHEMA_VERSION,

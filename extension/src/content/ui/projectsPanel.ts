@@ -4,6 +4,9 @@ import { runtimeSendMessage } from '../../shared/webext';
 import { ICON_OPTIONS, COLOR_OPTIONS, IconOption, getIconLabel, renderIconSvg } from './icons';
 import { PANEL_TITLE_FONT_STACK, PANEL_TITLE_TYPOGRAPHY } from './typography';
 
+export type PanelSection = 'projects' | 'folders';
+export type TargetPickerMode = 'project' | 'folder' | 'all';
+
 interface ProjectsPanelOptions {
   shadow: ShadowRoot;
   overlayShadow: ShadowRoot;
@@ -11,12 +14,14 @@ interface ProjectsPanelOptions {
   onToggleProjectPin: (projectId: string, isPinned: boolean) => Promise<void>;
   onToggleProjectExpand: (projectId: string) => void;
   onDeleteProject: (projectId: string) => void;
-  onToggleCollapse: (collapsed: boolean) => void;
+  onToggleCollapse: (section: PanelSection, collapsed: boolean) => void;
   onRemoveChatFromProject: (conversationId: string) => void;
   onMoveChatToProject: (conversationId: string, projectId: string) => void;
   onAddSubfolder: (parentId: string) => void;
   onEditDetails: (project: Project) => void;
   onAddCurrentChat: (projectId: string) => void;
+  /** Opens Gemini's native chat menu (falls back to the panel menu). */
+  onChatMenuOpen: (conversationId: string, anchorRect: DOMRect) => void;
 }
 
 export const CHAT_DRAG_MIME = 'application/x-gp-chat-id';
@@ -48,6 +53,7 @@ export function createProjectsPanel(options: ProjectsPanelOptions) {
   const modal = createModal(overlayLayer);
   const projectMenu = createProjectMenu(overlayLayer);
   const toast = createToast(overlayLayer);
+  const targetPicker = createTargetPickerModal(overlayLayer);
   const detailsModal = createDetailsModal(overlayLayer, (project, systemPrompt, notes) => {
     options.onSaveProject({ ...project, systemPrompt, notes, updatedAt: Date.now() });
     showToast(systemPrompt || notes ? 'Project details saved' : 'Project details cleared');
@@ -58,7 +64,8 @@ export function createProjectsPanel(options: ProjectsPanelOptions) {
 
   // 用于存储当前 state 以供 chatMenu 获取项目列表
   let currentState: RuntimeState | null = null;
-  const chatMenu = createChatMenu(overlayLayer, () => currentState?.projects || []);
+  const chatMenu = createChatMenu(overlayLayer);
+  targetPicker.setProjectsProvider(() => currentState?.projects ?? []);
   let panelEventsController: AbortController | null = null;
 
   let modalMode: ModalMode = 'create';
@@ -95,20 +102,9 @@ export function createProjectsPanel(options: ProjectsPanelOptions) {
         const chatRow = chatMenuButton.closest<HTMLElement>('[data-gp-chat-id]');
         if (!chatRow) return;
         const chatId = chatRow.dataset.gpChatId as string;
-        const chatProjectId = chatRow.dataset.gpProjectId as string;
-        const project = state.projects.find((p) => p.id === chatProjectId);
-        if (project) {
-          chatMenu.open(
-            chatMenuButton.getBoundingClientRect(),
-            chatId,
-            chatProjectId,
-            project.name,
-            {
-              onRemove: () => options.onRemoveChatFromProject(chatId),
-              onMoveToProject: (targetProjectId) => options.onMoveChatToProject(chatId, targetProjectId)
-            }
-          );
-        }
+        // Reuse Gemini's native chat menu (rename / pin / delete / share) and
+        // augment it with the extension's project actions.
+        options.onChatMenuOpen(chatId, chatMenuButton.getBoundingClientRect());
         return;
       }
 
@@ -171,9 +167,13 @@ export function createProjectsPanel(options: ProjectsPanelOptions) {
         event.preventDefault();
         event.stopPropagation();
         event.stopImmediatePropagation();
-        const nextCollapsed = !state.uiPrefs.projectsCollapsed;
-        setPanelCollapsed(nextCollapsed);
-        window.setTimeout(() => options.onToggleCollapse(nextCollapsed), PANEL_COLLAPSE_ANIMATION_MS);
+        const section: PanelSection = header.dataset.gpSection === 'folders' ? 'folders' : 'projects';
+        const currentlyCollapsed = section === 'projects'
+          ? state.uiPrefs.projectsCollapsed
+          : state.uiPrefs.foldersCollapsed;
+        const nextCollapsed = !currentlyCollapsed;
+        setSectionCollapsed(section, nextCollapsed);
+        window.setTimeout(() => options.onToggleCollapse(section, nextCollapsed), PANEL_COLLAPSE_ANIMATION_MS);
         return;
       }
 
@@ -221,84 +221,6 @@ export function createProjectsPanel(options: ProjectsPanelOptions) {
         options.onMoveChatToProject(conversationId, projectId);
       }
     }, { signal: panelEventsController.signal });
-
-    return;
-
-    const header = panelRoot.querySelector<HTMLElement>('[data-gp-action="toggle-section"]');
-    const newProjectRow = panelRoot.querySelector<HTMLElement>('[data-gp-action="new-project"]');
-
-    // Header click toggles collapse state
-    header?.addEventListener('click', (e) => {
-      // Prevent toggling if user clicked a button inside header (if any)
-      if ((e.target as HTMLElement).closest('button')) return;
-      const isCollapsed = state.uiPrefs.projectsCollapsed;
-      options.onToggleCollapse(!isCollapsed);
-    });
-
-    newProjectRow?.addEventListener('click', () => openCreateModal());
-
-    panelRoot.querySelectorAll<HTMLElement>('[data-gp-project-id]').forEach((row) => {
-      const projectId = row.dataset.gpProjectId as string;
-      const kebab = row.querySelector<HTMLButtonElement>('[data-gp-action="project-menu"]');
-      const toggleRow = row.querySelector<HTMLElement>('[data-gp-action="toggle-project"]');
-
-      toggleRow?.addEventListener('click', (event) => {
-        if ((event.target as HTMLElement).closest('[data-gp-action="project-menu"]')) {
-          return;
-        }
-        options.onToggleProjectExpand(projectId);
-      });
-
-      kebab?.addEventListener('click', (event) => {
-        event.stopPropagation();
-        const project = state.projects.find((item) => item.id === projectId);
-        if (project) {
-          openProjectMenu(project, kebab.getBoundingClientRect());
-        }
-      });
-
-      // Chat kebab 菜单处理 (Chat row context menu)
-      const chatKebabs = row.querySelectorAll<HTMLButtonElement>('[data-gp-action="chat-menu"]');
-      chatKebabs.forEach((chatKebab) => {
-        const chatRow = chatKebab.closest<HTMLElement>('[data-gp-chat-id]');
-        if (!chatRow) return;
-
-        const chatId = chatRow.dataset.gpChatId as string;
-        const chatProjectId = chatRow.dataset.gpProjectId as string;
-        const chatLink = chatRow.querySelector<HTMLAnchorElement>('.gp-chat-link');
-
-        chatRow.addEventListener('click', (event) => {
-          if (event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) {
-            return;
-          }
-          if ((event.target as HTMLElement).closest('[data-gp-action="chat-menu"]')) {
-            return;
-          }
-          event.preventDefault();
-          event.stopPropagation();
-          event.stopImmediatePropagation();
-          navigateToProjectChat(chatId, chatLink?.href || `/app/${chatId}`);
-        }, true);
-
-        chatKebab.addEventListener('click', (event) => {
-          event.stopPropagation();
-          event.preventDefault();
-          const project = state.projects.find((p) => p.id === chatProjectId);
-          if (project) {
-            chatMenu.open(
-              chatKebab.getBoundingClientRect(),
-              chatId,
-              chatProjectId,
-              project.name,
-              {
-                onRemove: () => options.onRemoveChatFromProject(chatId),
-                onMoveToProject: (targetProjectId) => options.onMoveChatToProject(chatId, targetProjectId)
-              }
-            );
-          }
-        });
-      });
-    });
   }
 
   function openCreateModal(parentProjectId?: string | null, forceFolder = false) {
@@ -351,9 +273,9 @@ export function createProjectsPanel(options: ProjectsPanelOptions) {
     }
   }
 
-  function setPanelCollapsed(collapsed: boolean) {
-    const title = panelRoot.querySelector<HTMLElement>('[data-gp-action="toggle-section"]');
-    const container = panelRoot.querySelector<HTMLElement>('[data-gp-list-container]');
+  function setSectionCollapsed(section: PanelSection, collapsed: boolean) {
+    const title = panelRoot.querySelector<HTMLElement>(`[data-gp-action="toggle-section"][data-gp-section="${section}"]`);
+    const container = panelRoot.querySelector<HTMLElement>(`[data-gp-list-container="${section}"]`);
     title?.classList.toggle('collapsed', collapsed);
     title?.setAttribute('aria-expanded', String(!collapsed));
     container?.classList.toggle('collapsed', collapsed);
@@ -497,17 +419,47 @@ export function createProjectsPanel(options: ProjectsPanelOptions) {
       onTogglePin: async () => {
         const isPinned = !project.isPinned;
         await options.onToggleProjectPin(project.id, isPinned);
-        showToast(isPinned ? 'Project pinned' : 'Project unpinned');
+        showToast(isPinned ? (project.kind === 'folder' ? 'Folder pinned' : 'Project pinned') : (project.kind === 'folder' ? 'Folder unpinned' : 'Project unpinned'));
       },
       onPinError: (error) => {
         console.warn('[Gemini Projects] Pin update failed', error);
-        showToast('Could not update project pin. Please try again.');
+        showToast('Could not update pin. Please try again.');
       },
       onAddCurrentChat: () => options.onAddCurrentChat(project.id),
       onAddSubfolder: () => options.onAddSubfolder(project.id),
       onEditDetails: () => options.onEditDetails(project),
       onEdit: () => openEditModal(project),
       onDelete: () => options.onDeleteProject(project.id)
+    });
+  }
+
+  /**
+   * Opens the searchable hierarchical picker that lets the user choose which
+   * project or folder a chat should belong to.
+   */
+  function openTargetPicker(conversationId: string, mode: TargetPickerMode) {
+    const projects = currentState?.projects ?? [];
+    const chatIndex = currentState?.chatIndex ?? new Map<string, ChatRef>();
+    const currentProjectId = currentState?.chatIndex.get(conversationId)?.projectId ?? null;
+    targetPicker.open({
+      mode,
+      projects,
+      chatIndex,
+      currentProjectId,
+      onPick: (targetProjectId) => options.onMoveChatToProject(conversationId, targetProjectId)
+    });
+  }
+
+  /** Extension fallback menu for chats whose native menu cannot be opened. */
+  function showChatMenuFallback(conversationId: string, anchorRect: DOMRect) {
+    const chat = currentState?.chatIndex.get(conversationId);
+    const projectId = chat?.projectId ?? null;
+    const projectName = projectId
+      ? currentState?.projects.find((item) => item.id === projectId)?.name ?? ''
+      : '';
+    chatMenu.open(anchorRect, conversationId, projectId, projectName, {
+      onMove: () => openTargetPicker(conversationId, 'all'),
+      onRemove: () => options.onRemoveChatFromProject(conversationId)
     });
   }
 
@@ -548,6 +500,9 @@ export function createProjectsPanel(options: ProjectsPanelOptions) {
   function closeAllOverlays() {
     modal.close();
     projectMenu.close();
+    chatMenu.close();
+    targetPicker.close();
+    detailsModal.close();
     toast.hide();
   }
 
@@ -556,14 +511,27 @@ export function createProjectsPanel(options: ProjectsPanelOptions) {
     closeAllOverlays,
     showToast,
     openCreateModal,
-    openDetailsModal
+    openDetailsModal,
+    openTargetPicker,
+    showChatMenuFallback
   };
 }
 
+const CHAT_PIN_BADGE_ICON = '<svg viewBox="0 0 24 24" width="12" height="12" fill="currentColor" stroke="none" aria-hidden="true"><path d="M16 3l5 5-5.5 1.5L13 12l-.5 4.5L9 13l-4.5 4.5L3 16l4.5-4.5L4 8l4.5-.5L11 5l2.5-2z"/></svg>';
+const TWIST_CHEVRON_ICON = '<svg viewBox="0 0 24 24" width="12" height="12" fill="currentColor" aria-hidden="true"><path d="M8.1 5.7 14.4 12l-6.3 6.3-1.4-1.4L11.6 12 6.7 7.1z"/></svg>';
+
+/**
+ * Renders one hierarchy (roots with their nested subfolders and chats) as the
+ * sidebar tree. Called once for the Projects section and once for the Folders
+ * section so the two categories stay visually separated. `rootKind` selects
+ * which containers are shown as top-level entries; nested subfolders of any
+ * kind always render inside their parent.
+ */
 export function renderProjectsSection(
   projects: Project[],
   chatIndex: Map<string, ChatRef>,
   expandedProjectIds: Set<string>,
+  rootKind: 'project' | 'folder',
   nativeConversationIds: Set<string> = new Set(),
   nativeChatsReady = false
 ): string {
@@ -574,14 +542,19 @@ export function renderProjectsSection(
         Number(b.isPinned === true) - Number(a.isPinned === true) || a.sortIndex - b.sortIndex
       );
 
-  const renderChatRows = (project: Project, accentColor: string, isExpanded: boolean): string => {
+  const chatsOf = (projectId: string): ChatRef[] =>
+    Array.from(chatIndex.values())
+      .filter((chat) => chat.projectId === projectId)
+      // Pinned chats always float to the top of their project/folder section.
+      .sort((a, b) =>
+        Number(b.isPinned === true) - Number(a.isPinned === true) || b.updatedAt - a.updatedAt
+      );
+
+  const renderChatRows = (project: Project, accentColor: string, isExpanded: boolean, chats: ChatRef[]): string => {
     if (!isExpanded) return '';
-    const chats = Array.from(chatIndex.values())
-      .filter((chat) => chat.projectId === project.id)
-      .sort((a, b) => b.updatedAt - a.updatedAt);
 
     return `
-          <div class="gp-project-chats" style="--gp-project-color: ${escapeAttr(accentColor)};">
+          <div class="gp-project-chats">
             ${chats.length
           ? chats
             .map(
@@ -594,6 +567,7 @@ export function renderProjectsSection(
                             <span class="gp-chat-title">${escapeHtml(chat.title || 'Untitled chat')}</span>
                             ${isMissing ? '<span class="gp-chat-missing">Missing</span>' : ''}
                           </a>
+                          ${chat.isPinned ? `<span class="gp-chat-pin" role="img" aria-label="Pinned chat" title="Pinned to top">${CHAT_PIN_BADGE_ICON}</span>` : ''}
                           <button class="gp-chat-kebab" data-gp-action="chat-menu" aria-label="Chat menu"><svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="5" r="1"/><circle cx="12" cy="12" r="1"/><circle cx="12" cy="19" r="1"/></svg></button>
                         </div>
                       `
@@ -612,8 +586,10 @@ export function renderProjectsSection(
     const isFolder = project.kind === 'folder';
     const hasDetails = Boolean(project.systemPrompt || project.notes);
     const children = childrenOf(project.id);
+    const chats = chatsOf(project.id);
+    const hasDescendants = children.length > 0 || chats.length > 0;
 
-    const chatRows = renderChatRows(project, accentColor, isExpanded);
+    const chatRows = renderChatRows(project, accentColor, isExpanded, chats);
     const childRows = isExpanded && children.length
       ? `<div class="gp-project-children">${children.map((child) => renderNode(child, depth + 1)).join('')}</div>`
       : '';
@@ -623,13 +599,14 @@ export function renderProjectsSection(
       : `<span class="gp-icon">${renderIconSvg(project.icon, project.color)}</span>`;
 
     return `
-        <div class="gp-project" data-gp-project-id="${project.id}">
+        <div class="gp-project" data-gp-project-id="${project.id}" style="--gp-project-color: ${escapeAttr(accentColor)};">
           <div class="gp-row gp-project-row ${isExpanded ? 'active' : ''}" data-gp-action="toggle-project" data-gp-droppable="true">
+            ${hasDescendants ? `<span class="gp-twist ${isExpanded ? 'open' : ''}" aria-hidden="true">${TWIST_CHEVRON_ICON}</span>` : '<span class="gp-twist-spacer" aria-hidden="true"></span>'}
             ${iconMarkup}
             <span class="gp-label">${escapeHtml(project.name)}</span>
             ${hasDetails ? `<span class="gp-details-badge" role="img" aria-label="Has system prompt or notes" title="Has system prompt or notes">${DETAILS_BADGE_ICON}</span>` : ''}
             ${project.isPinned ? `<span class="gp-project-pin" role="img" aria-label="Pinned project" title="Pinned project">${renderProjectActionIcon('pin')}</span>` : ''}
-            <button class="gp-kebab" data-gp-action="project-menu" aria-label="Project menu"><svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="5" r="1"/><circle cx="12" cy="12" r="1"/><circle cx="12" cy="19" r="1"/></svg></button>
+            <button class="gp-kebab" data-gp-action="project-menu" aria-label="${isFolder ? 'Folder menu' : 'Project menu'}"><svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="5" r="1"/><circle cx="12" cy="12" r="1"/><circle cx="12" cy="19" r="1"/></svg></button>
           </div>
           ${chatRows}
           ${childRows}
@@ -637,7 +614,7 @@ export function renderProjectsSection(
       `;
   };
 
-  const roots = childrenOf(null);
+  const roots = childrenOf(null).filter((project) => project.kind === rootKind);
   if (!roots.length) {
     return ''; // No placeholder when empty, cleaner look
   }
@@ -850,6 +827,32 @@ function ensurePanelRoot(shadow: ShadowRoot): HTMLElement {
         flex: 0 0 20px;
       }
 
+      .gp-twist {
+        width: 14px;
+        height: 14px;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        flex: 0 0 14px;
+        color: var(--gp-fg-muted);
+        opacity: 0.75;
+        line-height: 0;
+      }
+
+      .gp-twist svg {
+        transition: transform 160ms cubic-bezier(0.2, 0, 0, 1);
+        transform: rotate(0deg);
+      }
+
+      .gp-twist.open svg {
+        transform: rotate(90deg);
+      }
+
+      .gp-twist-spacer {
+        width: 14px;
+        flex: 0 0 14px;
+      }
+
       .gp-kebab {
         width: 32px;
         height: 32px;
@@ -888,8 +891,17 @@ function ensurePanelRoot(shadow: ShadowRoot): HTMLElement {
         flex-direction: column;
         gap: 0;
         position: relative;
-        margin-left: 30px;
-        padding-left: 20px;
+        /*
+         * Guide-line geometry: the border drops exactly below the parent
+         * row's twist chevron center (6px row margin + 8px row padding +
+         * 7px half twist = 21px). .gp-project-children uses the same 20px
+         * margin so the chats line and the subfolder line form one single,
+         * perfectly aligned vertical spine, and every nesting level steps
+         * the line by a constant 21px. Content offsets (30px padding + 12px
+         * row padding) keep chat dots/titles at their established columns.
+         */
+        margin-left: 20px;
+        padding-left: 30px;
         border-left: 1px solid color-mix(in srgb, var(--gp-project-color) 45%, transparent);
       }
 
@@ -1015,8 +1027,19 @@ function ensurePanelRoot(shadow: ShadowRoot): HTMLElement {
         color: var(--gp-fg);
       }
 
+      .gp-chat-pin {
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        flex: 0 0 14px;
+        width: 14px;
+        height: 14px;
+        color: var(--gp-fg-muted);
+      }
+
       .gp-chat-empty {
-        padding: 8px 16px 8px 52px;
+        /* 30px chats padding + 1px border + 26px = chat title column (dot 6px + gap 8px + 12px row padding). */
+        padding: 8px 16px 8px 26px;
         margin: 0;
         font-size: 12px;
         color: var(--gp-section);
@@ -1024,9 +1047,11 @@ function ensurePanelRoot(shadow: ShadowRoot): HTMLElement {
       }
 
       .gp-project-children {
+        /* Same guide-line column as .gp-project-chats so the line dropping to
+           chats and the line dropping to subfolders are perfectly in line. */
         margin-left: 20px;
-        padding-left: 4px;
-        border-left: 1px solid var(--gp-bg-active);
+        padding-left: 0;
+        border-left: 1px solid color-mix(in srgb, var(--gp-project-color) 45%, transparent);
       }
 
       .gp-row.gp-drag-over {
@@ -1053,28 +1078,45 @@ function ensurePanelRoot(shadow: ShadowRoot): HTMLElement {
 }
 
 function buildPanelMarkup(state: RuntimeState): string {
-  const collapsed = state.uiPrefs.projectsCollapsed;
+  const projectsCollapsed = state.uiPrefs.projectsCollapsed;
+  const foldersCollapsed = state.uiPrefs.foldersCollapsed;
   const chevronSvg = `
     <svg viewBox="0 0 24 24">
       <path d="M7.41 8.59 12 13.17l4.59-4.58L18 10l-6 6-6-6z"/>
     </svg>
   `;
 
-  return `
-    <div class="gp-panel">
-      <!-- Header with Chevron -->
-      <div class="gp-title ${collapsed ? 'collapsed' : ''}" data-gp-action="toggle-section" role="button" aria-expanded="${String(!collapsed)}">
-        <span>Projects</span>
+  const sectionTitle = (section: PanelSection, label: string, collapsed: boolean) => `
+      <div class="gp-title ${collapsed ? 'collapsed' : ''}" data-gp-action="toggle-section" data-gp-section="${section}" role="button" aria-expanded="${String(!collapsed)}">
+        <span>${escapeHtml(label)}</span>
         <span class="gp-chevron">${chevronSvg}</span>
       </div>
+  `;
 
-      <!-- Collapsible Container -->
-      <div class="gp-list-container ${collapsed ? 'collapsed' : ''}" data-gp-list-container>
+  const sectionBody = (section: PanelSection, collapsed: boolean, content: string) => `
+      <div class="gp-list-container ${collapsed ? 'collapsed' : ''}" data-gp-list-container="${section}">
         <div class="gp-list-content">
+          ${content}
+        </div>
+      </div>
+  `;
+
+  const projectsContent = `
           <div class="gp-row gp-new" data-gp-action="new-project">
             <span class="gp-icon"><svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 5v14"/><path d="M5 12h14"/></svg></span>
             <span class="gp-label">New Project</span>
           </div>
+          ${renderProjectsSection(
+    state.projects,
+    state.chatIndex,
+    state.expandedProjectIds,
+    'project',
+    state.nativeConversationIds,
+    state.nativeChatsReady
+  )}
+  `;
+
+  const foldersContent = `
           <div class="gp-row gp-new" data-gp-action="new-folder">
             <span class="gp-icon"><svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 11v5"/><path d="M9.5 13.5h5"/><path d="M4 20h16a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.93a2 2 0 0 1-1.66-.9l-.82-1.2A2 2 0 0 0 7.93 2H4a2 2 0 0 0-2 2v13c0 1.1.9 2 2 2Z"/></svg></span>
             <span class="gp-label">New Folder</span>
@@ -1083,11 +1125,18 @@ function buildPanelMarkup(state: RuntimeState): string {
     state.projects,
     state.chatIndex,
     state.expandedProjectIds,
+    'folder',
     state.nativeConversationIds,
     state.nativeChatsReady
   )}
-        </div>
-      </div>
+  `;
+
+  return `
+    <div class="gp-panel">
+      ${sectionTitle('projects', 'Projects', projectsCollapsed)}
+      ${sectionBody('projects', projectsCollapsed, projectsContent)}
+      ${sectionTitle('folders', 'Folders', foldersCollapsed)}
+      ${sectionBody('folders', foldersCollapsed, foldersContent)}
     </div>
   `;
 }
@@ -1676,57 +1725,296 @@ function ensureOverlayLayer(shadow: ShadowRoot): HTMLElement {
         margin: 4px 8px;
       }
 
+      /* ---------- System prompt & notes modal ---------- */
+
       .gp-details-modal {
-        --gp-content-width: 480px;
-        gap: 10px;
+        --gp-content-width: 560px;
+        gap: 14px;
+        max-width: calc(100vw - 32px);
+      }
+
+      .gp-details-body {
+        display: flex;
+        flex-direction: column;
+        gap: 16px;
+        width: 100%;
       }
 
       .gp-details-field {
         display: flex;
         flex-direction: column;
-        gap: 6px;
+        gap: 4px;
         width: 100%;
       }
 
+      .gp-details-label-row {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+      }
+
       .gp-details-label {
-        font-size: 11px;
-        font-weight: 700;
-        letter-spacing: 0.06em;
-        text-transform: uppercase;
+        font-size: 13px;
+        font-weight: 600;
+        color: var(--gp-fg);
+        font-family: var(--gp-font);
+      }
+
+      .gp-details-hint {
+        margin: 0;
+        font-size: 12px;
+        line-height: 16px;
         color: var(--gp-muted);
         font-family: var(--gp-font);
       }
 
       .gp-details-textarea {
         width: 100%;
-        min-height: 72px;
+        min-height: 96px;
+        max-height: 320px;
         resize: vertical;
         border: 1px solid var(--gp-border);
-        border-radius: var(--gp-radius-sm);
+        border-radius: 12px;
         background: var(--gp-input-bg);
         color: var(--gp-fg);
         font-family: var(--gp-font);
-        font-size: 14px;
-        line-height: 1.45;
-        padding: 10px 12px;
+        font-size: 13.5px;
+        line-height: 1.55;
+        padding: 12px 14px;
         outline: none;
         box-sizing: border-box;
-        transition: border-color var(--gp-transition);
+        overflow-y: auto;
+        transition: border-color var(--gp-transition), box-shadow var(--gp-transition), background var(--gp-transition);
+      }
+
+      .gp-details-textarea-tall {
+        min-height: 150px;
+      }
+
+      .gp-details-textarea::placeholder {
+        color: var(--gp-muted);
+        opacity: 0.9;
+      }
+
+      .gp-details-textarea:hover {
+        border-color: var(--gp-selected-border);
       }
 
       .gp-details-textarea:focus {
-        border-color: var(--gp-fg);
+        border-color: var(--gp-accent);
+        box-shadow: 0 0 0 3px var(--gp-focus-ring);
+        background: var(--gp-surface);
       }
 
       .gp-details-actions {
         display: flex;
         justify-content: flex-end;
+        align-items: center;
+        gap: 10px;
         width: 100%;
+        padding-top: 2px;
       }
 
       .gp-details-actions .gp-primary {
         width: auto;
         min-width: 96px;
+        border-radius: 999px;
+      }
+
+      .gp-ghost-button {
+        min-width: 88px;
+        height: 40px;
+        padding: 0 18px;
+        border: none;
+        border-radius: 999px;
+        background: transparent;
+        color: var(--gp-fg);
+        font-family: var(--gp-font);
+        font-size: 14px;
+        font-weight: 600;
+        cursor: pointer;
+        transition: background var(--gp-transition);
+      }
+
+      .gp-ghost-button:hover {
+        background: var(--gp-hover);
+      }
+
+      /* ---------- Target picker modal ---------- */
+
+      .gp-picker-modal {
+        --gp-content-width: 460px;
+        gap: 12px;
+        max-width: calc(100vw - 32px);
+      }
+
+      .gp-picker-search {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        width: 100%;
+        border: 1px solid var(--gp-border);
+        border-radius: 999px;
+        padding: 0 14px;
+        height: 44px;
+        background: var(--gp-input-bg);
+        color: var(--gp-muted);
+        box-sizing: border-box;
+        transition: border-color var(--gp-transition), box-shadow var(--gp-transition);
+      }
+
+      .gp-picker-search:focus-within {
+        border-color: var(--gp-accent);
+        box-shadow: 0 0 0 3px var(--gp-focus-ring);
+        color: var(--gp-fg);
+      }
+
+      .gp-picker-search-input {
+        flex: 1;
+        min-width: 0;
+        border: none;
+        outline: none;
+        background: transparent;
+        font-size: 14px;
+        color: var(--gp-fg);
+        font-family: var(--gp-font);
+      }
+
+      .gp-picker-search-input::placeholder { color: var(--gp-muted); }
+
+      .gp-picker-list {
+        display: flex;
+        flex-direction: column;
+        gap: 2px;
+        width: 100%;
+        max-height: min(52vh, 420px);
+        overflow-y: auto;
+        overscroll-behavior: contain;
+        padding: 2px;
+        box-sizing: border-box;
+      }
+
+      .gp-picker-empty {
+        padding: 26px 0 18px;
+        text-align: center;
+        font-size: 13px;
+        color: var(--gp-muted);
+        font-family: var(--gp-font);
+      }
+
+      .gp-picker-node { display: block; }
+
+      .gp-picker-row {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        height: 40px;
+        padding-right: 10px;
+        border-radius: 12px;
+        cursor: pointer;
+        color: var(--gp-fg);
+        font-family: var(--gp-font);
+        font-size: 13.5px;
+        font-weight: 500;
+        line-height: 18px;
+        transition: background var(--gp-transition);
+      }
+
+      .gp-picker-row:hover {
+        background: var(--gp-hover);
+      }
+
+      .gp-picker-row:focus-visible {
+        outline: 2px solid var(--gp-focus);
+        outline-offset: -2px;
+      }
+
+      .gp-picker-row.current {
+        background: var(--gp-selected);
+      }
+
+      .gp-picker-twist {
+        width: 18px;
+        height: 18px;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        flex: 0 0 18px;
+        color: var(--gp-muted);
+        line-height: 0;
+      }
+
+      .gp-picker-twist svg {
+        transition: transform 160ms cubic-bezier(0.2, 0, 0, 1);
+        transform: rotate(0deg);
+      }
+
+      .gp-picker-twist.open svg {
+        transform: rotate(90deg);
+      }
+
+      .gp-picker-twist-spacer {
+        width: 18px;
+        flex: 0 0 18px;
+      }
+
+      .gp-picker-icon {
+        width: 22px;
+        height: 22px;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        flex: 0 0 22px;
+        color: var(--gp-fg-muted);
+        line-height: 0;
+      }
+
+      .gp-picker-icon.is-folder svg {
+        width: 19px;
+        height: 19px;
+      }
+
+      .gp-picker-name {
+        flex: 1;
+        min-width: 0;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+      }
+
+      .gp-picker-mark {
+        background: var(--gp-accent-hover);
+        color: inherit;
+        border-radius: 3px;
+        padding: 0 1px;
+      }
+
+      .gp-picker-count {
+        flex: 0 0 auto;
+        font-size: 11px;
+        font-weight: 600;
+        color: var(--gp-muted);
+        background: var(--gp-hover);
+        border-radius: 999px;
+        padding: 2px 8px;
+        line-height: 14px;
+      }
+
+      .gp-picker-current-badge {
+        flex: 0 0 auto;
+        font-size: 10px;
+        font-weight: 700;
+        text-transform: uppercase;
+        letter-spacing: 0.04em;
+        color: var(--gp-muted);
+        border: 1px solid var(--gp-border);
+        border-radius: 999px;
+        padding: 2px 7px;
+        line-height: 14px;
+      }
+
+      .gp-picker-children {
+        display: block;
       }
     `;
     shadow.appendChild(style);
@@ -1840,22 +2128,31 @@ function createDetailsModal(
   backdrop.innerHTML = `
     <div class="gp-modal gp-details-modal" role="dialog" aria-modal="true">
       <div class="gp-modal-header">
-        <span data-gp-modal-title>System prompt &amp; notes</span>
+        <span data-gp-modal-title>Project details</span>
         <button class="gp-modal-close" data-gp-action="close" aria-label="Close">
           <svg viewBox="0 0 24 24" aria-hidden="true">
             <path d="M6 6l12 12M18 6L6 18" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/>
           </svg>
         </button>
       </div>
-      <div class="gp-details-field">
-        <label class="gp-details-label" for="gp-details-prompt">System prompt</label>
-        <textarea class="gp-details-textarea" id="gp-details-prompt" data-gp-details-prompt rows="4" placeholder="Custom instructions applied to chats in this project (like ChatGPT project instructions)"></textarea>
-      </div>
-      <div class="gp-details-field">
-        <label class="gp-details-label" for="gp-details-notes">Notes</label>
-        <textarea class="gp-details-textarea" id="gp-details-notes" data-gp-details-notes rows="6" placeholder="Freeform markdown notes for this workspace"></textarea>
+      <div class="gp-details-body">
+        <div class="gp-details-field">
+          <div class="gp-details-label-row">
+            <label class="gp-details-label" for="gp-details-prompt">System prompt</label>
+          </div>
+          <p class="gp-details-hint">Custom instructions applied to every chat in this project.</p>
+          <textarea class="gp-details-textarea" id="gp-details-prompt" data-gp-details-prompt rows="5" placeholder="e.g. You are a senior React engineer. Always answer with TypeScript snippets and explain trade-offs."></textarea>
+        </div>
+        <div class="gp-details-field">
+          <div class="gp-details-label-row">
+            <label class="gp-details-label" for="gp-details-notes">Notes</label>
+          </div>
+          <p class="gp-details-hint">Freeform markdown notes for this workspace.</p>
+          <textarea class="gp-details-textarea gp-details-textarea-tall" id="gp-details-notes" data-gp-details-notes rows="8" placeholder="# Notes&#10;- Project specification&#10;- Decisions &amp; open questions"></textarea>
+        </div>
       </div>
       <div class="gp-details-actions">
+        <button class="gp-ghost-button" data-gp-action="details-cancel">Cancel</button>
         <button class="gp-primary" data-gp-action="details-save">Save</button>
       </div>
     </div>
@@ -1866,12 +2163,20 @@ function createDetailsModal(
   const notesInput = backdrop.querySelector<HTMLTextAreaElement>('[data-gp-details-notes]');
   let currentProject: Project | null = null;
 
+  const autoGrow = (textarea: HTMLTextAreaElement | null) => {
+    if (!textarea) return;
+    textarea.style.height = 'auto';
+    textarea.style.height = `${Math.min(textarea.scrollHeight, 320)}px`;
+  };
+
   function open(project: Project) {
     currentProject = project;
     if (promptInput) promptInput.value = project.systemPrompt || '';
     if (notesInput) notesInput.value = project.notes || '';
     backdrop.style.display = 'flex';
-    promptInput?.focus();
+    autoGrow(promptInput);
+    autoGrow(notesInput);
+    window.setTimeout(() => promptInput?.focus(), 30);
   }
 
   function close() {
@@ -1884,8 +2189,14 @@ function createDetailsModal(
     }
   });
 
+  promptInput?.addEventListener('input', () => autoGrow(promptInput));
+  notesInput?.addEventListener('input', () => autoGrow(notesInput));
+
   const closeButton = backdrop.querySelector<HTMLButtonElement>('[data-gp-action="close"]');
   closeButton?.addEventListener('click', () => close());
+
+  const cancelButton = backdrop.querySelector<HTMLButtonElement>('[data-gp-action="details-cancel"]');
+  cancelButton?.addEventListener('click', () => close());
 
   const saveButton = backdrop.querySelector<HTMLButtonElement>('[data-gp-action="details-save"]');
   saveButton?.addEventListener('click', () => {
@@ -1920,10 +2231,14 @@ function createProjectMenu(layer: HTMLElement) {
   function open(anchorRect: DOMRect, project: Project, nextCallbacks: ProjectMenuCallbacks) {
     if (pinPending) return;
     callbacks = nextCallbacks;
+    const isFolder = project.kind === 'folder';
+    menu.setAttribute('aria-label', isFolder ? 'Folder actions' : 'Project actions');
+    // Projects and folders get separated menus: only projects expose the
+    // system prompt & notes workspace settings.
     menu.innerHTML = `
       <button type="button" role="menuitem" class="gp-menu-item" data-gp-menu="add-chat">${renderProjectActionIcon('addChat')}<span>Add current chat</span></button>
       <button type="button" role="menuitem" class="gp-menu-item" data-gp-menu="subfolder">${renderProjectActionIcon('subfolder')}<span>New subfolder</span></button>
-      <button type="button" role="menuitem" class="gp-menu-item" data-gp-menu="details">${renderProjectActionIcon('details')}<span>System prompt &amp; notes</span></button>
+      ${isFolder ? '' : `<button type="button" role="menuitem" class="gp-menu-item" data-gp-menu="details">${renderProjectActionIcon('details')}<span>System prompt &amp; notes</span></button>`}
       <div class="gp-menu-divider" role="separator"></div>
       <button type="button" role="menuitem" class="gp-menu-item" data-gp-menu="pin">${renderProjectActionIcon(project.isPinned ? 'unpin' : 'pin')}<span>${project.isPinned ? 'Unpin' : 'Pin'}</span></button>
       <button type="button" role="menuitem" class="gp-menu-item" data-gp-menu="edit">${renderProjectActionIcon('edit')}<span>Rename</span></button>
@@ -2011,67 +2326,47 @@ function createProjectMenu(layer: HTMLElement) {
   return { open, close };
 }
 
-// 聊天项右键菜单 (Chat row context menu)
-function createChatMenu(layer: HTMLElement, getProjects: () => Project[]) {
+// 聊天项菜单 (Chat row fallback menu, used when Gemini's native menu cannot be opened)
+function createChatMenu(layer: HTMLElement) {
   const menu = document.createElement('div');
   menu.className = 'gp-menu gp-chat-menu';
   layer.appendChild(menu);
 
   let callbacks: {
     onRemove: () => void;
-    onMoveToProject: (projectId: string) => void;
+    onMove: () => void;
   } | null = null;
-  let currentProjectId: string | null = null;
   let currentProjectName: string = '';
   let openedAt = 0;
 
   function open(
     anchorRect: DOMRect,
-    chatId: string,
-    projectId: string,
+    _chatId: string,
+    _projectId: string | null,
     projectName: string,
     nextCallbacks: {
       onRemove: () => void;
-      onMoveToProject: (projectId: string) => void;
+      onMove: () => void;
     }
   ) {
     callbacks = nextCallbacks;
-    currentProjectId = projectId;
     currentProjectName = projectName;
 
-    // 获取其他项目列表（排除当前项目）
-    const otherProjects = getProjects().filter(p => p.id !== projectId);
-
     menu.innerHTML = `
+      <div class="gp-menu-item" data-gp-chat-action="move">
+        <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M4 20h16a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.93a2 2 0 0 1-1.66-.9l-.82-1.2A2 2 0 0 0 7.93 2H4a2 2 0 0 0-2 2v13c0 1.1.9 2 2 2Z"/>
+          <path d="M8 13h8"/><path d="m13 10 3 3-3 3"/><path d="m11 16-3-3 3-3"/>
+        </svg>
+        <span>Move to project or folder…</span>
+      </div>
       <div class="gp-menu-item" data-gp-chat-action="remove">
         <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-          <path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/>
-          <polyline points="16 17 21 12 16 7"/>
-          <line x1="21" y1="12" x2="9" y2="12"/>
+          <path d="M4 20h16a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.93a2 2 0 0 1-1.66-.9l-.82-1.2A2 2 0 0 0 7.93 2H4a2 2 0 0 0-2 2v13c0 1.1.9 2 2 2Z"/>
+          <path d="M9.5 13.5h5"/>
         </svg>
-        <span>Remove from ${escapeHtml(projectName)}</span>
+        <span>${currentProjectName ? `Remove from ${escapeHtml(currentProjectName)}` : 'Remove from project'}</span>
       </div>
-      ${otherProjects.length > 0 ? `
-        <div class="gp-menu-item gp-submenu-trigger" data-gp-chat-action="move-trigger">
-          <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-            <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/>
-            <line x1="12" y1="11" x2="12" y2="17"/>
-            <line x1="9" y1="14" x2="15" y2="14"/>
-          </svg>
-          <span>Move to Project</span>
-          <svg class="gp-submenu-arrow" viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2">
-            <polyline points="9 18 15 12 9 6"/>
-          </svg>
-        </div>
-        <div class="gp-submenu" data-gp-submenu="move">
-          ${otherProjects.map(p => `
-            <div class="gp-menu-item" data-gp-chat-action="move" data-gp-target-project="${p.id}">
-              ${renderIconSvg(p.icon, p.color)}
-              <span>${escapeHtml(p.name)}</span>
-            </div>
-          `).join('')}
-        </div>
-      ` : ''}
     `;
 
     // 显示后按实际内容尺寸定位，不再依赖固定宽度。
@@ -2086,40 +2381,10 @@ function createChatMenu(layer: HTMLElement, getProjects: () => Project[]) {
     menu.style.left = `${left}px`;
     menu.style.top = `${top}px`;
     openedAt = performance.now();
-
-    // 子菜单悬停显示
-    const trigger = menu.querySelector('.gp-submenu-trigger');
-    const submenu = menu.querySelector('.gp-submenu') as HTMLElement | null;
-    if (trigger && submenu) {
-      trigger.addEventListener('mouseenter', () => {
-        submenu.style.display = 'block';
-        const triggerRect = trigger.getBoundingClientRect();
-        const submenuRect = submenu.getBoundingClientRect();
-        const preferredLeft = triggerRect.right - 4;
-        const submenuLeft = Math.max(8, Math.min(
-          preferredLeft + submenuRect.width <= window.innerWidth - 8
-            ? preferredLeft : triggerRect.left - submenuRect.width + 4,
-          window.innerWidth - submenuRect.width - 8
-        ));
-        const submenuTop = Math.max(8, Math.min(triggerRect.top, window.innerHeight - submenuRect.height - 8));
-        submenu.style.left = `${submenuLeft}px`;
-        submenu.style.top = `${submenuTop}px`;
-      });
-      trigger.addEventListener('mouseleave', (e) => {
-        const related = (e as MouseEvent).relatedTarget as HTMLElement | null;
-        if (related && submenu.contains(related)) return;
-        submenu.style.display = 'none';
-      });
-      submenu.addEventListener('mouseleave', () => {
-        submenu.style.display = 'none';
-      });
-    }
   }
 
   function close() {
     menu.style.display = 'none';
-    const submenu = menu.querySelector('.gp-submenu') as HTMLElement | null;
-    if (submenu) submenu.style.display = 'none';
   }
 
   menu.addEventListener('click', (event) => {
@@ -2131,11 +2396,8 @@ function createChatMenu(layer: HTMLElement, getProjects: () => Project[]) {
       callbacks.onRemove();
       close();
     } else if (action === 'move') {
-      const targetProjectId = target.dataset.gpTargetProject;
-      if (targetProjectId) {
-        callbacks.onMoveToProject(targetProjectId);
-        close();
-      }
+      callbacks.onMove();
+      close();
     }
   });
 
@@ -2153,6 +2415,265 @@ function createChatMenu(layer: HTMLElement, getProjects: () => Project[]) {
   });
 
   return { open, close };
+}
+
+/**
+ * Searchable hierarchical picker used by "Add to project", "Add to folder" and
+ * "Move to project or folder…". Renders the full folder structure (projects,
+ * folders and nested subfolders) with search across all levels.
+ */
+function createTargetPickerModal(layer: HTMLElement) {
+  const backdrop = document.createElement('div');
+  backdrop.className = 'gp-modal-backdrop';
+  backdrop.innerHTML = `
+    <div class="gp-modal gp-picker-modal" role="dialog" aria-modal="true">
+      <div class="gp-modal-header">
+        <span data-gp-picker-title>Move to project or folder</span>
+        <button class="gp-modal-close" data-gp-action="close" aria-label="Close">
+          <svg viewBox="0 0 24 24" aria-hidden="true">
+            <path d="M6 6l12 12M18 6L6 18" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/>
+          </svg>
+        </button>
+      </div>
+      <div class="gp-picker-search" data-gp-picker-searchbox>
+        <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="m21 21-4.3-4.3"/></svg>
+        <input class="gp-picker-search-input" data-gp-picker-search type="text" placeholder="Search projects and folders…" autocomplete="off" spellcheck="false" />
+      </div>
+      <div class="gp-picker-list" data-gp-picker-list role="listbox" aria-label="Projects and folders"></div>
+      <div class="gp-picker-empty" data-gp-picker-empty style="display: none;">No matches</div>
+    </div>
+  `;
+  layer.appendChild(backdrop);
+
+  const titleElement = backdrop.querySelector<HTMLElement>('[data-gp-picker-title]');
+  const searchInput = backdrop.querySelector<HTMLInputElement>('[data-gp-picker-search]');
+  const listElement = backdrop.querySelector<HTMLElement>('[data-gp-picker-list]');
+  const emptyElement = backdrop.querySelector<HTMLElement>('[data-gp-picker-empty]');
+
+  const TITLE_BY_MODE: Record<TargetPickerMode, string> = {
+    project: 'Add to project',
+    folder: 'Add to folder',
+    all: 'Move to project or folder'
+  };
+
+  interface PickerEntry {
+    project: Project;
+    depth: number;
+    children: PickerEntry[];
+    chatCount: number;
+  }
+
+  let currentChatIndex: Map<string, ChatRef> = new Map();
+  let expandedNodes = new Set<string>();
+  let query = '';
+  let pickHandler: ((projectId: string) => void) | null = null;
+  let currentProjectId: string | null = null;
+  let currentMode: TargetPickerMode = 'all';
+  let currentStateProjectsProvider: (() => Project[]) | null = null;
+
+  function buildForest(projects: Project[], mode: TargetPickerMode): PickerEntry[] {
+    const chatCountOf = (projectId: string): number =>
+      Array.from(currentChatIndex.values()).filter((chat) => chat.projectId === projectId).length;
+
+    const sortEntries = (entries: PickerEntry[]) =>
+      entries.sort((a, b) =>
+        Number(b.project.isPinned === true) - Number(a.project.isPinned === true) ||
+        a.project.sortIndex - b.project.sortIndex
+      );
+
+    const buildChildren = (parentId: string, depth: number): PickerEntry[] => {
+      const children = projects
+        .filter((project) => (project.parentId ?? null) === parentId)
+        .map((project) => ({
+          project,
+          depth,
+          children: buildChildren(project.id, depth + 1),
+          chatCount: chatCountOf(project.id)
+        }));
+      return sortEntries(children);
+    };
+
+    const rootKinds: ('project' | 'folder')[] =
+      mode === 'project' ? ['project'] : mode === 'folder' ? ['folder'] : ['project', 'folder'];
+
+    const forest: PickerEntry[] = [];
+    for (const kind of rootKinds) {
+      forest.push(...sortEntries(projects
+        .filter((project) => (project.parentId ?? null) === null && project.kind === kind)
+        .map((project) => ({
+          project,
+          depth: 0,
+          children: buildChildren(project.id, 1),
+          chatCount: chatCountOf(project.id)
+        }))));
+    }
+    return forest;
+  }
+
+  function matchesQuery(entry: PickerEntry, normalizedQuery: string): boolean {
+    const selfMatch = (entry.project.name || '').toLowerCase().includes(normalizedQuery);
+    const childMatch = entry.children.some((child) => matchesQuery(child, normalizedQuery));
+    return selfMatch || childMatch;
+  }
+
+  function highlightName(name: string, normalizedQuery: string): string {
+    const escaped = escapeHtml(name);
+    if (!normalizedQuery) return escaped;
+    const lowerName = (name || '').toLowerCase();
+    const index = lowerName.indexOf(normalizedQuery);
+    if (index < 0) return escaped;
+    const before = escapeHtml(name.slice(0, index));
+    const match = escapeHtml(name.slice(index, index + normalizedQuery.length));
+    const after = escapeHtml(name.slice(index + normalizedQuery.length));
+    return `${before}<mark class="gp-picker-mark">${match}</mark>${after}`;
+  }
+
+  function renderEntry(entry: PickerEntry, normalizedQuery: string): string {
+    const isFolder = entry.project.kind === 'folder';
+    const hasChildren = entry.children.length > 0;
+    const isExpanded = expandedNodes.has(entry.project.id);
+    const isCurrent = entry.project.id === currentProjectId;
+    const iconMarkup = isFolder
+      ? FOLDER_ROW_ICON
+      : renderIconSvg(entry.project.icon, entry.project.color);
+    const indent = 14 * entry.depth;
+    const childrenMarkup = hasChildren && isExpanded
+      ? `<div class="gp-picker-children">${entry.children
+        .filter((child) => matchesQuery(child, normalizedQuery))
+        .map((child) => renderEntry(child, normalizedQuery))
+        .join('')}</div>`
+      : '';
+
+    return `
+      <div class="gp-picker-node" data-gp-picker-id="${entry.project.id}" role="option" aria-selected="${String(isCurrent)}" tabindex="0">
+        <div class="gp-picker-row ${isCurrent ? 'current' : ''}" style="padding-left: ${10 + indent}px;">
+          ${hasChildren
+            ? `<span class="gp-picker-twist ${isExpanded ? 'open' : ''}" data-gp-picker-twist aria-label="Toggle">${TWIST_CHEVRON_ICON}</span>`
+            : '<span class="gp-picker-twist-spacer"></span>'}
+          <span class="gp-picker-icon ${isFolder ? 'is-folder' : ''}">${iconMarkup}</span>
+          <span class="gp-picker-name">${highlightName(entry.project.name, normalizedQuery)}</span>
+          ${entry.chatCount > 0 ? `<span class="gp-picker-count">${entry.chatCount}</span>` : ''}
+          ${isCurrent ? '<span class="gp-picker-current-badge">Current</span>' : ''}
+        </div>
+        ${childrenMarkup}
+      </div>
+    `;
+  }
+
+  function renderList(projects: Project[], mode: TargetPickerMode) {
+    if (!listElement) return;
+    const normalizedQuery = query.trim().toLowerCase();
+    const forest = buildForest(projects, mode);
+    const visibleForest = normalizedQuery
+      ? forest.filter((entry) => matchesQuery(entry, normalizedQuery))
+      : forest;
+
+    if (!visibleForest.length) {
+      listElement.innerHTML = '';
+      if (emptyElement) emptyElement.style.display = 'block';
+      return;
+    }
+    if (emptyElement) emptyElement.style.display = 'none';
+    listElement.innerHTML = visibleForest.map((entry) => renderEntry(entry, normalizedQuery)).join('');
+  }
+
+  function open(config: {
+    mode: TargetPickerMode;
+    projects: Project[];
+    chatIndex: Map<string, ChatRef>;
+    currentProjectId: string | null;
+    onPick: (projectId: string) => void;
+  }) {
+    currentChatIndex = config.chatIndex;
+    currentProjectId = config.currentProjectId;
+    currentMode = config.mode;
+    pickHandler = config.onPick;
+    query = '';
+    expandedNodes = new Set(config.projects.map((project) => project.id));
+    if (titleElement) titleElement.textContent = TITLE_BY_MODE[config.mode];
+    if (searchInput) searchInput.value = '';
+    renderList(config.projects, config.mode);
+    backdrop.style.display = 'flex';
+    window.setTimeout(() => searchInput?.focus(), 30);
+  }
+
+  function close() {
+    backdrop.style.display = 'none';
+    pickHandler = null;
+  }
+
+  backdrop.addEventListener('click', (event) => {
+    if (event.target === backdrop) {
+      close();
+    }
+  });
+
+  backdrop.querySelector<HTMLButtonElement>('[data-gp-action="close"]')?.addEventListener('click', () => close());
+
+  const rerender = () => {
+    renderList(currentStateProjectsProvider?.() ?? [], currentMode);
+  };
+
+  searchInput?.addEventListener('input', () => {
+    query = searchInput.value || '';
+    // While searching, auto-expand every branch so matched subfolders stay
+    // visible within their hierarchy.
+    expandedNodes = new Set(
+      Array.from(backdrop.querySelectorAll<HTMLElement>('.gp-picker-node'))
+        .map((node) => node.dataset.gpPickerId || '')
+        .filter(Boolean)
+    );
+    rerender();
+  });
+
+  listElement?.addEventListener('click', (event) => {
+    const target = event.target as HTMLElement | null;
+    if (!target) return;
+
+    const twist = target.closest<HTMLElement>('[data-gp-picker-twist]');
+    if (twist) {
+      const node = twist.closest<HTMLElement>('.gp-picker-node');
+      const id = node?.dataset.gpPickerId;
+      if (id) {
+        if (expandedNodes.has(id)) expandedNodes.delete(id);
+        else expandedNodes.add(id);
+        rerender();
+      }
+      return;
+    }
+
+    const row = target.closest<HTMLElement>('.gp-picker-node');
+    const id = row?.dataset.gpPickerId;
+    if (id && pickHandler) {
+      pickHandler(id);
+      close();
+    }
+  });
+
+  listElement?.addEventListener('keydown', (event) => {
+    if (event.key !== 'Enter' && event.key !== ' ') return;
+    const row = (event.target as HTMLElement | null)?.closest<HTMLElement>('.gp-picker-node');
+    const id = row?.dataset.gpPickerId;
+    if (id && pickHandler) {
+      event.preventDefault();
+      pickHandler(id);
+      close();
+    }
+  });
+
+  document.addEventListener('keydown', (event) => {
+    if (event.key === 'Escape' && backdrop.style.display === 'flex') {
+      close();
+    }
+  });
+
+  return {
+    open,
+    close,
+    setProjectsProvider: (provider: () => Project[]) => {
+      currentStateProjectsProvider = provider;
+    }
+  };
 }
 
 function createToast(layer: HTMLElement) {

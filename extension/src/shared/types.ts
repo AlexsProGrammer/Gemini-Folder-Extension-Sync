@@ -104,6 +104,7 @@ export interface ChatRef {
 
 export interface UiPrefs {
   projectsCollapsed: boolean;
+  foldersCollapsed: boolean;
 }
 
 export interface StoredState {
@@ -136,6 +137,7 @@ export type BackgroundRequest =
   | { type: 'setProjectPinned'; projectId: string; isPinned: boolean }
   | { type: 'deleteProject'; projectId: string }
   | { type: 'moveChat'; conversationId: string; projectId: string | null }
+  | { type: 'setChatPinned'; conversationId: string; isPinned: boolean }
   | { type: 'upsertChatRefs'; chats: ChatRef[] }
   | { type: 'exportProject'; projectId: string }
   | { type: 'updateUiPrefs'; prefs: Partial<UiPrefs> }

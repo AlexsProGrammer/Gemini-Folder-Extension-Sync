@@ -36,7 +36,7 @@ const state: RuntimeState = {
     contextMenuOpen: false,
     pendingMoveConversationId: null
   },
-  uiPrefs: { projectsCollapsed: false }
+  uiPrefs: { projectsCollapsed: false, foldersCollapsed: false }
 };
 
 let panel: ReturnType<typeof createProjectsPanel> | null = null;
@@ -50,7 +50,7 @@ let chatsObserver: MutationObserver | null = null;
 let rescanTimer: number | null = null;
 let pendingPanelRetryCount = 0;
 let lastRenderKey = '';
-let chatMenuAttached = false;
+let chatMenuHandle: { openNativeChatMenu: (conversationId: string, anchorRect: DOMRect) => Promise<boolean> } | null = null;
 let chatMenuOverlayShadow: ShadowRoot | null = null;
 
 function sendMessage(message: BackgroundRequest): Promise<BackgroundResponse> {
@@ -83,7 +83,11 @@ async function loadInitialState() {
     if (!response.ok || !response.state) return;
     state.projects = response.state.projects;
     state.chatIndex = new Map(Object.entries(response.state.chatIndex));
-    state.uiPrefs = response.state.uiPrefs || { projectsCollapsed: false };
+    const prefs = response.state.uiPrefs;
+    state.uiPrefs = {
+      projectsCollapsed: prefs?.projectsCollapsed === true,
+      foldersCollapsed: prefs?.foldersCollapsed === true
+    };
   } catch (error) {
     console.warn('[gemini-projects] getState failed; starting with local empty state', error);
   }
@@ -223,6 +227,11 @@ function ensurePanel() {
         handleAddCurrentChat(projectId).catch((error) =>
           console.warn('[gemini-projects] add current chat failed', error)
         );
+      },
+      onChatMenuOpen: (conversationId, anchorRect) => {
+        handlePanelChatMenu(conversationId, anchorRect).catch((error) =>
+          console.warn('[gemini-projects] panel chat menu failed', error)
+        );
       }
     });
     panelHost = host;
@@ -232,22 +241,58 @@ function ensurePanel() {
     lastRenderKey = '';
   }
 
-  if (!chatMenuAttached || chatMenuOverlayShadow !== overlayShadow) {
-    attachChatMenuEnhancer({
-      overlayShadow,
-      getProjects: () => state.projects,
+  if (!chatMenuHandle || chatMenuOverlayShadow !== overlayShadow) {
+    chatMenuHandle = attachChatMenuEnhancer({
       getChatProjectId: (conversationId) => state.chatIndex.get(conversationId)?.projectId ?? null,
-      onMoveChat: (conversationId, projectId) => {
-        handleMoveChat(conversationId, projectId).catch((error) =>
-          console.warn('[gemini-projects] move from menu failed', error)
+      getProjectName: (projectId) => state.projects.find((item) => item.id === projectId)?.name ?? '',
+      onPickTarget: (conversationId, mode) => panel?.openTargetPicker(conversationId, mode),
+      onRemoveChat: (conversationId) => {
+        handleMoveChat(conversationId, null).catch((error) =>
+          console.warn('[gemini-projects] remove from menu failed', error)
         );
       },
-      onCreateProject: () => panel?.openCreateModal()
+      onToggleChatPin: (conversationId, isPinned) => {
+        handleSetChatPinned(conversationId, isPinned).catch((error) =>
+          console.warn('[gemini-projects] chat pin sync failed', error)
+        );
+      },
+      onMenuClosed: () => scheduleRescan(0),
+      onFallbackMenu: (conversationId, anchorRect) => panel?.showChatMenuFallback(conversationId, anchorRect)
     });
-    chatMenuAttached = true;
     chatMenuOverlayShadow = overlayShadow;
   }
   return true;
+}
+
+/**
+ * Chat kebab inside the projects panel: reuse Gemini's native context menu
+ * (rename / pin / delete / share all keep working) and augment it with the
+ * extension's own items. Falls back to the extension menu when the native
+ * menu cannot be opened (for example when the native row was deleted).
+ */
+async function handlePanelChatMenu(conversationId: string, anchorRect: DOMRect): Promise<void> {
+  if (chatMenuHandle) {
+    try {
+      const opened = await chatMenuHandle.openNativeChatMenu(conversationId, anchorRect);
+      if (opened) return;
+    } catch (error) {
+      console.warn('[gemini-projects] native chat menu failed', error);
+    }
+  }
+  panel?.showChatMenuFallback(conversationId, anchorRect);
+}
+
+async function handleSetChatPinned(conversationId: string, isPinned: boolean): Promise<void> {
+  const existing = state.chatIndex.get(conversationId);
+  if (existing && existing.isPinned !== isPinned) {
+    state.chatIndex.set(conversationId, { ...existing, isPinned, updatedAt: Date.now() });
+    renderPanelIfChanged(true);
+  }
+  try {
+    await sendMessage({ type: 'setChatPinned', conversationId, isPinned });
+  } catch (error) {
+    console.warn('[gemini-projects] setChatPinned failed', error);
+  }
 }
 
 function ensureChatsList() {
@@ -279,6 +324,21 @@ function ensureChatsList() {
   chatsObserver.observe(chatsList, { childList: true, subtree: true });
 }
 
+/**
+ * Best-effort detection of Gemini's native pin state directly from the row
+ * DOM (rows that expose an "Unpin"-labelled control are pinned).
+ */
+function detectNativePinned(row: HTMLElement): boolean {
+  const labeled = row.querySelectorAll<HTMLElement>('[aria-label], [title]');
+  for (const node of Array.from(labeled)) {
+    const label = `${node.getAttribute('aria-label') || ''} ${node.getAttribute('title') || ''}`.toLowerCase();
+    if (/unpin|un-pin|nicht anpinnen|anpinnen aufheben|loslösen|取消置顶|取消置頂|解除置顶|取消釘選/.test(label)) {
+      return true;
+    }
+  }
+  return false;
+}
+
 function syncNativeChatsFromDom() {
   if (!chatsList) {
     state.nativeConversationIds = new Set();
@@ -302,7 +362,7 @@ function syncNativeChatsFromDom() {
     updates.push({
       conversationId,
       title: title || existing?.title || 'Untitled chat',
-      isPinned: existing?.isPinned ?? false,
+      isPinned: existing?.isPinned === true || detectNativePinned(row as HTMLElement),
       projectId: existing?.projectId ?? null,
       updatedAt: existing?.updatedAt ?? Date.now(),
       lastUrl
@@ -469,9 +529,14 @@ async function handleToggleProjectPin(projectId: string, isPinned: boolean) {
   renderPanelIfChanged(true);
 }
 
-function handleToggleCollapse(collapsed: boolean) {
-  state.uiPrefs.projectsCollapsed = collapsed;
-  sendMessage({ type: 'updateUiPrefs', prefs: { projectsCollapsed: collapsed } }).catch(() => undefined);
+function handleToggleCollapse(section: 'projects' | 'folders', collapsed: boolean) {
+  if (section === 'projects') {
+    state.uiPrefs.projectsCollapsed = collapsed;
+    sendMessage({ type: 'updateUiPrefs', prefs: { projectsCollapsed: collapsed } }).catch(() => undefined);
+  } else {
+    state.uiPrefs.foldersCollapsed = collapsed;
+    sendMessage({ type: 'updateUiPrefs', prefs: { foldersCollapsed: collapsed } }).catch(() => undefined);
+  }
   renderPanelIfChanged(true);
 }
 
@@ -491,6 +556,7 @@ async function handleMoveChat(conversationId: string, projectId: string | null) 
   if (!response.ok || !response.state) return;
   state.projects = response.state.projects ?? state.projects;
   state.chatIndex = new Map(Object.entries(response.state.chatIndex));
+  if (projectId) state.expandedProjectIds.add(projectId);
   applyNativeChatVisibility();
   renderPanelIfChanged(true);
 }
@@ -626,11 +692,11 @@ function getRenderKey(): string {
     .filter((chat) => chat.projectId)
     .map((chat) => {
       const missing = state.nativeChatsReady && !state.nativeConversationIds.has(chat.conversationId);
-      return `${chat.conversationId}:${chat.title}:${chat.projectId}:${chat.lastUrl || ''}:${chat.updatedAt}:${missing}`;
+      return `${chat.conversationId}:${chat.title}:${chat.projectId}:${chat.lastUrl || ''}:${chat.updatedAt}:${chat.isPinned ? 1 : 0}:${missing}`;
     })
     .sort()
     .join('|');
-  return `${state.uiPrefs.projectsCollapsed}|${Array.from(state.expandedProjectIds).sort().join(',')}|${projects}|${chats}`;
+  return `${state.uiPrefs.projectsCollapsed}|${state.uiPrefs.foldersCollapsed}|${Array.from(state.expandedProjectIds).sort().join(',')}|${projects}|${chats}`;
 }
 
 function withTimeout<T>(promise: Promise<T>, timeoutMs: number): Promise<T> {

@@ -79,6 +79,13 @@ function moveChat(state: StoredState, conversationId: string, projectId: string 
   return state;
 }
 
+function setChatPinned(state: StoredState, conversationId: string, isPinned: boolean): StoredState {
+  const existing = state.chatIndex[conversationId];
+  if (!existing) return state;
+  state.chatIndex[conversationId] = { ...existing, isPinned, updatedAt: Date.now() };
+  return state;
+}
+
 function upsertChatRefs(state: StoredState, chats: ChatRef[]): StoredState {
   chats.forEach((chat) => {
     const existing = state.chatIndex[chat.conversationId];
@@ -167,6 +174,9 @@ async function handleMessage(message: BackgroundRequest): Promise<BackgroundResp
       return { ok: true, state };
     case 'moveChat':
       await persist(moveChat(state, message.conversationId, message.projectId));
+      return { ok: true, state };
+    case 'setChatPinned':
+      await persist(setChatPinned(state, message.conversationId, message.isPinned));
       return { ok: true, state };
     case 'upsertChatRefs':
       await persist(upsertChatRefs(state, message.chats));
