@@ -2,7 +2,7 @@
 
 Add local Projects and a Prompt Library to Gemini.
 
-English | [简体中文](README.zh-CN.md)
+English
 
 ## What It Does
 
