@@ -1,6 +1,13 @@
 import { BackgroundRequest, BackgroundResponse, ChatRef, Project, RuntimeState } from '../shared/types';
 import { runtimeSendMessage } from '../shared/webext';
-import { ACCOUNT_CHANGED_EVENT, AccountChangeDetail, initAccountWatcher } from './accountWatcher';
+import { onWorkspaceSaved } from '../shared/storage';
+import {
+  syncEngine,
+  SYNC_CONFLICT_EVENT,
+  SYNC_STATUS_EVENT,
+  WORKSPACE_UPDATED_EVENT
+} from '../shared/syncEngine';
+import { ACCOUNT_CHANGED_EVENT, AccountChangeDetail, getActiveAccountHash, initAccountWatcher } from './accountWatcher';
 import {
   findChatRowElement,
   findChatsListContainer,
@@ -57,6 +64,60 @@ function sendMessage(message: BackgroundRequest): Promise<BackgroundResponse> {
   return runtimeSendMessage<BackgroundResponse>(message);
 }
 
+/**
+ * Sync engine bootstrap: local workspace writes debounce a background push,
+ * window focus / connectivity changes trigger reconciliation pulls, and
+ * remote updates refresh the sidebar without a page reload.
+ */
+function initWorkspaceSync(): void {
+  onWorkspaceSaved((accountHash) => syncEngine.schedulePush(accountHash));
+
+  window.addEventListener('focus', () => {
+    const accountHash = getActiveAccountHash();
+    if (!accountHash) return;
+    syncEngine.pull(accountHash).catch((error) =>
+      console.warn('[gemini-projects] focus pull failed', error)
+    );
+  });
+
+  window.addEventListener('online', () => {
+    syncEngine.setOnlineState(true);
+    const accountHash = getActiveAccountHash();
+    if (!accountHash) return;
+    syncEngine.pull(accountHash).catch((error) =>
+      console.warn('[gemini-projects] reconnect pull failed', error)
+    );
+  });
+
+  window.addEventListener('offline', () => {
+    syncEngine.setOnlineState(false);
+  });
+
+  window.addEventListener(WORKSPACE_UPDATED_EVENT, () => {
+    loadInitialState()
+      .catch(() => undefined)
+      .then(() => {
+        applyNativeChatVisibility();
+        renderPanelIfChanged(true);
+        scheduleRescan(0);
+      });
+  });
+
+  window.addEventListener(SYNC_CONFLICT_EVENT, (event) => {
+    const detail = (event as CustomEvent).detail as {
+      accountId?: string;
+      localState?: unknown;
+      remoteState?: unknown;
+    };
+    console.warn('[gemini-projects] sync conflict awaiting resolution', detail?.accountId);
+  });
+
+  window.addEventListener(SYNC_STATUS_EVENT, (event) => {
+    const detail = (event as CustomEvent).detail as { accountId?: string; status?: string; message?: string };
+    console.debug('[gemini-projects] sync status', detail?.status, detail?.message ?? '');
+  });
+}
+
 async function bootstrap() {
   document.documentElement.setAttribute('data-gp-build', BUILD_MARKER);
 
@@ -69,6 +130,7 @@ async function bootstrap() {
   installNativeHideStyle();
   installChatDragSources();
   initAccountWatcher();
+  initWorkspaceSync();
   window.addEventListener(ACCOUNT_CHANGED_EVENT, handleAccountChanged);
   await loadInitialState();
   observeDocumentForSidebar();

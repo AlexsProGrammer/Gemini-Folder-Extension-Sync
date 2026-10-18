@@ -52,6 +52,26 @@ export type TagMetaSchemaOutput = z.infer<typeof TagMetaSchema>;
 export type PromptTemplateSchemaOutput = z.infer<typeof PromptTemplateSchema>;
 export type WorkspacePayloadSchemaOutput = z.infer<typeof WorkspacePayloadSchema>;
 
+/** Encrypted envelope accepted by the backend POST /api/v1/sync/:accountId. */
+export const EncryptedSyncEnvelopeSchema = z.object({
+  version: z.number().int().min(1),
+  ciphertext: z.string().min(1),
+  iv: z.string().min(1),
+  updatedAt: z.number().int().min(1)
+});
+
+/** Full server blob row returned by GET /api/v1/sync/:accountId and by 409 conflicts. */
+export const RemoteSyncBlobSchema = EncryptedSyncEnvelopeSchema.extend({
+  accountId: z.string().min(1)
+});
+
+/** Server confirmation body for a successful push. */
+export const SyncConfirmationSchema = z.object({
+  status: z.literal('success'),
+  version: z.number().int().min(1),
+  updatedAt: z.number().int().min(1)
+});
+
 export function parseWorkspace(raw: unknown): WorkspacePayloadSchemaOutput {
   return WorkspacePayloadSchema.parse(raw);
 }

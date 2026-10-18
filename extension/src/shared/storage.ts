@@ -1,4 +1,4 @@
-import { ChatRef, Project, PromptTemplate, StoredState, TagMeta, UiPrefs, WorkspacePayload } from './types';
+import { ChatRef, Project, PromptTemplate, StoredState, SyncConfig, TagMeta, UiPrefs, WorkspacePayload } from './types';
 import { storageLocalGet, storageLocalSet } from './webext';
 import { WorkspacePayloadSchema } from './schemas';
 
@@ -312,6 +312,83 @@ export async function saveWorkspace(accountHash: string, data: WorkspacePayload)
   };
   const validated = WorkspacePayloadSchema.parse(next) as WorkspacePayload;
   await storageLocalSet({ [getWorkspaceKey(accountHash)]: validated });
+  notifyWorkspaceSaved(accountHash);
+}
+
+/**
+ * Persists a workspace payload exactly as provided, without bumping the
+ * revision counter. Used by the sync engine when adopting a remote state
+ * (auto-pull and conflict resolution) so server versions stay authoritative.
+ * Deliberately does NOT fire the saved-listener: adopting remote data must
+ * never schedule a redundant re-push.
+ */
+export async function putWorkspace(accountHash: string, data: WorkspacePayload): Promise<void> {
+  const validated = WorkspacePayloadSchema.parse({
+    ...data,
+    schemaVersion: WORKSPACE_SCHEMA_VERSION,
+    accountId: accountHash
+  }) as WorkspacePayload;
+  await storageLocalSet({ [getWorkspaceKey(accountHash)]: validated });
+}
+
+/** True when a workspace partition already exists on disk (no migration side effects). */
+export async function hasWorkspace(accountHash: string): Promise<boolean> {
+  const key = getWorkspaceKey(accountHash);
+  const result = await storageLocalGet<Record<string, unknown>>([key]);
+  return result[key] !== undefined;
+}
+
+type WorkspaceSavedListener = (accountHash: string) => void;
+
+const workspaceSavedListeners = new Set<WorkspaceSavedListener>();
+
+function notifyWorkspaceSaved(accountHash: string): void {
+  workspaceSavedListeners.forEach((listener) => {
+    try {
+      listener(accountHash);
+    } catch (error) {
+      console.warn('[gemini-projects] workspace saved listener failed', error);
+    }
+  });
+}
+
+/**
+ * Registers a callback fired after every workspace partition write. The sync
+ * engine uses this hook to debounce a remote push whenever local data changes.
+ * Returns an unsubscribe function.
+ */
+export function onWorkspaceSaved(listener: WorkspaceSavedListener): () => void {
+  workspaceSavedListeners.add(listener);
+  return () => {
+    workspaceSavedListeners.delete(listener);
+  };
+}
+
+/* ------------------------------------------------------------------ *
+ * Sync connection settings (user-configured VPS endpoint)
+ * ------------------------------------------------------------------ */
+
+export const SYNC_CONFIG_KEY = 'gemini_sync_config';
+
+export async function getSyncConfig(): Promise<SyncConfig | null> {
+  const result = await storageLocalGet<Record<string, unknown>>([SYNC_CONFIG_KEY]);
+  const raw = result[SYNC_CONFIG_KEY];
+  if (!raw || typeof raw !== 'object') return null;
+
+  const candidate = raw as Partial<SyncConfig>;
+  const serverUrl = typeof candidate.serverUrl === 'string' ? candidate.serverUrl.trim().replace(/\/+$/, '') : '';
+  const apiKey = typeof candidate.apiKey === 'string' ? candidate.apiKey : '';
+  if (!serverUrl || !apiKey) return null;
+
+  return { serverUrl, apiKey };
+}
+
+export async function saveSyncConfig(config: SyncConfig): Promise<void> {
+  const normalized: SyncConfig = {
+    serverUrl: config.serverUrl.trim().replace(/\/+$/, ''),
+    apiKey: config.apiKey
+  };
+  await storageLocalSet({ [SYNC_CONFIG_KEY]: normalized });
 }
 
 function nextSiblingOrder(workspace: WorkspacePayload, parentId: string | null): number {

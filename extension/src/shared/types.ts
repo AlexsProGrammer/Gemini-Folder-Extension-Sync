@@ -130,6 +130,77 @@ export interface RuntimeState {
   uiPrefs: UiPrefs;
 }
 
+/* ------------------------------------------------------------------ *
+ * Sync protocol (routed through the background CORS proxy)
+ * ------------------------------------------------------------------ */
+
+/** Connection settings for the user's self-hosted VPS sync server. */
+export interface SyncConfig {
+  serverUrl: string;
+  apiKey: string;
+}
+
+/** Encrypted envelope pushed to / received from the server. */
+export interface EncryptedSyncEnvelope {
+  version: number;
+  ciphertext: string;
+  iv: string;
+  updatedAt: number;
+}
+
+/** Full server-side blob row (GET /api/v1/sync/:accountId response). */
+export interface RemoteSyncBlob extends EncryptedSyncEnvelope {
+  accountId: string;
+}
+
+export interface SyncPullMessage {
+  action: 'SYNC_PULL';
+  accountId: string;
+  serverUrl: string;
+  apiKey: string;
+}
+
+export interface SyncPushMessage {
+  action: 'SYNC_PUSH';
+  accountId: string;
+  serverUrl: string;
+  apiKey: string;
+  data: EncryptedSyncEnvelope;
+}
+
+export type SyncMessage = SyncPullMessage | SyncPushMessage;
+
+export type SyncErrorKind = 'unauthorized' | 'not_found' | 'conflict' | 'network_error';
+
+export type SyncApiResponse<T> =
+  | { success: true; data: T }
+  | {
+      success: false;
+      error: SyncErrorKind;
+      serverState?: RemoteSyncBlob;
+      status?: number;
+      message?: string;
+    };
+
+/* ------------------------------------------------------------------ *
+ * Sync engine state
+ * ------------------------------------------------------------------ */
+
+export type SyncStatus = 'idle' | 'syncing' | 'synced' | 'conflict' | 'error' | 'offline';
+
+export type SyncResolution = 'keep_local' | 'keep_remote' | 'merge';
+
+export interface SyncConflictDetail {
+  localState: WorkspacePayload;
+  remoteState: WorkspacePayload;
+}
+
+export interface SyncStatusDetail {
+  accountId: string;
+  status: SyncStatus;
+  message?: string;
+}
+
 export type BackgroundRequest =
   | { type: 'getState' }
   | { type: 'upsertProject'; project: Project }
