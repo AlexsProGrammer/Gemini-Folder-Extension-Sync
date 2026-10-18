@@ -1,1 +1,27 @@
+# Dependencies
+node_modules/
+
+# Build output
+dist/
+
+# Environment
+.env
+.env.local
+*.pem
+*.key
+
+# Backend local data
+backend/data/
+
+# TypeScript incremental builds
+*.tsbuildinfo
+
+# Logs
+*.log
+
+# OS / editor
+.DS_Store
+Thumbs.db
+
+# Kilo Code
 .kilo/

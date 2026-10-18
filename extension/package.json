@@ -5,6 +5,9 @@
   "type": "module",
   "scripts": {
     "build": "node ./scripts/build.mjs",
+    "build:chrome": "node ./scripts/build.mjs --target=chrome",
+    "build:firefox": "node ./scripts/build.mjs --target=firefox",
+    "build:all": "node ./scripts/build.mjs",
     "dev": "vite build --watch",
     "lint": "tsc -p tsconfig.json --noEmit",
     "package:store": "node ./scripts/package-store.mjs",

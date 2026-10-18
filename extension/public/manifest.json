@@ -9,9 +9,21 @@
     "host_permissions": [
         "https://gemini.google.com/*"
     ],
+    "optional_host_permissions": [
+        "https://*/*",
+        "http://*/*"
+    ],
+    "browser_specific_settings": {
+        "gecko": {
+            "id": "gemini-workspace-sync@local.dev",
+            "strict_min_version": "121.0"
+        }
+    },
     "background": {
         "service_worker": "background.js",
-        "type": "module"
+        "scripts": [
+            "background.js"
+        ]
     },
     "content_scripts": [
         {
