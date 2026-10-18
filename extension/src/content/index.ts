@@ -610,6 +610,10 @@ async function handleSetChatPinned(conversationId: string, isPinned: boolean): P
     const accountHash = await resolveActiveAccountHash();
     const next = await setWorkspaceChatPinned(accountHash, conversationId, isPinned);
     applyStoredState(next);
+    // Pinning can make Gemini re-render/relocate the row (e.g. into its pinned
+    // group); re-apply hiding right away so a chat inside a project/folder
+    // never leaves its pin marker behind in the All list.
+    applyNativeChatVisibility();
     renderPanelIfChanged(true);
   } catch (error) {
     console.warn('[gemini-projects] setChatPinned failed', error);
@@ -647,9 +651,23 @@ function ensureChatsList() {
 
 /**
  * Best-effort detection of Gemini's native pin state directly from the row
- * DOM (rows that expose an "Unpin"-labelled control are pinned).
+ * DOM. Two signals, checked in order:
+ *
+ * 1. Gemini's own pin marker: `<gem-icon fonticonname="push_pin">` rendered
+ *    with the `conversation-pin-icon` class (localized aria-labels such as
+ *    "Angepinnter Chat" / "Pinned chat" are unreliable to parse, so the icon
+ *    identity is matched instead).
+ * 2. Fallback: any labelled control exposing an "Unpin"-style label (rows
+ *    without a visible pin marker but with an unpin action are pinned).
  */
 function detectNativePinned(row: HTMLElement): boolean {
+  // Gemini renders the pin badge as a Material "push_pin" font icon inside
+  // a gem-icon. Match the icon identity rather than the localized label.
+  const pinIcons = row.querySelectorAll<HTMLElement>(
+    'gem-icon[fonticonname="push_pin"], mat-icon[fonticon="push_pin"], .conversation-pin-icon'
+  );
+  if (pinIcons.length > 0) return true;
+
   const labeled = row.querySelectorAll<HTMLElement>('[aria-label], [title]');
   for (const node of Array.from(labeled)) {
     const label = `${node.getAttribute('aria-label') || ''} ${node.getAttribute('title') || ''}`.toLowerCase();
@@ -720,16 +738,19 @@ function syncNativeChatsFromDom() {
 }
 
 function applyNativeChatVisibility() {
-  if (!chatsList) return;
+  if (!sidebarRoot) return;
 
-  const touchedRows = new Set<HTMLElement>();
-  for (const link of collectNativeChatLinks(chatsList)) {
-    const row = findChatRowElement(link, chatsList);
-    const conversationId = getConversationId(link.href) || getConversationIdFromChatRow(row);
-    const target = getNativeChatVisibilityTarget(row, link, chatsList);
-    if (!conversationId || !target) continue;
+  const touchedNodes = new Set<HTMLElement>();
+  // Scan the whole sidebar, not just the resolved chats list: Gemini can keep
+  // pinned conversations in their own group outside of it, and those rows must
+  // disappear from the All list as well once the chat joins a project/folder.
+  for (const link of collectNativeChatLinks(sidebarRoot)) {
+    const conversationId = getConversationId(link.href);
+    if (!conversationId) continue;
+    const target = findNativeChatHideTarget(link, conversationId);
+    if (!target) continue;
 
-    touchedRows.add(target);
+    touchedNodes.add(target);
     target.draggable = true;
     if (state.chatIndex.get(conversationId)?.projectId) {
       target.setAttribute(HIDDEN_ATTR, 'true');
@@ -738,21 +759,87 @@ function applyNativeChatVisibility() {
     }
   }
 
-  chatsList.querySelectorAll<HTMLElement>(`[${HIDDEN_ATTR}]`).forEach((node) => {
-    if (!touchedRows.has(node)) node.removeAttribute(HIDDEN_ATTR);
+  sidebarRoot.querySelectorAll<HTMLElement>(`[${HIDDEN_ATTR}]`).forEach((node) => {
+    if (!touchedNodes.has(node)) node.removeAttribute(HIDDEN_ATTR);
   });
 }
 
-function getNativeChatVisibilityTarget(
-  row: HTMLElement | null,
-  link: HTMLAnchorElement,
-  listRoot: HTMLElement
-): HTMLElement | null {
-  if (row) {
-    const safeRow = getSafeNativeChatRow(row, link, listRoot);
-    if (safeRow) return safeRow;
+/**
+ * Maximum height/width slack of a wrapper that may still be treated as "one
+ * chat row". Guards against hiding oversized containers (section bodies,
+ * scroll regions) when Gemini nests a conversation unusually deep.
+ */
+const MAX_NATIVE_ROW_HEIGHT = 120;
+const NATIVE_ROW_SELECTOR =
+  '[data-test-id="conversation"], gem-nav-list-item, .conversation-container, [role="listitem"], li';
+
+/**
+ * Resolves the element to hide for a conversation that lives inside a
+ * project/folder.
+ *
+ * Gemini renders a pinned conversation's pin marker (and other row chrome) as
+ * a sibling of the chat link inside the row wrapper. Hiding only the link
+ * leaves that chrome behind as a tiny stray marker floating between the
+ * remaining rows of the All list. The hide target is therefore the widest
+ * ancestor of the link that still belongs exclusively to this one
+ * conversation:
+ * - every conversation link inside it resolves to the same chat, and
+ * - it stays within row-like geometry so large containers are never hidden.
+ */
+function findNativeChatHideTarget(link: HTMLAnchorElement, conversationId: string): HTMLElement | null {
+  if (!sidebarRoot) return null;
+  const projectsHost = document.getElementById('gemini-projects-host');
+  const sidebarRect = sidebarRoot.getBoundingClientRect();
+
+  let best: HTMLElement | null = null;
+  let current: HTMLElement | null = link.parentElement;
+  while (current && current !== document.body) {
+    if (current === sidebarRoot) break;
+    if (!sidebarRoot.contains(current)) break;
+    if (current.id === 'gemini-projects-host' || (projectsHost && current.contains(projectsHost))) break;
+
+    // A wrapper collapsed by an earlier pass measures 0px; keep it hidden
+    // because geometry cannot be verified while it is display:none.
+    if (current.hasAttribute(HIDDEN_ATTR)) {
+      best = current;
+      break;
+    }
+
+    const chatLinks = Array.from(current.querySelectorAll<HTMLAnchorElement>('a[href]')).filter(
+      (candidate) => Boolean(getConversationId(candidate.href))
+    );
+    // Wrappers that also render other conversations must stay visible.
+    if (chatLinks.some((candidate) => getConversationId(candidate.href) !== conversationId)) break;
+    if (chatLinks.length === 0) {
+      current = current.parentElement;
+      continue;
+    }
+
+    const rect = current.getBoundingClientRect();
+    if (rect.height <= 0 || rect.height > MAX_NATIVE_ROW_HEIGHT) break;
+    if (rect.width <= 0 || rect.width > sidebarRect.width + 24) break;
+
+    best = current;
+    current = current.parentElement;
   }
-  return listRoot.contains(link) ? link : null;
+
+  if (best) return best;
+
+  // Fallbacks that still avoid leaving row chrome (pin marker, kebab) behind.
+  const rowLike = link.closest<HTMLElement>(NATIVE_ROW_SELECTOR);
+  if (
+    rowLike &&
+    sidebarRoot.contains(rowLike) &&
+    !(projectsHost && rowLike.contains(projectsHost))
+  ) {
+    const rowLinks = Array.from(rowLike.querySelectorAll<HTMLAnchorElement>('a[href]')).filter(
+      (candidate) => Boolean(getConversationId(candidate.href))
+    );
+    if (rowLinks.length && rowLinks.every((candidate) => getConversationId(candidate.href) === conversationId)) {
+      return rowLike;
+    }
+  }
+  return link;
 }
 
 function collectNativeChatLinks(root: ParentNode): HTMLAnchorElement[] {
@@ -788,32 +875,6 @@ function ensureNativeRowsDraggable() {
       row.draggable = true;
     }
   }
-}
-
-function getSafeNativeChatRow(
-  row: HTMLElement,
-  link: HTMLAnchorElement,
-  listRoot: HTMLElement
-): HTMLElement | null {
-  if (!listRoot.contains(row)) return null;
-  if (row === listRoot || row === sidebarRoot || row === document.body || row === document.documentElement) return null;
-  if (!row.contains(link)) return null;
-  if (row.contains(document.getElementById('gemini-projects-host'))) return null;
-  if (row.querySelectorAll<HTMLAnchorElement>('a[href*="/app/"]').length !== 1) return null;
-
-  const rect = row.getBoundingClientRect();
-  const listRect = listRoot.getBoundingClientRect();
-  if (rect.height <= 0 || rect.height > 96) return null;
-  if (rect.width <= 0 || rect.width > listRect.width + 16) return null;
-
-  const tag = row.tagName.toLowerCase();
-  const role = row.getAttribute('role') || '';
-  if (tag === 'li' || role === 'listitem') return row;
-
-  const parentConversationCount = row.parentElement
-    ? collectNativeChatLinks(row.parentElement).length
-    : Number.POSITIVE_INFINITY;
-  return parentConversationCount > 1 ? row : null;
 }
 
 async function handleSaveProject(project: Project) {

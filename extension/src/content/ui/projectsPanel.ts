@@ -58,8 +58,6 @@ type ModalMode = 'create' | 'edit';
 const PANEL_COLLAPSE_ANIMATION_MS = 190;
 
 const PROJECT_ACTION_PATHS = {
-  pin: '<path d="M9 3h6v5l3 4v3H6v-3l3-4V3Z"/><path d="M12 15v6"/>',
-  unpin: '<path d="m3 3 18 18M9 3h6v5l3 4v3h-3M9 9l-3 3v3h5M12 15v6"/>',
   edit: '<path d="m16 4 4 4M4 20l4-1L20 7a2.8 2.8 0 0 0-4-4L4 15l-1 6Z"/>',
   delete: '<path d="M3 6h18M9 6V3h6v3M5 6l1 14h12l1-14M10 10v6M14 10v6"/>',
   addChat: '<circle cx="9" cy="7" r="3.2"/><path d="M3.5 20a5.5 5.5 0 0 1 11 0"/><path d="M18 8v6"/><path d="M15 11h6"/>',
@@ -675,7 +673,13 @@ export function createProjectsPanel(options: ProjectsPanelOptions) {
   };
 }
 
-const CHAT_PIN_BADGE_ICON = '<svg viewBox="0 0 24 24" width="12" height="12" fill="currentColor" stroke="none" aria-hidden="true"><path d="M16 3l5 5-5.5 1.5L13 12l-.5 4.5L9 13l-4.5 4.5L3 16l4.5-4.5L4 8l4.5-.5L11 5l2.5-2z"/></svg>';
+// Matches Gemini's native pin marker: the Material Symbols "push_pin" glyph
+// (rendered natively via <gem-icon fonticonname="push_pin">). The filled
+// variant is what Gemini shows next to pinned conversations, so the panel
+// badges use it verbatim; the outline variant is only used for the "Unpin"
+// menu item to distinguish the two states.
+const PIN_FILLED_ICON = '<svg viewBox="0 0 24 24" width="12" height="12" fill="currentColor" stroke="none" aria-hidden="true"><path d="m16 12 2 2v2h-5v6l-1 1-1-1v-6H6v-2l2-2V5H7V3h10v2h-1Z"/></svg>';
+const PIN_OUTLINE_ICON = '<svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor" stroke="none" aria-hidden="true"><path d="m16 12 2 2v2h-5v6l-1 1-1-1v-6H6v-2l2-2V5H7V3h10v2h-1Zm-7.15 2h6.3L14 12.85V5h-4v7.85ZM12 14Z"/></svg>';
 const TWIST_CHEVRON_ICON = '<svg viewBox="0 0 24 24" width="12" height="12" fill="currentColor" aria-hidden="true"><path d="M8.1 5.7 14.4 12l-6.3 6.3-1.4-1.4L11.6 12 6.7 7.1z"/></svg>';
 
 /**
@@ -725,7 +729,7 @@ export function renderProjectsSection(
                             <span class="gp-chat-title">${escapeHtml(chat.title || 'Untitled chat')}</span>
                             ${isMissing ? '<span class="gp-chat-missing">Missing</span>' : ''}
                           </a>
-                          ${chat.isPinned ? `<span class="gp-chat-pin" role="img" aria-label="Pinned chat" title="Pinned to top">${CHAT_PIN_BADGE_ICON}</span>` : ''}
+                          ${chat.isPinned ? `<span class="gp-chat-pin" role="img" aria-label="Pinned chat" title="Pinned to top">${PIN_FILLED_ICON}</span>` : ''}
                           <button class="gp-chat-kebab" data-gp-action="chat-menu" aria-label="Chat menu"><svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="5" r="1"/><circle cx="12" cy="12" r="1"/><circle cx="12" cy="19" r="1"/></svg></button>
                         </div>
                       `
@@ -767,7 +771,7 @@ export function renderProjectsSection(
             ${iconMarkup}
             <span class="gp-label">${escapeHtml(project.name)}</span>
             ${hasDetails ? `<span class="gp-details-badge" role="img" aria-label="Has system prompt or notes" title="Has system prompt or notes">${DETAILS_BADGE_ICON}</span>` : ''}
-            ${project.isPinned ? `<span class="gp-project-pin" role="img" aria-label="Pinned project" title="Pinned project">${renderProjectActionIcon('pin')}</span>` : ''}
+            ${project.isPinned ? `<span class="gp-project-pin" role="img" aria-label="Pinned project" title="Pinned project">${PIN_FILLED_ICON}</span>` : ''}
             ${isFolder ? '' : `<button class="gp-workspace-btn" data-gp-action="open-workspace" aria-label="Open project workspace" title="Project workspace">${instructionsIcon(18)}</button>`}
             <button class="gp-kebab" data-gp-action="project-menu" aria-label="${isFolder ? 'Folder menu' : 'Project menu'}"><svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="5" r="1"/><circle cx="12" cy="12" r="1"/><circle cx="12" cy="19" r="1"/></svg></button>
           </div>
@@ -2526,7 +2530,7 @@ function createProjectMenu(layer: HTMLElement) {
       <button type="button" role="menuitem" class="gp-menu-item" data-gp-menu="move">${renderProjectActionIcon('subfolder')}<span>Move to…</span></button>
       ${isFolder ? '' : `<button type="button" role="menuitem" class="gp-menu-item" data-gp-menu="details">${renderProjectActionIcon('details')}<span>System prompt &amp; notes</span></button>`}
       <div class="gp-menu-divider" role="separator"></div>
-      <button type="button" role="menuitem" class="gp-menu-item" data-gp-menu="pin">${renderProjectActionIcon(project.isPinned ? 'unpin' : 'pin')}<span>${project.isPinned ? 'Unpin' : 'Pin'}</span></button>
+      <button type="button" role="menuitem" class="gp-menu-item" data-gp-menu="pin">${project.isPinned ? PIN_OUTLINE_ICON : PIN_FILLED_ICON}<span>${project.isPinned ? 'Unpin' : 'Pin'}</span></button>
       <button type="button" role="menuitem" class="gp-menu-item" data-gp-menu="edit">${renderProjectActionIcon('edit')}<span>Rename</span></button>
       <button type="button" role="menuitem" class="gp-menu-item danger" data-gp-menu="delete">${renderProjectActionIcon('delete')}<span>Delete</span></button>
     `;

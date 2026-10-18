@@ -637,8 +637,17 @@ export async function setWorkspaceChatPinned(
   const workspace = await getWorkspace(accountHash);
   const chats = workspace.chats ?? (workspace.chats = {});
   const existing = chats[conversationId];
-  if (!existing) return workspaceToStoredState(workspace);
-  chats[conversationId] = { ...existing, isPinned, updatedAt: Date.now() };
+  // A chat can be pinned before it ever gets a workspace record (e.g. pinned
+  // in Gemini's sidebar and then moved into a project): create the record so
+  // the pin state survives instead of being silently dropped.
+  chats[conversationId] = {
+    conversationId,
+    title: existing?.title ?? '',
+    isPinned,
+    projectId: existing?.projectId ?? null,
+    updatedAt: Date.now(),
+    lastUrl: existing?.lastUrl
+  };
   await saveWorkspace(accountHash, workspace);
   return workspaceToStoredState(workspace);
 }
