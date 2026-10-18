@@ -1,11 +1,22 @@
-﻿import { ChatRef, Project, ProjectIcon, RuntimeState } from '../../shared/types';
+﻿import { ChatRef, Project, ProjectIcon, RuntimeState, SyncStatus, WorkspacePayload } from '../../shared/types';
 import { exportAllData, triggerImport } from '../../shared/backup';
 import { runtimeSendMessage } from '../../shared/webext';
+import { resolveAccountRawIdentifier } from '../../shared/account';
+import { getActiveAccountHash } from '../accountWatcher';
+import { SYNC_CONFLICT_EVENT, syncEngine } from '../../shared/syncEngine';
 import { ICON_OPTIONS, COLOR_OPTIONS, IconOption, getIconLabel, renderIconSvg } from './icons';
 import { PANEL_TITLE_FONT_STACK, PANEL_TITLE_TYPOGRAPHY } from './typography';
+import { createSyncStatusBadge } from './syncStatusBadge';
+import { openSyncSettingsModal } from './modals/syncSettingsModal';
+import { openConflictModal } from './modals/conflictModal';
 
 export type PanelSection = 'projects' | 'folders';
 export type TargetPickerMode = 'project' | 'folder' | 'all';
+
+/** Persists the latest sync status so a recreated panel restores its pill. */
+let lastSyncStatus: SyncStatus = 'unconfigured';
+/** Registers the conflict listener exactly once per page load. */
+let syncConflictListenerAttached = false;
 
 interface ProjectsPanelOptions {
   shadow: ShadowRoot;
@@ -62,6 +73,51 @@ export function createProjectsPanel(options: ProjectsPanelOptions) {
   // Initialize theme observer
   attachThemeObserver(panelRoot, overlayLayer);
 
+  // Sync status badge (opens the Sync Settings modal) + conflict resolver.
+  function openSyncSettings() {
+    const activeAccountId = getActiveAccountHash() ?? '';
+    const activeAccountLabel = resolveAccountRawIdentifier();
+    openSyncSettingsModal(activeAccountId, activeAccountLabel);
+  }
+
+  const initialSyncStatus: SyncStatus = getActiveAccountHash()
+    ? syncEngine.getSyncStatus(getActiveAccountHash() ?? '')
+    : 'unconfigured';
+  const syncBadge = createSyncStatusBadge(openSyncSettings, lastSyncStatus === 'unconfigured' ? initialSyncStatus : lastSyncStatus);
+
+  function updateSyncStatus(status: SyncStatus): void {
+    lastSyncStatus = status;
+    syncBadge.updateStatus(status);
+  }
+
+  if (!syncConflictListenerAttached) {
+    syncConflictListenerAttached = true;
+    window.addEventListener(SYNC_CONFLICT_EVENT, (event) => {
+      const detail = (event as CustomEvent).detail as
+        | { accountId?: string; localState?: unknown; remoteState?: unknown }
+        | undefined;
+      if (!detail || !detail.localState || !detail.remoteState) return;
+      openConflictModal(
+        {
+          localState: detail.localState as WorkspacePayload,
+          remoteState: detail.remoteState as WorkspacePayload
+        },
+        (choice) => {
+          void syncEngine
+            .resolveConflictResolution(
+              choice,
+              {
+                localState: detail.localState as WorkspacePayload,
+                remoteState: detail.remoteState as WorkspacePayload
+              },
+              detail.accountId ?? ''
+            )
+            .catch((error) => console.warn('[gemini-projects] conflict resolution failed', error));
+        }
+      );
+    });
+  }
+
   // 用于存储当前 state 以供 chatMenu 获取项目列表
   let currentState: RuntimeState | null = null;
   const chatMenu = createChatMenu(overlayLayer);
@@ -83,6 +139,10 @@ export function createProjectsPanel(options: ProjectsPanelOptions) {
     currentState = state;
     // Render markup based on uiPrefs (collapsed state)
     panelRoot.innerHTML = buildPanelMarkup(state);
+    const syncHeader = panelRoot.querySelector<HTMLElement>('[data-gp-sync-header]');
+    if (syncHeader && syncHeader !== syncBadge.parentElement) {
+      syncHeader.appendChild(syncBadge);
+    }
     attachPanelEvents(state);
   }
 
@@ -513,7 +573,8 @@ export function createProjectsPanel(options: ProjectsPanelOptions) {
     openCreateModal,
     openDetailsModal,
     openTargetPicker,
-    showChatMenuFallback
+    showChatMenuFallback,
+    updateSyncStatus
   };
 }
 
@@ -1071,6 +1132,69 @@ function ensurePanelRoot(shadow: ShadowRoot): HTMLElement {
         width: 14px;
         height: 14px;
       }
+
+      .gp-sync-header {
+        display: flex;
+        align-items: center;
+        justify-content: flex-start;
+        padding: 0 12px 6px;
+      }
+
+      .gp-sync-badge {
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+        height: 26px;
+        padding: 0 10px 0 8px;
+        border: 1px solid var(--gp-bg-active);
+        border-radius: 999px;
+        background: transparent;
+        color: var(--gp-fg-muted);
+        font-family: var(--gp-font);
+        font-size: 12px;
+        font-weight: 500;
+        line-height: 1;
+        cursor: pointer;
+        user-select: none;
+        transition: background 0.15s ease, border-color 0.15s ease, color 0.15s ease;
+      }
+
+      .gp-sync-badge:hover {
+        background: var(--gp-bg-hover);
+        border-color: var(--gp-fg-muted);
+        color: var(--gp-fg);
+      }
+
+      .gp-sync-badge .gp-sync-icon {
+        display: inline-flex;
+        align-items: center;
+      }
+
+      .gp-sync-badge .gp-sync-icon svg {
+        width: 14px;
+        height: 14px;
+        display: block;
+      }
+
+      .gp-sync-badge.status-syncing .gp-sync-icon svg {
+        animation: gp-sync-spin 1.1s linear infinite;
+      }
+
+      .gp-sync-badge.status-conflict,
+      .gp-sync-badge.status-error {
+        color: #b3261e;
+      }
+
+      :host(.dark) .gp-sync-badge.status-conflict,
+      :host(.dark) .gp-sync-badge.status-error {
+        color: #f2b8b5;
+      }
+
+      @keyframes gp-sync-spin {
+        to {
+          transform: rotate(360deg);
+        }
+      }
     `;
     shadow.appendChild(style);
   }
@@ -1133,6 +1257,7 @@ function buildPanelMarkup(state: RuntimeState): string {
 
   return `
     <div class="gp-panel">
+      <div class="gp-sync-header" data-gp-sync-header></div>
       ${sectionTitle('projects', 'Projects', projectsCollapsed)}
       ${sectionBody('projects', projectsCollapsed, projectsContent)}
       ${sectionTitle('folders', 'Folders', foldersCollapsed)}

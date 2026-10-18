@@ -140,6 +140,17 @@ export interface SyncConfig {
   apiKey: string;
 }
 
+/** Full sync configuration incl. the per-account encryption passphrase map. */
+export interface SyncSettings {
+  serverUrl: string;
+  apiKey: string;
+  /** When true every account shares one master passphrase. */
+  useGlobalPassphrase: boolean;
+  globalPassphrase?: string;
+  /** Account-hash -> passphrase map for per-account encryption. */
+  accountPassphrases: Record<string, string>;
+}
+
 /** Encrypted envelope pushed to / received from the server. */
 export interface EncryptedSyncEnvelope {
   version: number;
@@ -186,7 +197,7 @@ export type SyncApiResponse<T> =
  * Sync engine state
  * ------------------------------------------------------------------ */
 
-export type SyncStatus = 'idle' | 'syncing' | 'synced' | 'conflict' | 'error' | 'offline';
+export type SyncStatus = 'idle' | 'unconfigured' | 'syncing' | 'synced' | 'conflict' | 'error' | 'offline';
 
 export type SyncResolution = 'keep_local' | 'keep_remote' | 'merge';
 

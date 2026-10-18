@@ -1,4 +1,4 @@
-import { BackgroundRequest, BackgroundResponse, ChatRef, Project, RuntimeState } from '../shared/types';
+import { BackgroundRequest, BackgroundResponse, ChatRef, Project, RuntimeState, SyncStatus } from '../shared/types';
 import { runtimeSendMessage } from '../shared/webext';
 import { onWorkspaceSaved } from '../shared/storage';
 import {
@@ -114,8 +114,17 @@ function initWorkspaceSync(): void {
 
   window.addEventListener(SYNC_STATUS_EVENT, (event) => {
     const detail = (event as CustomEvent).detail as { accountId?: string; status?: string; message?: string };
-    console.debug('[gemini-projects] sync status', detail?.status, detail?.message ?? '');
+    if (detail?.status) {
+      panel?.updateSyncStatus(detail.status as SyncStatus);
+    }
   });
+}
+
+/** Re-applies the engine's live status to the header badge (e.g. after account switch). */
+function refreshSyncStatusBadge(): void {
+  const accountHash = getActiveAccountHash();
+  const status = accountHash ? syncEngine.getSyncStatus(accountHash) : 'unconfigured';
+  panel?.updateSyncStatus(status);
 }
 
 async function bootstrap() {
@@ -133,6 +142,7 @@ async function bootstrap() {
   initWorkspaceSync();
   window.addEventListener(ACCOUNT_CHANGED_EVENT, handleAccountChanged);
   await loadInitialState();
+  refreshSyncStatusBadge();
   observeDocumentForSidebar();
   installLifecycleRescans();
   runStage('responseFolding', () => initGeminiResponseFolding());
@@ -182,6 +192,7 @@ function handleAccountChanged(event: Event): void {
     .then(() => {
       applyNativeChatVisibility();
       renderPanelIfChanged(true);
+      refreshSyncStatusBadge();
       scheduleRescan(0);
     });
 }

@@ -1,4 +1,4 @@
-import { ChatRef, Project, PromptTemplate, StoredState, SyncConfig, TagMeta, UiPrefs, WorkspacePayload } from './types';
+import { ChatRef, Project, PromptTemplate, StoredState, SyncConfig, SyncSettings, TagMeta, UiPrefs, WorkspacePayload } from './types';
 import { storageLocalGet, storageLocalSet } from './webext';
 import { WorkspacePayloadSchema } from './schemas';
 
@@ -371,15 +371,18 @@ export function onWorkspaceSaved(listener: WorkspaceSavedListener): () => void {
 export const SYNC_CONFIG_KEY = 'gemini_sync_config';
 
 export async function getSyncConfig(): Promise<SyncConfig | null> {
-  const result = await storageLocalGet<Record<string, unknown>>([SYNC_CONFIG_KEY]);
-  const raw = result[SYNC_CONFIG_KEY];
-  if (!raw || typeof raw !== 'object') return null;
+  const result = await storageLocalGet<Record<string, unknown>>([SYNC_CONFIG_KEY, SYNC_SETTINGS_KEY]);
+  const legacy = normalizeSyncConfig(result[SYNC_CONFIG_KEY]);
+  if (legacy) return legacy;
+  return normalizeSyncConfig(result[SYNC_SETTINGS_KEY]);
+}
 
+function normalizeSyncConfig(raw: unknown): SyncConfig | null {
+  if (!raw || typeof raw !== 'object') return null;
   const candidate = raw as Partial<SyncConfig>;
   const serverUrl = typeof candidate.serverUrl === 'string' ? candidate.serverUrl.trim().replace(/\/+$/, '') : '';
   const apiKey = typeof candidate.apiKey === 'string' ? candidate.apiKey : '';
   if (!serverUrl || !apiKey) return null;
-
   return { serverUrl, apiKey };
 }
 
@@ -389,6 +392,56 @@ export async function saveSyncConfig(config: SyncConfig): Promise<void> {
     apiKey: config.apiKey
   };
   await storageLocalSet({ [SYNC_CONFIG_KEY]: normalized });
+}
+
+/* ------------------------------------------------------------------ *
+ * Sync settings (server connection + per-account passphrase map)
+ * ------------------------------------------------------------------ */
+
+export const SYNC_SETTINGS_KEY = 'gemini_sync_settings';
+
+export function createDefaultSyncSettings(): SyncSettings {
+  return {
+    serverUrl: '',
+    apiKey: '',
+    useGlobalPassphrase: true,
+    accountPassphrases: {}
+  };
+}
+
+export async function getSyncSettings(): Promise<SyncSettings> {
+  const result = await storageLocalGet<Record<string, unknown>>([SYNC_SETTINGS_KEY]);
+  const raw = result[SYNC_SETTINGS_KEY];
+  if (!raw || typeof raw !== 'object') return createDefaultSyncSettings();
+
+  const candidate = raw as Partial<SyncSettings>;
+  const serverUrl = typeof candidate.serverUrl === 'string' ? candidate.serverUrl.trim().replace(/\/+$/, '') : '';
+  const apiKey = typeof candidate.apiKey === 'string' ? candidate.apiKey : '';
+  const accountPassphrases: Record<string, string> = {};
+  if (candidate.accountPassphrases && typeof candidate.accountPassphrases === 'object') {
+    Object.entries(candidate.accountPassphrases as Record<string, unknown>).forEach(([accountId, value]) => {
+      if (typeof value === 'string') accountPassphrases[accountId] = value;
+    });
+  }
+
+  return {
+    serverUrl,
+    apiKey,
+    useGlobalPassphrase: candidate.useGlobalPassphrase !== false,
+    ...(typeof candidate.globalPassphrase === 'string' ? { globalPassphrase: candidate.globalPassphrase } : {}),
+    accountPassphrases
+  };
+}
+
+export async function saveSyncSettings(settings: SyncSettings): Promise<void> {
+  const normalized: SyncSettings = {
+    serverUrl: settings.serverUrl.trim().replace(/\/+$/, ''),
+    apiKey: settings.apiKey,
+    useGlobalPassphrase: settings.useGlobalPassphrase === true,
+    ...(settings.globalPassphrase ? { globalPassphrase: settings.globalPassphrase } : {}),
+    accountPassphrases: { ...(settings.accountPassphrases ?? {}) }
+  };
+  await storageLocalSet({ [SYNC_SETTINGS_KEY]: normalized });
 }
 
 function nextSiblingOrder(workspace: WorkspacePayload, parentId: string | null): number {
