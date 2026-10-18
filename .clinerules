@@ -1,0 +1,18 @@
+# Monorepo Rules (loaded on every prompt)
+
+## Universal rules (every change)
+1. Bump version by 0.0.1 (e.g., 1.3.9 → 1.4.0) in ALL: extension/, backend/, README header, AI_DOCS.md, CHANGELOG.md
+2. Update AI_DOCS.md (MACHINE contract) whenever meta keys, hooks, AJAX/REST routes, asset handles, or localized JS params change
+3. Update README.md + CHANGELOG.md (HUMAN) whenever features, or similar user-facing behavior changes
+4. Keep AI_DOCS.md version in sync — never let it go stale
+5. Keep .env.example current for any backend change
+6. Add tests: jest (TS), nestjs (backend), ...
+
+## Communication behavior
+- If anything is unclear, the task is ambiguous, or you need more context → ASK ME QUESTIONS FIRST
+- Do not guess architecture. Confirm the intended scope before writing code → ASK ME QUESTIONS FIRST.
+
+## Docs roles (single source of truth)
+- README.md  → humans: features, install, usage, Bricks tags/elements/query-loops, CSS classes
+- AI_DOCS.md → AI/code contracts: exact meta keys, hook sigs, endpoint paths, param names
+- CHANGELOG.md → human rolling changelog
