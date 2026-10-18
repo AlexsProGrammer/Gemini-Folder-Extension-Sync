@@ -1,12 +1,14 @@
 import { ChatRef, Project, PromptTemplate, StoredState, SyncConfig, SyncSettings, TagMeta, UiPrefs, WorkspacePayload } from './types';
-import { storageLocalGet, storageLocalSet } from './webext';
-import { WorkspacePayloadSchema } from './schemas';
+import { debugStep, errorName, storageLocalGet, storageLocalSet } from './webext';
+import { normalizeChatIndex, parseWorkspace } from './schemas';
+import { getRawIdentifierForHash } from './account';
+import { isLocalVaultEnvelope, openWorkspaceEnvelope, sealWorkspaceEnvelope, VaultLockedError, type VaultMeta } from './vault';
 
 export const STORAGE_KEY = 'gemini_projects_v1';
 export const CURRENT_SCHEMA_VERSION = 1;
 
 /** Schema version of the hierarchical, account-partitioned workspace model. */
-export const WORKSPACE_SCHEMA_VERSION = 2;
+export const WORKSPACE_SCHEMA_VERSION = 3;
 /** Legacy prompt library key used by schema v1. */
 export const LEGACY_PROMPTS_KEY = 'gp_prompts_store';
 /** Legacy unpartitioned active-project pointer. */
@@ -57,76 +59,12 @@ export function normalizeUiPrefs(raw: unknown): { projectsCollapsed: boolean; fo
   };
 }
 
-export function migrateState(raw: unknown): StoredState {
-  if (!raw || typeof raw !== 'object') {
-    return createEmptyState();
-  }
-
-  const candidate = raw as Partial<StoredState>;
-  if (candidate.schemaVersion !== CURRENT_SCHEMA_VERSION) {
-    return createEmptyState();
-  }
-
-  const projects = Array.isArray(candidate.projects) ? candidate.projects : [];
-  const rawChatIndex =
-    candidate.chatIndex && typeof candidate.chatIndex === 'object'
-      ? (candidate.chatIndex as Record<string, ChatRef & { lastSeenAt?: number; lastUrl?: string }>)
-      : {};
-  const chatIndex: Record<string, ChatRef> = {};
-
-  const normalizeStoredTitle = (title: string): { title: string; isPinned: boolean } => {
-    const source = (title || '').trim();
-    if (!source) return { title: '', isPinned: false };
-
-    const hasPinnedToken = /(?:\bpinned\b|已置顶|置顶)/i.test(source);
-    const cleaned = source
-      .replace(/\s*(?:[-–—|·•]?\s*)?(?:pinned)(?:\.{3}|…)?\s*$/i, '')
-      .replace(/\s*(?:[-–—|·•]?\s*)?(?:已置顶|置顶)(?:\.{3}|…)?\s*$/i, '')
-      .trim();
-
-    return {
-      title: cleaned || source,
-      isPinned: hasPinnedToken
-    };
-  };
-
-  Object.entries(rawChatIndex).forEach(([key, value]) => {
-    if (!value || typeof value !== 'object') return;
-    const conversationId = value.conversationId || key;
-    const normalized = normalizeStoredTitle(value.title || '');
-    chatIndex[conversationId] = {
-      conversationId,
-      title: normalized.title,
-      isPinned: typeof value.isPinned === 'boolean' ? value.isPinned : normalized.isPinned,
-      projectId: value.projectId ?? null,
-      updatedAt:
-        typeof value.updatedAt === 'number'
-          ? value.updatedAt
-          : typeof value.lastSeenAt === 'number'
-            ? value.lastSeenAt
-            : Date.now(),
-      lastUrl: typeof value.lastUrl === 'string' ? value.lastUrl : undefined
-    };
-  });
-
-  const uiPrefs = normalizeUiPrefs(candidate.uiPrefs);
-
-  return {
-    schemaVersion: CURRENT_SCHEMA_VERSION,
-    projects,
-    chatIndex,
-    uiPrefs
-  };
-}
-
-export async function loadState(): Promise<StoredState> {
-  const result = await storageLocalGet<Record<string, unknown>>(STORAGE_KEY);
-  return migrateState(result[STORAGE_KEY]);
-}
-
-export async function saveState(state: StoredState): Promise<void> {
-  await storageLocalSet({ [STORAGE_KEY]: state });
-}
+/**
+ * Normalizes a raw chat index (legacy or synced) into validated ChatRefs.
+ * The Xray-safe implementation lives in schemas.ts alongside parseWorkspace;
+ * re-exported here for the legacy migration path.
+ */
+export { normalizeChatIndex };
 
 interface LegacyPromptRecord {
   id?: unknown;
@@ -230,10 +168,11 @@ function toPromptTemplate(raw: LegacyPromptRecord, index: number): PromptTemplat
 }
 
 /**
- * Converts unpartitioned schema v1 data (flat projects + prompt store) into a
- * validated hierarchical WorkspacePayload for the given account hash and
- * persists it under `workspace_${accountHash}`. Legacy keys are flagged (never
- * deleted) so migration never destroys user data.
+ * Converts unpartitioned schema v1 data (flat projects, chat index, prompt
+ * store) into a validated hierarchical WorkspacePayload for the given account
+ * hash and persists it — already vault-sealed — under
+ * `workspace_${accountHash}`. Legacy keys are flagged (never deleted) so
+ * migration never destroys user data.
  */
 export async function migrateLegacyData(accountHash: string): Promise<WorkspacePayload> {
   const gateResult = await storageLocalGet<Record<string, unknown>>([
@@ -250,6 +189,7 @@ export async function migrateLegacyData(accountHash: string): Promise<WorkspaceP
   const legacyPrompts = legacyAlreadyClaimed
     ? { prompts: [] as LegacyPromptRecord[], tagMeta: null as Record<string, TagMeta> | null }
     : extractLegacyPrompts(gateResult);
+  const legacyState = legacyAlreadyClaimed ? null : asRecord(gateResult[STORAGE_KEY]);
 
   const projects: Record<string, Project> = {};
   legacyProjects.forEach((raw, index) => {
@@ -259,47 +199,122 @@ export async function migrateLegacyData(accountHash: string): Promise<WorkspaceP
 
   const prompts = legacyPrompts.prompts.map(toPromptTemplate);
 
-  const payload: WorkspacePayload = {
+  const payload = normalizeWorkspacePayload({
     schemaVersion: WORKSPACE_SCHEMA_VERSION,
     accountId: accountHash,
     version: 1,
     updatedAt: Date.now(),
     projects,
     prompts,
-    ...(legacyPrompts.tagMeta ? { tagMeta: legacyPrompts.tagMeta } : {})
-  };
+    ...(legacyPrompts.tagMeta ? { tagMeta: legacyPrompts.tagMeta } : {}),
+    // Chat assignments and sidebar preferences from the legacy unpartitioned
+    // store follow their projects into the claiming account's partition.
+    chats: legacyState ? normalizeChatIndex(legacyState.chatIndex) : {},
+    uiPrefs: legacyState ? normalizeUiPrefs(legacyState.uiPrefs) : undefined
+  }, accountHash);
 
-  const validated = WorkspacePayloadSchema.parse(payload) as WorkspacePayload;
-  const updates: Record<string, unknown> = {
-    [getWorkspaceKey(accountHash)]: validated,
+  await writeWorkspaceEnvelope(accountHash, payload);
+  await storageLocalSet({
     [getLegacyMigrationFlagKey(accountHash)]: {
       migratedAt: Date.now(),
       sourceProjects: legacyProjects.length,
       sourcePrompts: legacyPrompts.prompts.length
     }
-  };
+  });
   if (!legacyAlreadyClaimed) {
-    updates[LEGACY_MIGRATION_GATE_KEY] = { migratedAt: Date.now(), claimedBy: accountHash };
+    await storageLocalSet({
+      [LEGACY_MIGRATION_GATE_KEY]: { migratedAt: Date.now(), claimedBy: accountHash }
+    });
   }
-  await storageLocalSet(updates);
 
-  return validated;
+  return payload;
 }
 
+/** Fills schema-v3 defaults so callers never see missing chats/uiPrefs. */
+function normalizeWorkspacePayload(payload: WorkspacePayload, accountHash: string): WorkspacePayload {
+  return {
+    ...payload,
+    schemaVersion: WORKSPACE_SCHEMA_VERSION,
+    accountId: accountHash,
+    chats: payload.chats && typeof payload.chats === 'object' ? payload.chats : {},
+    uiPrefs: normalizeUiPrefs(payload.uiPrefs)
+  };
+}
+
+const vaultLockedNotified = new Set<string>();
+
+function notifyVaultLocked(accountHash: string): void {
+  if (vaultLockedNotified.has(accountHash)) return;
+  vaultLockedNotified.add(accountHash);
+  if (typeof window !== 'undefined') {
+    window.dispatchEvent(new CustomEvent('gemini-workspace:vault-locked', { detail: { accountId: accountHash } }));
+  }
+}
+
+/**
+ * Loads the account-partitioned workspace. The stored form is always an
+ * encrypted vault envelope; plaintext payloads from before this update are
+ * accepted once and sealed on the next write.
+ */
 export async function getWorkspace(accountHash: string): Promise<WorkspacePayload> {
   const key = getWorkspaceKey(accountHash);
-  const result = await storageLocalGet<Record<string, unknown>>([key]);
+  const result = await debugStep('getWorkspace:storage-read', () => storageLocalGet<Record<string, unknown>>([key]));
   const raw = result[key];
 
-  if (raw) {
+  if (raw !== undefined && raw !== null) {
     try {
-      return WorkspacePayloadSchema.parse(raw) as WorkspacePayload;
+      const rawIdentifier = await debugStep('getWorkspace:identity', () => requireRawIdentifier(accountHash));
+      const opened = await debugStep('getWorkspace:open-envelope', () => openWorkspaceEnvelope(accountHash, rawIdentifier, raw));
+      if (opened) {
+        return normalizeWorkspacePayload(opened.payload, accountHash);
+      }
+      throw new Error('Workspace partition was empty.');
     } catch (error) {
-      console.warn('[gemini-projects] workspace failed validation; re-migrating', error);
+      if (errorName(error) === 'VaultLockedError') {
+        notifyVaultLocked(accountHash);
+        throw error;
+      }
+      // Never fall back to migration here: the partition holds real user
+      // data that failed to open, and migrateLegacyData would overwrite it.
+      console.warn('[gemini-projects] workspace partition failed to open', error);
+      throw error;
     }
   }
 
   return migrateLegacyData(accountHash);
+}
+
+/**
+ * Resolves the raw account identity that owns a workspace partition. Without
+ * it the vault key cannot be derived, so a missing identity is fatal for
+ * encrypted partitions (plaintext/legacy partitions can still migrate).
+ */
+async function requireRawIdentifier(accountHash: string): Promise<string> {
+  const rawIdentifier = await getRawIdentifierForHash(accountHash);
+  if (!rawIdentifier) {
+    throw new VaultLockedError(accountHash);
+  }
+  return rawIdentifier;
+}
+
+/** Cheap salt lookup: the salt is not secret, so no decryption is needed. */
+async function existingVaultMeta(accountHash: string): Promise<VaultMeta | undefined> {
+  const key = getWorkspaceKey(accountHash);
+  const result = await storageLocalGet<Record<string, unknown>>([key]);
+  const raw = result[key];
+  if (isLocalVaultEnvelope(raw)) return raw.vault;
+  return undefined;
+}
+
+/** Seals and persists the encrypted workspace envelope for an account. */
+async function writeWorkspaceEnvelope(accountHash: string, payload: WorkspacePayload): Promise<void> {
+  // parseWorkspace is the Xray-safe validator: it never touches the
+  // prototype chain of the (possibly cross-compartment) input.
+  const validated = await debugStep('seal:validate', () => parseWorkspace(payload));
+  const rawIdentifier = await debugStep('seal:identity', () => requireRawIdentifier(accountHash));
+  const meta = await debugStep('seal:read-meta', () => existingVaultMeta(accountHash));
+  const envelope = await debugStep('seal:encrypt', () => sealWorkspaceEnvelope(accountHash, rawIdentifier, validated, meta));
+  await debugStep('seal:persist', () => storageLocalSet({ [getWorkspaceKey(accountHash)]: envelope }));
 }
 
 export async function saveWorkspace(accountHash: string, data: WorkspacePayload): Promise<void> {
@@ -310,8 +325,8 @@ export async function saveWorkspace(accountHash: string, data: WorkspacePayload)
     version: (typeof data.version === 'number' ? data.version : 0) + 1,
     updatedAt: Date.now()
   };
-  const validated = WorkspacePayloadSchema.parse(next) as WorkspacePayload;
-  await storageLocalSet({ [getWorkspaceKey(accountHash)]: validated });
+  const validated = normalizeWorkspacePayload(next, accountHash);
+  await writeWorkspaceEnvelope(accountHash, validated);
   notifyWorkspaceSaved(accountHash);
 }
 
@@ -323,12 +338,12 @@ export async function saveWorkspace(accountHash: string, data: WorkspacePayload)
  * never schedule a redundant re-push.
  */
 export async function putWorkspace(accountHash: string, data: WorkspacePayload): Promise<void> {
-  const validated = WorkspacePayloadSchema.parse({
+  const validated = normalizeWorkspacePayload({
     ...data,
     schemaVersion: WORKSPACE_SCHEMA_VERSION,
     accountId: accountHash
-  }) as WorkspacePayload;
-  await storageLocalSet({ [getWorkspaceKey(accountHash)]: validated });
+  }, accountHash);
+  await writeWorkspaceEnvelope(accountHash, validated);
 }
 
 /** True when a workspace partition already exists on disk (no migration side effects). */
@@ -511,4 +526,183 @@ export async function updateProjectMetadata(
 
   workspace.projects[id] = merged;
   await saveWorkspace(accountHash, workspace);
+}
+
+/* ------------------------------------------------------------------ *
+ * Account-partitioned mutation helpers
+ *
+ * Every workspace mutation lives in the content script that resolved the
+ * active account, so the browser-global legacy state is gone: all data is
+ * written to (and read from) the encrypted per-account vault partition.
+ * Each helper returns the derived runtime view so callers can refresh the
+ * sidebar without a second read.
+ * ------------------------------------------------------------------ */
+
+/** Derives the flat runtime view the sidebar renders from a workspace. */
+export function workspaceToStoredState(workspace: WorkspacePayload): StoredState {
+  return {
+    schemaVersion: CURRENT_SCHEMA_VERSION,
+    projects: Object.values(workspace.projects),
+    chatIndex: { ...(workspace.chats ?? {}) },
+    uiPrefs: normalizeUiPrefs(workspace.uiPrefs)
+  };
+}
+
+export async function upsertWorkspaceProject(
+  accountHash: string,
+  project: Project
+): Promise<StoredState> {
+  const workspace = await debugStep('upsert:get-workspace', () => getWorkspace(accountHash));
+  const existing = workspace.projects[project.id];
+  workspace.projects[project.id] = existing
+    ? { ...existing, ...project, updatedAt: project.updatedAt ?? Date.now() }
+    : project;
+  await debugStep('upsert:save-workspace', () => saveWorkspace(accountHash, workspace));
+  return workspaceToStoredState(workspace);
+}
+
+export async function setWorkspaceProjectPinned(
+  accountHash: string,
+  projectId: string,
+  isPinned: boolean
+): Promise<StoredState> {
+  const workspace = await getWorkspace(accountHash);
+  const project = workspace.projects[projectId];
+  if (!project) {
+    throw new Error('Project not found');
+  }
+  workspace.projects[projectId] = { ...project, isPinned, updatedAt: Date.now() };
+  await saveWorkspace(accountHash, workspace);
+  return workspaceToStoredState(workspace);
+}
+
+export async function deleteWorkspaceProject(
+  accountHash: string,
+  projectId: string
+): Promise<StoredState> {
+  const workspace = await getWorkspace(accountHash);
+  const doomed = new Set<string>([projectId]);
+  let grew = true;
+  while (grew) {
+    grew = false;
+    Object.values(workspace.projects).forEach((item) => {
+      if (item.parentId && doomed.has(item.parentId) && !doomed.has(item.id)) {
+        doomed.add(item.id);
+        grew = true;
+      }
+    });
+  }
+
+  doomed.forEach((id) => {
+    delete workspace.projects[id];
+  });
+
+  const chats = workspace.chats ?? {};
+  Object.keys(chats).forEach((conversationId) => {
+    const chat = chats[conversationId];
+    if (chat.projectId && doomed.has(chat.projectId)) {
+      chats[conversationId] = { ...chat, projectId: null };
+    }
+  });
+
+  await saveWorkspace(accountHash, workspace);
+  return workspaceToStoredState(workspace);
+}
+
+export async function moveWorkspaceChat(
+  accountHash: string,
+  conversationId: string,
+  projectId: string | null
+): Promise<StoredState> {
+  const workspace = await getWorkspace(accountHash);
+  const chats = workspace.chats ?? (workspace.chats = {});
+  const existing = chats[conversationId];
+  chats[conversationId] = {
+    conversationId,
+    title: existing?.title ?? '',
+    isPinned: existing?.isPinned ?? false,
+    projectId,
+    updatedAt: Date.now(),
+    lastUrl: existing?.lastUrl
+  };
+  await saveWorkspace(accountHash, workspace);
+  return workspaceToStoredState(workspace);
+}
+
+export async function setWorkspaceChatPinned(
+  accountHash: string,
+  conversationId: string,
+  isPinned: boolean
+): Promise<StoredState> {
+  const workspace = await getWorkspace(accountHash);
+  const chats = workspace.chats ?? (workspace.chats = {});
+  const existing = chats[conversationId];
+  if (!existing) return workspaceToStoredState(workspace);
+  chats[conversationId] = { ...existing, isPinned, updatedAt: Date.now() };
+  await saveWorkspace(accountHash, workspace);
+  return workspaceToStoredState(workspace);
+}
+
+export async function upsertWorkspaceChatRefs(
+  accountHash: string,
+  chats: ChatRef[]
+): Promise<StoredState> {
+  const workspace = await getWorkspace(accountHash);
+  const index = workspace.chats ?? (workspace.chats = {});
+  chats.forEach((chat) => {
+    const existing = index[chat.conversationId];
+    index[chat.conversationId] = {
+      conversationId: chat.conversationId,
+      title: chat.title || existing?.title || '',
+      isPinned: typeof chat.isPinned === 'boolean' ? chat.isPinned : (existing?.isPinned ?? false),
+      projectId: chat.projectId ?? existing?.projectId ?? null,
+      updatedAt: chat.updatedAt ?? existing?.updatedAt ?? Date.now(),
+      lastUrl: chat.lastUrl ?? existing?.lastUrl
+    };
+  });
+  await saveWorkspace(accountHash, workspace);
+  return workspaceToStoredState(workspace);
+}
+
+export async function updateWorkspaceUiPrefs(
+  accountHash: string,
+  prefs: Partial<UiPrefs>
+): Promise<StoredState> {
+  const workspace = await getWorkspace(accountHash);
+  workspace.uiPrefs = { ...normalizeUiPrefs(workspace.uiPrefs), ...prefs };
+  await saveWorkspace(accountHash, workspace);
+  return workspaceToStoredState(workspace);
+}
+
+/** Builds the per-project JSON export (project metadata + chat listing). */
+export async function exportWorkspaceProject(
+  accountHash: string,
+  projectId: string
+): Promise<{ json: string; filename: string } | null> {
+  const workspace = await getWorkspace(accountHash);
+  const project = workspace.projects[projectId];
+  if (!project) return null;
+
+  const chats = Object.values(workspace.chats ?? {})
+    .filter((chat) => chat.projectId === project.id)
+    .map((chat) => ({ conversationId: chat.conversationId, title: chat.title }));
+  const payload = {
+    project: {
+      id: project.id,
+      name: project.name,
+      icon: project.icon,
+      color: project.color ?? null,
+      isPinned: project.isPinned === true,
+      createdAt: project.createdAt,
+      updatedAt: project.updatedAt,
+      sortIndex: project.sortIndex
+    },
+    chats
+  };
+  const filename = `${sanitizeWorkspaceFilename(project.name)}.json`;
+  return { json: JSON.stringify(payload, null, 2), filename };
+}
+
+function sanitizeWorkspaceFilename(name: string): string {
+  return name.replace(/[^a-zA-Z0-9-_]+/g, '_').replace(/^_+|_+$/g, '') || 'project';
 }

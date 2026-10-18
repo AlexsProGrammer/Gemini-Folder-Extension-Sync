@@ -1,16 +1,17 @@
-import { WorkspacePayloadSchema } from './schemas';
+import { parseWorkspace } from './schemas';
 import {
   getWorkspaceKey,
   LEGACY_PROMPTS_KEY,
   LEGACY_GENERIC_PROMPTS_KEY,
   LEGACY_GENERIC_PROJECTS_KEY,
-  STORAGE_KEY,
-  WORKSPACE_SCHEMA_VERSION
+  STORAGE_KEY
 } from './storage';
+import { getRawIdentifierForHash } from './account';
+import { isLocalVaultEnvelope, openWorkspaceEnvelope, type LocalVaultEnvelope } from './vault';
 import { WorkspacePayload } from './types';
 import { storageLocalGet, storageLocalSet } from './webext';
 
-const BACKUP_VERSION = 2;
+const BACKUP_VERSION = 3;
 const WORKSPACE_KEY_PREFIX = 'workspace_';
 
 export interface BackupData {
@@ -18,6 +19,8 @@ export interface BackupData {
   exportedAt: string;
   /** Account-partitioned workspaces keyed by SHA-256 account hash. */
   accounts?: Record<string, WorkspacePayload>;
+  /** Locked vault envelopes whose account identity was unavailable at export. */
+  lockedAccounts?: Record<string, LocalVaultEnvelope>;
   /** Legacy schema v1 snapshot kept for downgrade compatibility. */
   projects?: unknown;
   prompts?: unknown;
@@ -35,22 +38,41 @@ export async function exportAllData(): Promise<void> {
   const everything = await storageLocalGet<Record<string, unknown>>(null);
 
   const accounts: Record<string, WorkspacePayload> = {};
-  Object.entries(everything).forEach(([key, value]) => {
-    if (!key.startsWith(WORKSPACE_KEY_PREFIX)) return;
+  const lockedAccounts: Record<string, LocalVaultEnvelope> = {};
+  for (const [key, value] of Object.entries(everything)) {
+    if (!key.startsWith(WORKSPACE_KEY_PREFIX)) continue;
     const accountHash = key.slice(WORKSPACE_KEY_PREFIX.length);
-    if (!accountHash) return;
-    try {
-      accounts[accountHash] = WorkspacePayloadSchema.parse(value) as WorkspacePayload;
-    } catch {
-      // Export raw so no user data is silently dropped; import re-validates.
-      accounts[accountHash] = value as WorkspacePayload;
+    if (!accountHash) continue;
+
+    if (!isLocalVaultEnvelope(value)) {
+      // Legacy plaintext partition (not yet re-sealed): export directly.
+      try {
+        accounts[accountHash] = parseWorkspace(value);
+      } catch {
+        // Export raw so no user data is silently dropped; import re-validates.
+        accounts[accountHash] = value as WorkspacePayload;
+      }
+      continue;
     }
-  });
+
+    try {
+      const rawIdentifier = await getRawIdentifierForHash(accountHash);
+      if (!rawIdentifier) throw new Error('account identity unavailable');
+      const opened = await openWorkspaceEnvelope(accountHash, rawIdentifier, value);
+      if (!opened) throw new Error('empty partition');
+      accounts[accountHash] = opened.payload;
+    } catch {
+      // The vault key could not be derived here; keep the opaque envelope so
+      // the data is still restorable on a machine that owns the identity.
+      lockedAccounts[accountHash] = value;
+    }
+  }
 
   const payload: BackupData = {
     version: BACKUP_VERSION,
     exportedAt: new Date().toISOString(),
-    accounts,
+    ...(Object.keys(accounts).length > 0 ? { accounts } : {}),
+    ...(Object.keys(lockedAccounts).length > 0 ? { lockedAccounts } : {}),
     projects: everything[STORAGE_KEY] ?? everything[LEGACY_GENERIC_PROJECTS_KEY] ?? null,
     prompts: everything[LEGACY_PROMPTS_KEY] ?? everything[LEGACY_GENERIC_PROMPTS_KEY] ?? null
   };
@@ -85,15 +107,43 @@ export async function importData(file: File): Promise<{ success: boolean; messag
     const updates: Record<string, unknown> = {};
     let importedAccounts = 0;
     let skippedAccounts = 0;
+    let restoredLocked = 0;
+    let preservedExisting = 0;
 
-    if (data.accounts && typeof data.accounts === 'object' && data.version >= WORKSPACE_SCHEMA_VERSION) {
+    // Never clobber live encrypted partitions: restoring must not downgrade
+    // an existing sealed vault back to plaintext or overwrite newer data.
+    const existingWorkspaces = await storageLocalGet<Record<string, unknown>>(
+      Object.keys({ ...(data.accounts ?? {}), ...(data.lockedAccounts ?? {}) }).map(getWorkspaceKey)
+    );
+
+    if (data.accounts && typeof data.accounts === 'object') {
       Object.entries(data.accounts).forEach(([accountHash, workspace]) => {
         try {
-          const validated = WorkspacePayloadSchema.parse(workspace) as WorkspacePayload;
+          if (existingWorkspaces[getWorkspaceKey(accountHash)] !== undefined) {
+            preservedExisting += 1;
+            return;
+          }
+          const validated = parseWorkspace(workspace);
+          // Written in legacy plaintext form on purpose: the partition is
+          // sealed into its vault envelope on the account's next save, when
+          // its identity is available in this browser.
           updates[getWorkspaceKey(accountHash)] = validated;
           importedAccounts += 1;
         } catch {
           skippedAccounts += 1;
+        }
+      });
+    }
+
+    if (data.lockedAccounts && typeof data.lockedAccounts === 'object') {
+      Object.entries(data.lockedAccounts).forEach(([accountHash, envelope]) => {
+        if (
+          isLocalVaultEnvelope(envelope) &&
+          /^[0-9a-f]{64}$/.test(accountHash) &&
+          existingWorkspaces[getWorkspaceKey(accountHash)] === undefined
+        ) {
+          updates[getWorkspaceKey(accountHash)] = envelope;
+          restoredLocked += 1;
         }
       });
     }
@@ -114,6 +164,12 @@ export async function importData(file: File): Promise<{ success: boolean; messag
     const parts: string[] = [];
     if (importedAccounts > 0) {
       parts.push(`${importedAccounts} account workspace${importedAccounts === 1 ? '' : 's'}`);
+    }
+    if (restoredLocked > 0) {
+      parts.push(`${restoredLocked} locked envelope${restoredLocked === 1 ? '' : 's'}`);
+    }
+    if (preservedExisting > 0) {
+      parts.push(`${preservedExisting} kept (already present)`);
     }
     if (skippedAccounts > 0) {
       parts.push(`${skippedAccounts} skipped (invalid)`);

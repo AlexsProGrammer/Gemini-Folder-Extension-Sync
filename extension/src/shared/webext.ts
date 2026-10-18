@@ -5,6 +5,7 @@ type WebextApi = {
     local: {
       get: AnyFn;
       set: AnyFn;
+      clear?: AnyFn;
     };
     onChanged: { addListener: AnyFn };
   };
@@ -84,11 +85,53 @@ async function resolveApi(): Promise<WebextApi> {
   return api;
 }
 
+/**
+ * Clones a value into a plain, same-compartment object.
+ *
+ * Firefox hands content scripts Xray-wrapped values from `storage.local.get`
+ * (and from some runtime responses). Xray wrappers block prototype-chain
+ * access — reading `.constructor` throws `Permission denied to access
+ * property "constructor"` — which breaks schema validation (zod's
+ * `isPlainObject`) and any `instanceof`/method call on the value. Storage
+ * values are JSON-serializable by definition, so a JSON round-trip is a
+ * lossless way to obtain plain objects.
+ */
+export function sanitizeStorageValue<T>(value: T): T {
+  if (value === null || typeof value !== 'object') return value;
+  try {
+    return JSON.parse(JSON.stringify(value)) as T;
+  } catch (error) {
+    // TEMP diagnostics (gp-debug): if this fires, storage handed us a value the
+    // JSON round-trip cannot normalize and downstream code sees raw data.
+    console.warn('[gp-debug] storage value JSON round-trip failed; returning raw cross-compartment value', error);
+    // Fall back to the raw value; callers must tolerate cross-compartment data.
+    return value;
+  }
+}
+
+/**
+ * TEMP diagnostics (gp-debug): runs one pipeline step and, when it throws,
+ * logs the failing step label before rethrowing the original error.
+ *
+ * Xray "Permission denied" SecurityErrors carry no JS stack, so step labels
+ * are the only way to localize the throwing statement in a minified build.
+ * Remove once the failing step is known.
+ */
+export async function debugStep<T>(label: string, run: () => T | Promise<T>): Promise<T> {
+  try {
+    return await run();
+  } catch (error) {
+    console.error(`[gp-debug] step failed: ${label}:`, errorMessage(error));
+    throw error;
+  }
+}
+
 export async function storageLocalGet<T = Record<string, unknown>>(
   keys?: string | string[] | Record<string, unknown> | null
 ): Promise<T> {
   const api = await resolveApi();
-  return invokeCompat<T>(api.storage.local.get.bind(api.storage.local), [keys]);
+  const result = await invokeCompat<T>(api.storage.local.get.bind(api.storage.local), [keys]);
+  return sanitizeStorageValue(result);
 }
 
 export async function storageLocalSet(items: Record<string, unknown>): Promise<void> {
@@ -98,7 +141,54 @@ export async function storageLocalSet(items: Record<string, unknown>): Promise<v
 
 export async function runtimeSendMessage<TResponse = unknown>(message: unknown): Promise<TResponse> {
   const api = await resolveApi();
-  return invokeCompat<TResponse>(api.runtime.sendMessage.bind(api.runtime), [message]);
+  const response = await invokeCompat<TResponse>(api.runtime.sendMessage.bind(api.runtime), [message]);
+  return sanitizeStorageValue(response);
+}
+
+/** Reads `error.name` without `instanceof` (safe across compartments). */
+export function errorName(error: unknown): string {
+  if (typeof error === 'string') return error;
+  if (!error || typeof error !== 'object') return '';
+  try {
+    const name = (error as { name?: unknown }).name;
+    return typeof name === 'string' ? name : '';
+  } catch {
+    return '';
+  }
+}
+
+/** Reads `error.message` without `instanceof` (safe across compartments). */
+export function errorMessage(error: unknown): string {
+  if (typeof error === 'string') return error;
+  if (!error || typeof error !== 'object') return String(error);
+  try {
+    const message = (error as { message?: unknown }).message;
+    if (typeof message === 'string' && message) return message;
+  } catch {
+    // Fall through to String().
+  }
+  return String(error);
+}
+
+/** Reads `error.stack` without `instanceof` (safe across compartments). */
+export function errorStack(error: unknown): string {
+  if (!error || typeof error !== 'object') return '';
+  try {
+    const stack = (error as { stack?: unknown }).stack;
+    return typeof stack === 'string' ? stack : '';
+  } catch {
+    return '';
+  }
+}
+
+/** Deletes every key from extension local storage (Danger Zone wipe). */
+export async function storageLocalClear(): Promise<void> {
+  const api = await resolveApi();
+  const clear = api.storage.local.clear;
+  if (typeof clear !== 'function') {
+    throw new Error('storage.local.clear is not available in this context.');
+  }
+  return invokeCompat<void>(clear.bind(api.storage.local), []);
 }
 
 export function runtimeLastErrorMessage(): string | null {

@@ -77,7 +77,7 @@ export interface PromptTemplate {
 }
 
 export interface WorkspacePayload {
-  /** 2 = hierarchical project model with an integrated prompt library. */
+  /** 2 = hierarchical project model; 3 = adds the per-account chat index + UI prefs. */
   schemaVersion: number;
   /** SHA-256 hash of the raw Google account identifier. */
   accountId: string;
@@ -91,6 +91,14 @@ export interface WorkspacePayload {
   prompts: PromptTemplate[];
   /** Presentation metadata (tag colors) for the prompt library. */
   tagMeta?: Record<string, TagMeta>;
+  /**
+   * Per-account chat index (schema v3). Keyed by conversation id so chat
+   * titles, pin state and project assignments travel inside the same synced
+   * envelope. Optional so schema v2 payloads keep validating.
+   */
+  chats?: Record<string, ChatRef>;
+  /** Sidebar section collapse preferences (schema v3). */
+  uiPrefs?: UiPrefs;
 }
 
 export interface ChatRef {
@@ -217,19 +225,8 @@ export interface SyncStatusDetail {
   message?: string;
 }
 
-export type BackgroundRequest =
-  | { type: 'getState' }
-  | { type: 'upsertProject'; project: Project }
-  | { type: 'renameProject'; projectId: string; name: string }
-  | { type: 'setProjectPinned'; projectId: string; isPinned: boolean }
-  | { type: 'deleteProject'; projectId: string }
-  | { type: 'moveChat'; conversationId: string; projectId: string | null }
-  | { type: 'setChatPinned'; conversationId: string; isPinned: boolean }
-  | { type: 'upsertChatRefs'; chats: ChatRef[] }
-  | { type: 'exportProject'; projectId: string }
-  | { type: 'updateUiPrefs'; prefs: Partial<UiPrefs> }
-  | { type: 'refreshStateCache' };
-
-export type BackgroundResponse =
-  | { ok: true; state?: StoredState; json?: string; filename?: string }
-  | { ok: false; error: string };
+/**
+ * The background service worker owns only the sync CORS proxy; all workspace
+ * state lives in the account-partitioned (and locally encrypted) workspace and
+ * is mutated directly by the content script that resolved the active account.
+ */

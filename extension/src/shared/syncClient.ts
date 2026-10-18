@@ -8,7 +8,7 @@ import type {
   SyncPullMessage,
   SyncPushMessage
 } from './types';
-import { runtimeSendMessage } from './webext';
+import { errorMessage, runtimeSendMessage } from './webext';
 
 /**
  * Client-side bridge to the background CORS proxy. Content scripts never
@@ -21,7 +21,7 @@ function transportFailure(error: unknown): SyncApiResponse<never> {
   return {
     success: false,
     error: 'network_error',
-    message: error instanceof Error ? error.message : String(error)
+    message: errorMessage(error)
   };
 }
 

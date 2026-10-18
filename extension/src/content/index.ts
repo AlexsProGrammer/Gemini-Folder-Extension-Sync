@@ -1,13 +1,31 @@
-import { BackgroundRequest, BackgroundResponse, ChatRef, Project, RuntimeState, SyncStatus } from '../shared/types';
-import { runtimeSendMessage, storageLocalGet, storageLocalSet } from '../shared/webext';
-import { getWorkspace, onWorkspaceSaved } from '../shared/storage';
+import { ChatRef, Project, RuntimeState, StoredState, SyncStatus } from '../shared/types';
+import { debugStep, errorMessage, errorName, errorStack, storageLocalGet, storageLocalSet } from '../shared/webext';
+import {
+  deleteWorkspaceProject,
+  getWorkspace,
+  moveWorkspaceChat,
+  onWorkspaceSaved,
+  setWorkspaceChatPinned,
+  setWorkspaceProjectPinned,
+  updateWorkspaceUiPrefs,
+  upsertWorkspaceChatRefs,
+  upsertWorkspaceProject,
+  workspaceToStoredState
+} from '../shared/storage';
 import {
   syncEngine,
   SYNC_CONFLICT_EVENT,
   SYNC_STATUS_EVENT,
   WORKSPACE_UPDATED_EVENT
 } from '../shared/syncEngine';
-import { ACCOUNT_CHANGED_EVENT, AccountChangeDetail, getActiveAccountHash, initAccountWatcher } from './accountWatcher';
+import { getSyncSettings } from '../shared/storage';
+import {
+  ACCOUNT_CHANGED_EVENT,
+  AccountChangeDetail,
+  getActiveAccountHash,
+  initAccountWatcher,
+  resolveActiveAccountHash
+} from './accountWatcher';
 import {
   findChatRowElement,
   findChatsListContainer,
@@ -27,7 +45,7 @@ import { installSidebarInspector } from './sidebarInspector';
 import { CHAT_DRAG_MIME, createProjectsPanel } from './ui/projectsPanel';
 import { initChatGPT } from './chatgpt';
 
-const BUILD_MARKER = '2.0.7';
+const BUILD_MARKER = '2.0.7-vault3-fix1';
 const HIDDEN_ATTR = 'data-gp-native-hidden';
 const RESCAN_DELAY_MS = 350;
 const PANEL_READY_RETRY_MS = 120;
@@ -71,8 +89,45 @@ let activeProjectId: string | null = null;
 let pendingNewChatProjectId: string | null = null;
 let composerObserver: { stop: () => void } | null = null;
 
-function sendMessage(message: BackgroundRequest): Promise<BackgroundResponse> {
-  return runtimeSendMessage<BackgroundResponse>(message);
+/**
+ * Applies a mutation result (the derived runtime view of the account's
+ * workspace) to the in-memory sidebar state.
+ */
+function applyStoredState(next: StoredState): void {
+  state.projects = next.projects;
+  state.chatIndex = new Map(Object.entries(next.chatIndex));
+  state.uiPrefs = {
+    projectsCollapsed: next.uiPrefs.projectsCollapsed === true,
+    foldersCollapsed: next.uiPrefs.foldersCollapsed === true
+  };
+}
+
+function applyVaultLockedNotice(): void {
+  console.warn('[gemini-projects] workspace vault is locked for this account; data stays encrypted until its identity is available');
+  panel?.showToast('Workspace locked: account identity unavailable');
+}
+
+/**
+ * Re-derives the account's sync encryption key from the persisted settings
+ * (the passphrase never lives in memory across page loads) and reconciles
+ * with the server. Without this, sync would stay idle forever after a
+ * reload because the engine starts with an empty key cache.
+ */
+async function ensureSyncUnlocked(accountHash: string): Promise<void> {
+  if (!accountHash || syncEngine.hasKey(accountHash)) return;
+  try {
+    const settings = await getSyncSettings();
+    const passphrase = settings.useGlobalPassphrase
+      ? settings.globalPassphrase
+      : settings.accountPassphrases[accountHash];
+    if (!passphrase) return;
+    const derived = await syncEngine.setPassphrase(accountHash, passphrase);
+    if (derived) {
+      await syncEngine.pull(accountHash);
+    }
+  } catch (error) {
+    console.warn('[gemini-projects] sync unlock failed', error);
+  }
 }
 
 /**
@@ -86,18 +141,24 @@ function initWorkspaceSync(): void {
   window.addEventListener('focus', () => {
     const accountHash = getActiveAccountHash();
     if (!accountHash) return;
-    syncEngine.pull(accountHash).catch((error) =>
-      console.warn('[gemini-projects] focus pull failed', error)
-    );
+    ensureSyncUnlocked(accountHash)
+      .catch((error) => console.warn('[gemini-projects] focus unlock failed', error))
+      .then(() => syncEngine.pull(accountHash))
+      .catch((error) =>
+        console.warn('[gemini-projects] focus pull failed', error)
+      );
   });
 
   window.addEventListener('online', () => {
     syncEngine.setOnlineState(true);
     const accountHash = getActiveAccountHash();
     if (!accountHash) return;
-    syncEngine.pull(accountHash).catch((error) =>
-      console.warn('[gemini-projects] reconnect pull failed', error)
-    );
+    ensureSyncUnlocked(accountHash)
+      .catch((error) => console.warn('[gemini-projects] reconnect unlock failed', error))
+      .then(() => syncEngine.pull(accountHash))
+      .catch((error) =>
+        console.warn('[gemini-projects] reconnect pull failed', error)
+      );
   });
 
   window.addEventListener('offline', () => {
@@ -129,6 +190,10 @@ function initWorkspaceSync(): void {
       panel?.updateSyncStatus(detail.status as SyncStatus);
     }
   });
+
+  window.addEventListener('gemini-workspace:vault-locked', () => {
+    applyVaultLockedNotice();
+  });
 }
 
 /** Re-applies the engine's live status to the header badge (e.g. after account switch). */
@@ -140,6 +205,7 @@ function refreshSyncStatusBadge(): void {
 
 async function bootstrap() {
   document.documentElement.setAttribute('data-gp-build', BUILD_MARKER);
+  console.info('[gemini-projects] build', BUILD_MARKER);
 
   if (window.location.hostname.includes('chatgpt.com') || window.location.hostname.includes('openai.com')) {
     initChatGPT();
@@ -154,6 +220,10 @@ async function bootstrap() {
   window.addEventListener(ACCOUNT_CHANGED_EVENT, handleAccountChanged);
   await loadInitialState();
   refreshSyncStatusBadge();
+  // Resume server sync for this account (re-derives the key + initial pull).
+  resolveActiveAccountHash()
+    .then((accountHash) => ensureSyncUnlocked(accountHash))
+    .catch((error) => console.warn('[gemini-projects] initial sync unlock failed', error));
   observeDocumentForSidebar();
   installLifecycleRescans();
   runStage('responseFolding', () => initGeminiResponseFolding());
@@ -262,19 +332,23 @@ function initProjectInstructionInjection(): void {
   });
 }
 
+/**
+ * Loads the active account's encrypted workspace partition into the sidebar
+ * state. The account partition is the single source of truth: switching
+ * Google accounts swaps the entire dataset, never sharing one between them.
+ */
 async function loadInitialState() {
   try {
-    const response = await withTimeout(sendMessage({ type: 'getState' }), 1800);
-    if (!response.ok || !response.state) return;
-    state.projects = response.state.projects;
-    state.chatIndex = new Map(Object.entries(response.state.chatIndex));
-    const prefs = response.state.uiPrefs;
-    state.uiPrefs = {
-      projectsCollapsed: prefs?.projectsCollapsed === true,
-      foldersCollapsed: prefs?.foldersCollapsed === true
-    };
+    const accountHash = await debugStep('load:resolve-account', () => resolveActiveAccountHash());
+    const workspace = await debugStep('load:get-workspace', () => getWorkspace(accountHash));
+    debugStep('load:apply-state', () => applyStoredState(workspaceToStoredState(workspace)));
   } catch (error) {
-    console.warn('[gemini-projects] getState failed; starting with local empty state', error);
+    if (errorName(error) === 'VaultLockedError') {
+      applyVaultLockedNotice();
+    } else {
+      console.error('[gemini-projects] workspace load failed; starting empty:',
+        errorMessage(error), '\n', errorStack(error));
+    }
   }
   await loadCollapsedFolders(getActiveAccountHash());
 }
@@ -323,6 +397,11 @@ function handleAccountChanged(event: Event): void {
     '->',
     detail?.newHash
   );
+  // Drop the previous account's ephemeral sync key from memory so only the
+  // logged-in account's material is held at any time.
+  if (detail?.previousHash) {
+    syncEngine.clearPassphrase(detail.previousHash);
+  }
   state.collapsedProjectIds.clear();
   pendingNewChatProjectId = null;
   sessionStorage.removeItem(PENDING_NEW_CHAT_KEY);
@@ -333,6 +412,8 @@ function handleAccountChanged(event: Event): void {
   };
   lastRenderKey = '';
   loadInitialState()
+    .catch(() => undefined)
+    .then(() => ensureSyncUnlocked(detail?.newHash ?? ''))
     .catch(() => undefined)
     .then(() => {
       applyNativeChatVisibility();
@@ -526,7 +607,10 @@ async function handleSetChatPinned(conversationId: string, isPinned: boolean): P
     renderPanelIfChanged(true);
   }
   try {
-    await sendMessage({ type: 'setChatPinned', conversationId, isPinned });
+    const accountHash = await resolveActiveAccountHash();
+    const next = await setWorkspaceChatPinned(accountHash, conversationId, isPinned);
+    applyStoredState(next);
+    renderPanelIfChanged(true);
   } catch (error) {
     console.warn('[gemini-projects] setChatPinned failed', error);
   }
@@ -628,7 +712,10 @@ function syncNativeChatsFromDom() {
   }
 
   if (changed) {
-    sendMessage({ type: 'upsertChatRefs', chats: updates }).catch(() => undefined);
+    resolveActiveAccountHash()
+      .then((accountHash) => upsertWorkspaceChatRefs(accountHash, updates))
+      .then((next) => applyStoredState(next))
+      .catch(() => undefined);
   }
 }
 
@@ -730,13 +817,22 @@ function getSafeNativeChatRow(
 }
 
 async function handleSaveProject(project: Project) {
-  const response = await sendMessage({ type: 'upsertProject', project });
-  if (!response.ok || !response.state) return;
-  state.projects = response.state.projects;
-  if (project.parentId) state.collapsedProjectIds.delete(project.parentId);
-  if (project.kind === 'folder') state.collapsedProjectIds.delete(project.id);
-  persistCollapsedFolders(getActiveAccountHash());
-  renderPanelIfChanged(true);
+  try {
+    const accountHash = await debugStep('save:resolve-account', () => resolveActiveAccountHash());
+    const next = await debugStep('save:upsert-workspace', () => upsertWorkspaceProject(accountHash, project));
+    debugStep('save:apply-state', () => applyStoredState(next));
+    if (project.parentId) state.collapsedProjectIds.delete(project.parentId);
+    if (project.kind === 'folder') state.collapsedProjectIds.delete(project.id);
+    debugStep('save:persist-collapsed', () => { persistCollapsedFolders(getActiveAccountHash()); });
+    debugStep('save:render', () => renderPanelIfChanged(true));
+  } catch (error) {
+    if (errorName(error) === 'VaultLockedError') {
+      applyVaultLockedNotice();
+      return;
+    }
+    console.error('[gemini-projects] save project failed:', errorMessage(error), '\n', errorStack(error));
+    panel?.showToast('Could not save. Details in the console.');
+  }
 }
 
 async function handleAddCurrentChat(projectId: string) {
@@ -762,29 +858,34 @@ function handleToggleProjectExpand(projectId: string) {
 }
 
 async function handleMoveProject(projectId: string, targetParentId: string | null) {
-  const project = state.projects.find((item) => item.id === projectId);
-  if (!project) return;
-  if ((project.parentId ?? null) === targetParentId) return;
+  try {
+    const project = state.projects.find((item) => item.id === projectId);
+    if (!project) return;
+    if ((project.parentId ?? null) === targetParentId) return;
 
-  if (targetParentId) {
-    state.collapsedProjectIds.delete(targetParentId);
+    if (targetParentId) {
+      state.collapsedProjectIds.delete(targetParentId);
+    }
+    const siblings = state.projects.filter((item) => (item.parentId ?? null) === targetParentId);
+    const order = siblings.reduce((max, item) => Math.max(max, item.order), -1) + 1;
+
+    const next: Project = {
+      ...project,
+      parentId: targetParentId,
+      order,
+      sortIndex: order,
+      updatedAt: Date.now()
+    };
+    const accountHash = await resolveActiveAccountHash();
+    const stored = await upsertWorkspaceProject(accountHash, next);
+    applyStoredState(stored);
+    persistCollapsedFolders(getActiveAccountHash());
+    renderPanelIfChanged(true);
+    panel?.showToast('Project moved');
+  } catch (error) {
+    console.error('[gemini-projects] project move failed:', errorMessage(error), '\n', errorStack(error));
+    panel?.showToast('Could not move project. Details in the console.');
   }
-  const siblings = state.projects.filter((item) => (item.parentId ?? null) === targetParentId);
-  const order = siblings.reduce((max, item) => Math.max(max, item.order), -1) + 1;
-
-  const next: Project = {
-    ...project,
-    parentId: targetParentId,
-    order,
-    sortIndex: order,
-    updatedAt: Date.now()
-  };
-  const response = await sendMessage({ type: 'upsertProject', project: next });
-  if (!response.ok || !response.state) return;
-  state.projects = response.state.projects;
-  persistCollapsedFolders(getActiveAccountHash());
-  renderPanelIfChanged(true);
-  panel?.showToast('Project moved');
 }
 
 /** Creates a brand-new chat inside a project; the conversation is auto-assigned. */
@@ -811,47 +912,59 @@ function navigateToNewChat(): void {
 }
 
 async function handleToggleProjectPin(projectId: string, isPinned: boolean) {
-  const response = await sendMessage({ type: 'setProjectPinned', projectId, isPinned });
-  if (!response.ok) throw new Error(response.error);
-  if (!response.state) throw new Error('Project state was not returned');
-  state.projects = response.state.projects;
-  renderPanelIfChanged(true);
+  try {
+    const accountHash = await resolveActiveAccountHash();
+    const next = await setWorkspaceProjectPinned(accountHash, projectId, isPinned);
+    applyStoredState(next);
+    renderPanelIfChanged(true);
+  } catch (error) {
+    console.error('[gemini-projects] pin toggle failed:', errorMessage(error), '\n', errorStack(error));
+    panel?.showToast('Could not update pin. Details in the console.');
+  }
 }
 
 function handleToggleCollapse(section: 'projects' | 'folders', collapsed: boolean) {
   if (section === 'projects') {
     state.uiPrefs.projectsCollapsed = collapsed;
-    sendMessage({ type: 'updateUiPrefs', prefs: { projectsCollapsed: collapsed } }).catch(() => undefined);
   } else {
     state.uiPrefs.foldersCollapsed = collapsed;
-    sendMessage({ type: 'updateUiPrefs', prefs: { foldersCollapsed: collapsed } }).catch(() => undefined);
   }
+  resolveActiveAccountHash()
+    .then((accountHash) => updateWorkspaceUiPrefs(accountHash, { [section === 'projects' ? 'projectsCollapsed' : 'foldersCollapsed']: collapsed }))
+    .catch((error) => console.warn('[gemini-projects] ui prefs persist failed', error));
   renderPanelIfChanged(true);
 }
 
 async function handleDeleteProject(projectId: string) {
-  const response = await sendMessage({ type: 'deleteProject', projectId });
-  if (!response.ok || !response.state) return;
-  state.projects = response.state.projects;
-  state.chatIndex = new Map(Object.entries(response.state.chatIndex));
-  state.collapsedProjectIds.delete(projectId);
-  persistCollapsedFolders(getActiveAccountHash());
-  applyNativeChatVisibility();
-  renderPanelIfChanged(true);
+  try {
+    const accountHash = await resolveActiveAccountHash();
+    const next = await deleteWorkspaceProject(accountHash, projectId);
+    applyStoredState(next);
+    state.collapsedProjectIds.delete(projectId);
+    persistCollapsedFolders(getActiveAccountHash());
+    applyNativeChatVisibility();
+    renderPanelIfChanged(true);
+  } catch (error) {
+    console.error('[gemini-projects] delete project failed:', errorMessage(error), '\n', errorStack(error));
+    panel?.showToast('Could not delete. Details in the console.');
+  }
 }
 
 async function handleMoveChat(conversationId: string, projectId: string | null) {
-  await ensureChatKnown(conversationId);
-  const response = await sendMessage({ type: 'moveChat', conversationId, projectId });
-  if (!response.ok || !response.state) return;
-  state.projects = response.state.projects ?? state.projects;
-  state.chatIndex = new Map(Object.entries(response.state.chatIndex));
-  if (projectId) {
-    state.collapsedProjectIds.delete(projectId);
-    persistCollapsedFolders(getActiveAccountHash());
+  try {
+    await ensureChatKnown(conversationId);
+    const accountHash = await resolveActiveAccountHash();
+    const next = await moveWorkspaceChat(accountHash, conversationId, projectId);
+    applyStoredState(next);
+    if (projectId) {
+      state.collapsedProjectIds.delete(projectId);
+      persistCollapsedFolders(getActiveAccountHash());
+    }
+    applyNativeChatVisibility();
+    renderPanelIfChanged(true);
+  } catch (error) {
+    console.error('[gemini-projects] chat move failed:', errorMessage(error), '\n', errorStack(error));
   }
-  applyNativeChatVisibility();
-  renderPanelIfChanged(true);
 }
 
 async function ensureChatKnown(conversationId: string) {
@@ -874,7 +987,8 @@ async function ensureChatKnown(conversationId: string) {
       lastUrl: existing?.lastUrl || window.location.pathname
     };
     state.chatIndex.set(conversationId, chat);
-    await sendMessage({ type: 'upsertChatRefs', chats: [chat] }).catch(() => undefined);
+    const accountHash = await resolveActiveAccountHash();
+    applyStoredState(await upsertWorkspaceChatRefs(accountHash, [chat]));
     return;
   }
 
@@ -888,7 +1002,8 @@ async function ensureChatKnown(conversationId: string) {
     lastUrl: link.href
   };
   state.chatIndex.set(conversationId, chat);
-  await sendMessage({ type: 'upsertChatRefs', chats: [chat] }).catch(() => undefined);
+  const accountHash = await resolveActiveAccountHash();
+  applyStoredState(await upsertWorkspaceChatRefs(accountHash, [chat]));
 }
 
 function findNativeLinkByConversationId(conversationId: string): HTMLAnchorElement | null {
@@ -992,16 +1107,6 @@ function getRenderKey(): string {
   return `${state.uiPrefs.projectsCollapsed}|${state.uiPrefs.foldersCollapsed}|${Array.from(state.collapsedProjectIds).sort().join(',')}|${projects}|${chats}`;
 }
 
-function withTimeout<T>(promise: Promise<T>, timeoutMs: number): Promise<T> {
-  let timer: number | null = null;
-  const timeoutPromise = new Promise<T>((_, reject) => {
-    timer = window.setTimeout(() => reject(new Error(`timeout(${timeoutMs}ms)`)), timeoutMs);
-  });
-  return Promise.race([promise, timeoutPromise]).finally(() => {
-    if (timer !== null) window.clearTimeout(timer);
-  });
-}
-
 function runStage(name: string, fn: () => void) {
   try {
     fn();
@@ -1011,5 +1116,5 @@ function runStage(name: string, fn: () => void) {
 }
 
 bootstrap().catch((error) => {
-  console.error('[gemini-projects] bootstrap failed', error);
+  console.error('[gemini-projects] bootstrap failed:', errorMessage(error), '\n', errorStack(error));
 });

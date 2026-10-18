@@ -1,5 +1,5 @@
 import { WorkspacePayload } from './types';
-import { WorkspacePayloadSchema } from './schemas';
+import { parseWorkspace } from './schemas';
 
 /**
  * OWASP-aligned PBKDF2 budget: 310,000 SHA-256 iterations resist offline
@@ -20,10 +20,18 @@ function getSubtle(): SubtleCrypto {
 }
 
 function bytesToBase64(bytes: Uint8Array): string {
+  // Firefox content scripts see crypto.subtle through an Xray wrapper, so the
+  // ArrayBuffers it returns live in the page realm. Calling typed-array
+  // prototype methods (.subarray/.slice) on views over such buffers throws
+  // 'Permission denied to access property "constructor"' at the engine's
+  // security check. Element/index reads ARE safe, so copy the bytes into this
+  // compartment with Array.from first, then chunk over the plain array.
+  // Verified on Firefox 158: subarray/slice throw, Array.from + slice works.
+  const local = Array.from(bytes);
   let binary = '';
   const chunkSize = 0x8000;
-  for (let offset = 0; offset < bytes.length; offset += chunkSize) {
-    binary += String.fromCharCode(...bytes.subarray(offset, offset + chunkSize));
+  for (let offset = 0; offset < local.length; offset += chunkSize) {
+    binary += String.fromCharCode(...local.slice(offset, offset + chunkSize));
   }
   return btoa(binary);
 }
@@ -109,7 +117,7 @@ export async function decryptWorkspace(
 
   const json = new TextDecoder().decode(buffer);
   const raw = JSON.parse(json) as unknown;
-  return WorkspacePayloadSchema.parse(raw) as WorkspacePayload;
+  return parseWorkspace(raw);
 }
 
 /**
@@ -133,4 +141,64 @@ export async function testPassphrase(
   } catch {
     return false;
   }
+}
+
+/* ------------------------------------------------------------------ *
+ * Local vault primitives (zero-knowledge storage at rest)
+ * ------------------------------------------------------------------ */
+
+/** 128-bit random salt for the per-account local vault KDF. */
+export const VAULT_SALT_BYTES = 16;
+/** Fixed plaintext used to verify a derived vault key without touching data. */
+export const VAULT_CHECK_PLAINTEXT = 'gp-vault-check-v3';
+
+export function randomBase64(byteLength: number): string {
+  const bytes = crypto.getRandomValues(new Uint8Array(byteLength));
+  return bytesToBase64(bytes);
+}
+
+export function base64ToUint8Array(value: string): Uint8Array {
+  return base64ToBytes(value);
+}
+
+export function uint8ArrayToBase64(bytes: Uint8Array): string {
+  return bytesToBase64(bytes);
+}
+
+/** Derives the local vault AES-GCM-256 key from an arbitrary secret + salt. */
+export async function deriveVaultKey(secret: string, saltB64: string): Promise<CryptoKey> {
+  return deriveWorkspaceKey(secret, saltB64);
+}
+
+/** Encrypts a UTF-8 string under the given key with a fresh IV. */
+export async function encryptString(
+  plaintext: string,
+  key: CryptoKey
+): Promise<{ ciphertext: string; iv: string }> {
+  const subtle = getSubtle();
+  const iv = crypto.getRandomValues(new Uint8Array(IV_BYTE_LENGTH));
+  const buffer = await subtle.encrypt(
+    { name: 'AES-GCM', iv: iv as unknown as BufferSource },
+    key,
+    new TextEncoder().encode(plaintext) as unknown as BufferSource
+  );
+  return {
+    ciphertext: bytesToBase64(new Uint8Array(buffer)),
+    iv: bytesToBase64(iv)
+  };
+}
+
+/** Decrypts a Base64 AES-GCM envelope back into a UTF-8 string. */
+export async function decryptString(
+  ciphertextB64: string,
+  ivB64: string,
+  key: CryptoKey
+): Promise<string> {
+  const subtle = getSubtle();
+  const buffer = await subtle.decrypt(
+    { name: 'AES-GCM', iv: base64ToBytes(ivB64) as unknown as BufferSource },
+    key,
+    base64ToBytes(ciphertextB64) as unknown as BufferSource
+  );
+  return new TextDecoder().decode(buffer);
 }

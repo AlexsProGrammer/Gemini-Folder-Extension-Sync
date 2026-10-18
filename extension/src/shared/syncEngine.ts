@@ -11,7 +11,9 @@ import {
   WORKSPACE_SCHEMA_VERSION
 } from './storage';
 import { requestRemotePull, requestRemotePush } from './syncClient';
+import { errorMessage } from './webext';
 import type {
+  ChatRef,
   PromptTemplate,
   Project,
   SyncConflictDetail,
@@ -53,6 +55,26 @@ function mergePromptLibraries(
     merged.set(prompt.id, existing ? newerPrompt(prompt, existing) : prompt);
   });
   return Array.from(merged.values());
+}
+
+/** Newest revision wins per conversation; assignments travel with the chat. */
+function mergeChats(
+  localChats: Record<string, ChatRef> | undefined,
+  remoteChats: Record<string, ChatRef> | undefined
+): Record<string, ChatRef> {
+  const merged: Record<string, ChatRef> = {};
+  const ids = new Set([...Object.keys(localChats ?? {}), ...Object.keys(remoteChats ?? {})]);
+  ids.forEach((conversationId) => {
+    const localChat = localChats?.[conversationId];
+    const remoteChat = remoteChats?.[conversationId];
+    if (localChat && remoteChat) {
+      merged[conversationId] = remoteChat.updatedAt > localChat.updatedAt ? remoteChat : localChat;
+      return;
+    }
+    const winner = localChat ?? remoteChat;
+    if (winner) merged[conversationId] = winner;
+  });
+  return merged;
 }
 
 function mergeProjects(
@@ -226,7 +248,7 @@ export class SyncEngine {
       this.setStatus(
         accountHash,
         this.online ? 'error' : 'offline',
-        error instanceof Error ? error.message : String(error)
+        errorMessage(error)
       );
     }
   }
@@ -309,7 +331,7 @@ export class SyncEngine {
       this.setStatus(
         accountHash,
         this.online ? 'error' : 'offline',
-        error instanceof Error ? error.message : String(error)
+        errorMessage(error)
       );
     }
   }
@@ -378,7 +400,10 @@ function mergeWorkspaces(
     updatedAt: Date.now(),
     projects: mergeProjects(localState.projects, remoteState.projects),
     prompts: mergePromptLibraries(localState.prompts, remoteState.prompts),
-    tagMeta: { ...(remoteState.tagMeta ?? {}), ...(localState.tagMeta ?? {}) }
+    tagMeta: { ...(remoteState.tagMeta ?? {}), ...(localState.tagMeta ?? {}) },
+    chats: mergeChats(localState.chats, remoteState.chats),
+    // Sidebar preferences are device-local; the local view wins on merge.
+    uiPrefs: localState.uiPrefs ?? remoteState.uiPrefs
   };
 }
 

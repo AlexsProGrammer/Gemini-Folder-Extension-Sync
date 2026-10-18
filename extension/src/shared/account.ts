@@ -1,3 +1,5 @@
+import { storageLocalGet, storageLocalSet } from './webext';
+
 const ACCOUNT_INDEX_PATTERN = /\/u\/(\d+)/;
 const EMAIL_PATTERN = /[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/;
 
@@ -6,6 +8,116 @@ const PROFILE_BADGE_SELECTORS = [
   'button[aria-label*="@"]',
   'img[alt*="@"]'
 ] as const;
+
+/**
+ * Additional identity probes: Google renders the account email in the
+ * one-google-bar avatar button under several shapes; scanning these keeps
+ * identity resolution working when the primary badge selectors miss.
+ */
+const EXTENDED_IDENTITY_SELECTORS = [
+  '[data-ogsr-email]',
+  'a.gb_B[aria-label]',
+  'a.gb_d[aria-label]',
+  '[aria-label][data-identity-email]'
+] as const;
+
+/**
+ * Persistent account identity registry.
+ *
+ * - `byHash` is authoritative for the local vault: the workspace partition of
+ *   an account can only be decrypted with that account's raw identifier, so
+ *   the mapping must survive browser restarts even when the profile badge is
+ *   not currently rendered in the DOM.
+ * - `byIndex` keeps identity sticky for the URL-index fallback (`/u/N`): when
+ *   the email badge cannot be read, the index reuses the last email seen at
+ *   that index instead of minting an unstable `account_index_N` identity.
+ */
+const IDENTITY_REGISTRY_KEY = 'gemini_account_identity_registry';
+
+interface AccountIdentityRegistry {
+  byHash: Record<string, string>;
+  byIndex: Record<string, string>;
+}
+
+const memoryByHash = new Map<string, string>();
+
+function emptyRegistry(): AccountIdentityRegistry {
+  return { byHash: {}, byIndex: {} };
+}
+
+function asRegistry(raw: unknown): AccountIdentityRegistry {
+  if (!raw || typeof raw !== 'object') return emptyRegistry();
+  const candidate = raw as Partial<AccountIdentityRegistry>;
+  const byHash: Record<string, string> = {};
+  const byIndex: Record<string, string> = {};
+  if (candidate.byHash && typeof candidate.byHash === 'object') {
+    Object.entries(candidate.byHash as Record<string, unknown>).forEach(([hash, raw2]) => {
+      if (typeof raw2 === 'string' && /^[0-9a-f]{64}$/.test(hash)) byHash[hash] = raw2;
+    });
+  }
+  if (candidate.byIndex && typeof candidate.byIndex === 'object') {
+    Object.entries(candidate.byIndex as Record<string, unknown>).forEach(([index, raw2]) => {
+      if (typeof raw2 === 'string' && /^\d+$/.test(index)) byIndex[index] = raw2;
+    });
+  }
+  return { byHash, byIndex };
+}
+
+/**
+ * Records a resolved identity so the vault can re-derive the workspace key
+ * later and the index fallback stays sticky. Best-effort: failures never
+ * break account resolution.
+ */
+export async function rememberAccountIdentity(
+  rawIdentifier: string,
+  accountHash: string,
+  accountIndex?: string
+): Promise<void> {
+  memoryByHash.set(accountHash, rawIdentifier);
+  try {
+    const result = await storageLocalGet<Record<string, unknown>>([IDENTITY_REGISTRY_KEY]);
+    const registry = asRegistry(result[IDENTITY_REGISTRY_KEY]);
+    registry.byHash[accountHash] = rawIdentifier;
+    if (accountIndex !== undefined) {
+      registry.byIndex[accountIndex] = rawIdentifier;
+    }
+    await storageLocalSet({ [IDENTITY_REGISTRY_KEY]: registry });
+  } catch (error) {
+    console.warn('[gemini-projects] identity registry write failed', error);
+  }
+}
+
+/**
+ * Resolves the raw identifier that owns a workspace partition hash. Returns
+ * null when the identity is unknown in this context — the caller must then
+ * treat the partition as locked rather than fabricating a new one.
+ */
+export async function getRawIdentifierForHash(accountHash: string): Promise<string | null> {
+  const memory = memoryByHash.get(accountHash);
+  if (memory) return memory;
+
+  try {
+    const result = await storageLocalGet<Record<string, unknown>>([IDENTITY_REGISTRY_KEY]);
+    const registry = asRegistry(result[IDENTITY_REGISTRY_KEY]);
+    const registered = registry.byHash[accountHash];
+    if (registered) {
+      memoryByHash.set(accountHash, registered);
+      return registered;
+    }
+  } catch (error) {
+    console.warn('[gemini-projects] identity registry read failed', error);
+  }
+
+  // Last resort: resolve from the live DOM and accept only when the derived
+  // hash matches the requested partition exactly.
+  const domIdentifier = resolveAccountRawIdentifier();
+  const domHash = await getAccountIdHash(domIdentifier);
+  if (domHash === accountHash) {
+    void rememberAccountIdentity(domIdentifier, accountHash, getAccountIndex());
+    return domIdentifier;
+  }
+  return null;
+}
 
 export function getAccountIndex(): string {
   if (typeof window === 'undefined' || !window.location) return '0';
@@ -19,21 +131,64 @@ function extractEmailFromText(text: string): string | null {
   return match?.[0] ?? null;
 }
 
+function extractEmailFromAttributes(node: Element): string | null {
+  const attributes = ['aria-label', 'alt', 'title', 'data-ogsr-email', 'data-identity-email'];
+  for (const attribute of attributes) {
+    const email = extractEmailFromText(node.getAttribute(attribute) || '');
+    if (email) return email;
+  }
+  return null;
+}
+
 export function resolveAccountRawIdentifier(): string {
   const accountIndex = getAccountIndex();
 
   if (typeof document !== 'undefined') {
-    for (const selector of PROFILE_BADGE_SELECTORS) {
-      const nodes = document.querySelectorAll<HTMLElement>(selector);
-      for (const node of nodes) {
-        const label = node.getAttribute('aria-label') || node.getAttribute('alt') || '';
-        const email = extractEmailFromText(label);
+    for (const selector of [...PROFILE_BADGE_SELECTORS, ...EXTENDED_IDENTITY_SELECTORS]) {
+      let nodes: NodeListOf<Element>;
+      try {
+        nodes = document.querySelectorAll(selector);
+      } catch {
+        continue;
+      }
+      for (const node of Array.from(nodes)) {
+        const email = extractEmailFromAttributes(node);
         if (email) return email;
       }
     }
   }
 
   return `account_index_${accountIndex}`;
+}
+
+/**
+ * Resolves the raw identifier with the sticky index map: when the profile
+ * badge cannot be read right now, the last email observed at this URL index
+ * is reused so the account keeps the same workspace partition.
+ */
+export async function resolveStableAccountRawIdentifier(): Promise<string> {
+  const accountIndex = getAccountIndex();
+  const domIdentifier = resolveAccountRawIdentifier();
+
+  if (!domIdentifier.startsWith('account_index_')) {
+    void rememberAccountIdentity(domIdentifier, await getAccountIdHash(domIdentifier), accountIndex);
+    return domIdentifier;
+  }
+
+  try {
+    const result = await storageLocalGet<Record<string, unknown>>([IDENTITY_REGISTRY_KEY]);
+    const registry = asRegistry(result[IDENTITY_REGISTRY_KEY]);
+    const sticky = registry.byIndex[accountIndex];
+    if (sticky && !sticky.startsWith('account_index_')) {
+      console.info('[gemini-projects] using sticky identity for account index', accountIndex);
+      void rememberAccountIdentity(sticky, await getAccountIdHash(sticky), accountIndex);
+      return sticky;
+    }
+  } catch (error) {
+    console.warn('[gemini-projects] sticky identity lookup failed', error);
+  }
+
+  return domIdentifier;
 }
 
 export async function getAccountIdHash(rawIdentifier: string): Promise<string> {

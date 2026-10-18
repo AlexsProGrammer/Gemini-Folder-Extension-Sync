@@ -1,6 +1,5 @@
 ﻿import { ChatRef, Project, ProjectIcon, RuntimeState, SyncStatus, WorkspacePayload } from '../../shared/types';
 import { exportAllData, triggerImport } from '../../shared/backup';
-import { runtimeSendMessage } from '../../shared/webext';
 import { resolveAccountRawIdentifier } from '../../shared/account';
 import { getActiveAccountHash } from '../accountWatcher';
 import { getWorkspace, saveWorkspace } from '../../shared/storage';
@@ -639,13 +638,6 @@ export function createProjectsPanel(options: ProjectsPanelOptions) {
     toast.show(message);
   }
 
-  async function refreshStateCache(): Promise<void> {
-    const response = await runtimeSendMessage<{ ok?: boolean; error?: string }>({ type: 'refreshStateCache' });
-    if (response && response.ok === false) {
-      throw new Error(response.error || 'Runtime message failed');
-    }
-  }
-
   async function handleBackupClick() {
     try {
       await exportAllData();
@@ -659,12 +651,8 @@ export function createProjectsPanel(options: ProjectsPanelOptions) {
     triggerImport(async (result) => {
       showToast(result.message);
       if (!result.success) return;
-
-      try {
-        await refreshStateCache();
-      } catch {
-        // Reload below will rebuild state even if the eager cache refresh fails.
-      }
+      // The reload rebuilds all state from the (now encrypted) workspace
+      // partitions; no separate cache-refresh step is needed anymore.
       window.location.reload();
     });
   }
