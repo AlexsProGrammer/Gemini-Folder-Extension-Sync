@@ -275,41 +275,4 @@ export function settingsGearIcon(size = 18): string {
   );
 }
 
-/* ------------------------------------------------------------------ *
- * Cloud sync status icons (Lucide-style, stroke = currentColor)
- * ------------------------------------------------------------------ */
 
-function cloudIcon(paths: string): string {
-  return `
-    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-      ${paths}
-    </svg>
-  `;
-}
-
-const CLOUD_BODY = '<path d="M17.5 19H9a7 7 0 1 1 6.71-9h1.79a4.5 4.5 0 1 1 0 9Z"/>';
-
-/** Synced cloud with a check mark. */
-export function cloudSyncedIcon(): string {
-  return cloudIcon(`${CLOUD_BODY}<path d="m9 12 2 2 4-4"/>`);
-}
-
-/** Syncing cloud with an upward arrow (rotated via CSS while active). */
-export function cloudSyncingIcon(): string {
-  return cloudIcon(`${CLOUD_BODY}<path d="M12 13V7"/><path d="m9 9.5 3-3 3 3"/>`);
-}
-
-/** Offline cloud with a slash. */
-export function cloudOfflineIcon(): string {
-  return cloudIcon(`${CLOUD_BODY}<path d="m2 2 20 20"/><path d="M5.78 5.78A7 7 0 0 0 9 19h8.5a4.5 4.5 0 0 0 1.3-.19"/>`);
-}
-
-/** Conflicting cloud with an exclamation mark. */
-export function cloudConflictIcon(): string {
-  return cloudIcon(`${CLOUD_BODY}<path d="M12 11v3.5"/><path d="M12 17.5h.01"/>`);
-}
-
-/** Error cloud with a cross. */
-export function cloudErrorIcon(): string {
-  return cloudIcon(`${CLOUD_BODY}<path d="m9.5 10.5 5 5"/><path d="m14.5 10.5-5 5"/>`);
-}

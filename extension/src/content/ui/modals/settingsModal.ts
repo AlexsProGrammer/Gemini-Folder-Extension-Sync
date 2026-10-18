@@ -2,14 +2,20 @@ import { requestRemotePull } from '../../../shared/syncClient';
 import { syncEngine } from '../../../shared/syncEngine';
 import { getSyncSettings, saveSyncSettings } from '../../../shared/storage';
 import type { SyncSettings } from '../../../shared/types';
+import { exportAllData, triggerImport } from '../../../shared/backup';
+import { errorMessage, storageLocalClear } from '../../../shared/webext';
 
-const ROOT_ID = 'gp-sync-settings-root';
+const ROOT_ID = 'gp-settings-root';
 const PROBE_ACCOUNT_ID = 'probe';
 
 const CLOSE_ICON = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>';
 const EYE_ICON = '<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7-10-7-10-7Z"/><circle cx="12" cy="12" r="3"/></svg>';
 const EYE_OFF_ICON = '<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94"/><path d="M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19"/><path d="m14.12 14.12a3 3 0 1 1-4.24-4.24"/><path d="m1 1 22 22"/></svg>';
+const EXPORT_ICON = '<svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 4v11"/><path d="m7.5 11 4.5 4.5 4.5-4.5"/><path d="M5.5 20h13"/></svg>';
+const IMPORT_ICON = '<svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 12a8 8 0 1 0 2.35-5.65"/><path d="M4 4.5v5h5"/></svg>';
 
+// Single dialog shared by the Sync and Settings tabs. All sections reuse the
+// `.gp-sync-modal-root` design tokens so every tab looks identical.
 const STYLE = `
 .gp-sync-modal-root {
   all: initial;
@@ -113,6 +119,36 @@ const STYLE = `
 }
 .gp-sync-modal-root .gp-sync-close:hover { background: var(--gp-hover); }
 .gp-sync-modal-root .gp-sync-close svg { width: 18px; height: 18px; }
+.gp-sync-modal-root .gp-sync-tabs {
+  display: flex;
+  gap: 6px;
+}
+.gp-sync-modal-root .gp-sync-tab {
+  flex: 0 0 auto;
+  height: 34px;
+  padding: 0 18px;
+  border: 1px solid transparent;
+  border-radius: 999px;
+  background: transparent;
+  color: var(--gp-muted);
+  cursor: pointer;
+  font-family: var(--gp-font);
+  font-size: 13.5px;
+  font-weight: 600;
+  transition: background 0.15s ease, color 0.15s ease;
+}
+.gp-sync-modal-root .gp-sync-tab:hover { background: var(--gp-hover); color: var(--gp-fg); }
+.gp-sync-modal-root .gp-sync-tab.active {
+  background: var(--gp-focus-ring);
+  border-color: var(--gp-accent);
+  color: var(--gp-accent);
+}
+.gp-sync-modal-root .gp-tab-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+}
+.gp-sync-modal-root .gp-tab-panel[hidden] { display: none; }
 .gp-sync-modal-root .gp-sync-section {
   display: flex;
   flex-direction: column;
@@ -227,6 +263,95 @@ const STYLE = `
   line-height: 16px;
   color: var(--gp-muted);
 }
+.gp-sync-modal-root .gp-settings-io {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px;
+}
+.gp-sync-modal-root .gp-io-btn {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-height: 58px;
+  padding: 10px 14px;
+  border: 1px solid var(--gp-border);
+  border-radius: 14px;
+  background: var(--gp-surface-2);
+  color: var(--gp-fg);
+  cursor: pointer;
+  font-family: var(--gp-font);
+  text-align: left;
+  transition: border-color 0.15s ease, background 0.15s ease, box-shadow 0.15s ease;
+}
+.gp-sync-modal-root .gp-io-btn:hover {
+  border-color: var(--gp-accent);
+  box-shadow: 0 0 0 3px var(--gp-focus-ring);
+}
+.gp-sync-modal-root .gp-io-btn:disabled { opacity: 0.6; cursor: wait; }
+.gp-sync-modal-root .gp-io-btn svg {
+  flex: 0 0 20px;
+  color: var(--gp-accent);
+}
+.gp-sync-modal-root .gp-io-text {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.gp-sync-modal-root .gp-io-title { font-size: 13.5px; font-weight: 700; }
+.gp-sync-modal-root .gp-io-desc {
+  font-size: 11.5px;
+  line-height: 15px;
+  color: var(--gp-muted);
+}
+.gp-sync-modal-root .gp-io-status {
+  margin: 0;
+  font-size: 12px;
+  line-height: 16px;
+  color: var(--gp-muted);
+}
+.gp-sync-modal-root .gp-io-status.ok { color: var(--gp-success); }
+.gp-sync-modal-root .gp-io-status.error { color: var(--gp-danger); }
+.gp-sync-modal-root .gp-io-status:empty { display: none; }
+.gp-sync-modal-root .gp-sync-danger {
+  border: 1px solid rgba(179, 38, 30, 0.4);
+  background: rgba(179, 38, 30, 0.05);
+  border-radius: 16px;
+  padding: 14px;
+}
+.gp-sync-modal-root.gp-sync-dark .gp-sync-danger {
+  border-color: rgba(242, 184, 181, 0.4);
+  background: rgba(242, 184, 181, 0.07);
+}
+.gp-sync-modal-root .gp-sync-danger .gp-sync-section-title { color: var(--gp-danger); }
+.gp-sync-modal-root .gp-sync-danger-hint {
+  margin: 0;
+  font-size: 12px;
+  line-height: 16px;
+  color: var(--gp-fg-muted);
+}
+.gp-sync-modal-root .gp-sync-danger-btn {
+  align-self: flex-start;
+  height: 38px;
+  padding: 0 16px;
+  border: 1px solid var(--gp-danger);
+  border-radius: 999px;
+  background: transparent;
+  color: var(--gp-danger);
+  cursor: not-allowed;
+  font-family: var(--gp-font);
+  font-size: 13.5px;
+  font-weight: 700;
+  opacity: 0.5;
+}
+.gp-sync-modal-root .gp-sync-danger-btn:not(:disabled) {
+  cursor: pointer;
+  opacity: 1;
+}
+.gp-sync-modal-root .gp-sync-danger-btn:not(:disabled):hover {
+  background: var(--gp-danger);
+  color: var(--gp-on-accent);
+}
 .gp-sync-modal-root .gp-sync-actions {
   display: flex;
   align-items: center;
@@ -273,67 +398,6 @@ const STYLE = `
 .gp-sync-modal-root .gp-sync-primary:not(:disabled):hover { filter: brightness(0.96); }
 `;
 
-function buildMarkup(activeAccountLabel: string): string {
-  return `
-    <div class="gp-sync-backdrop" data-gp-sync-backdrop>
-      <div class="gp-sync-dialog" role="dialog" aria-modal="true" aria-labelledby="gp-sync-title">
-        <div class="gp-sync-header">
-          <div class="gp-sync-title-wrap">
-            <h2 class="gp-sync-title" id="gp-sync-title">Sync settings</h2>
-            <p class="gp-sync-subtitle">Connect this browser to your self-hosted sync server.</p>
-          </div>
-          <button class="gp-sync-close" data-gp-action="close" type="button" aria-label="Close">${CLOSE_ICON}</button>
-        </div>
-
-        <div class="gp-sync-section">
-          <div class="gp-sync-section-title">Connection</div>
-          <label class="gp-sync-field">
-            <span class="gp-sync-label">Server URL</span>
-            <input class="gp-sync-input" data-gp-server-url type="url" placeholder="https://sync.example.com" spellcheck="false" autocomplete="off" />
-          </label>
-          <div class="gp-sync-field">
-            <span class="gp-sync-label">API Key</span>
-            <div class="gp-sync-password-wrap">
-              <input class="gp-sync-input" data-gp-api-key type="password" placeholder="Paste your API key" spellcheck="false" autocomplete="off" />
-              <button class="gp-sync-eye" data-gp-action="toggle-key" type="button" aria-label="Show or hide API key">${EYE_ICON}</button>
-            </div>
-          </div>
-          <div class="gp-sync-test-row">
-            <button class="gp-sync-ghost" data-gp-action="test" type="button">Test Connection</button>
-            <span class="gp-sync-test-result" data-gp-test-result role="status" aria-live="polite"></span>
-          </div>
-        </div>
-
-        <div class="gp-sync-section">
-          <div class="gp-sync-section-title">Encryption</div>
-          <div class="gp-sync-account-badge">
-            <span class="gp-sync-account-dot" aria-hidden="true"></span>
-            <span class="gp-sync-account-label" data-gp-account-label>${activeAccountLabel}</span>
-          </div>
-          <label class="gp-sync-check-row">
-            <input type="checkbox" data-gp-global-toggle />
-            <span>Use same encryption passphrase for all Google accounts</span>
-          </label>
-          <div class="gp-sync-field">
-            <span class="gp-sync-label" data-gp-passphrase-label>Master Encryption Passphrase</span>
-            <div class="gp-sync-password-wrap">
-              <input class="gp-sync-input" data-gp-passphrase type="password" placeholder="Enter passphrase" spellcheck="false" autocomplete="off" />
-              <button class="gp-sync-eye" data-gp-action="toggle-passphrase" type="button" aria-label="Show or hide passphrase">${EYE_ICON}</button>
-            </div>
-          </div>
-          <p class="gp-sync-hint" data-gp-account-hint style="display: none;"></p>
-        </div>
-
-        <div class="gp-sync-actions">
-          <span class="gp-sync-error" data-gp-error role="alert"></span>
-          <button class="gp-sync-cancel" data-gp-action="cancel" type="button">Cancel</button>
-          <button class="gp-sync-primary" data-gp-action="save" type="button">Save &amp; Sync</button>
-        </div>
-      </div>
-    </div>
-  `;
-}
-
 function isValidServerUrl(value: string): boolean {
   if (!value) return false;
   try {
@@ -344,7 +408,11 @@ function isValidServerUrl(value: string): boolean {
   }
 }
 
-export function openSyncSettingsModal(activeAccountId: string, activeAccountLabel: string): void {
+/**
+ * Combined settings dialog. The "Sync" tab (default) configures the sync
+ * backend, the "Settings" tab holds backup/restore and the local-data wipe.
+ */
+export function openSettingsModal(activeAccountId: string, activeAccountLabel: string): void {
   document.getElementById(ROOT_ID)?.remove();
 
   const root = document.createElement('div');
@@ -353,7 +421,11 @@ export function openSyncSettingsModal(activeAccountId: string, activeAccountLabe
   root.innerHTML = `<style>${STYLE}</style>${buildMarkup(activeAccountLabel)}`;
   document.body.appendChild(root);
 
-  const backdrop = root.querySelector<HTMLElement>('[data-gp-sync-backdrop]')!;
+  const backdrop = root.querySelector<HTMLElement>('[data-gp-settings-backdrop]')!;
+  const tabs = Array.from(root.querySelectorAll<HTMLButtonElement>('[data-gp-tab]'));
+  const syncPanel = root.querySelector<HTMLElement>('[data-gp-tab-panel="sync"]')!;
+  const settingsPanel = root.querySelector<HTMLElement>('[data-gp-tab-panel="settings"]')!;
+
   const serverUrlInput = root.querySelector<HTMLInputElement>('[data-gp-server-url]')!;
   const apiKeyInput = root.querySelector<HTMLInputElement>('[data-gp-api-key]')!;
   const testButton = root.querySelector<HTMLButtonElement>('[data-gp-action="test"]')!;
@@ -362,10 +434,15 @@ export function openSyncSettingsModal(activeAccountId: string, activeAccountLabe
   const passphraseInput = root.querySelector<HTMLInputElement>('[data-gp-passphrase]')!;
   const passphraseLabel = root.querySelector<HTMLElement>('[data-gp-passphrase-label]')!;
   const accountHint = root.querySelector<HTMLElement>('[data-gp-account-hint]')!;
-  const errorEl = root.querySelector<HTMLElement>('[data-gp-error]')!;
+  const syncErrorEl = root.querySelector<HTMLElement>('[data-gp-sync-error]')!;
   const saveButton = root.querySelector<HTMLButtonElement>('[data-gp-action="save"]')!;
-  const closeButton = root.querySelector<HTMLButtonElement>('[data-gp-action="close"]')!;
-  const cancelButton = root.querySelector<HTMLButtonElement>('[data-gp-action="cancel"]')!;
+
+  const exportButton = root.querySelector<HTMLButtonElement>('[data-gp-action="export"]')!;
+  const importButton = root.querySelector<HTMLButtonElement>('[data-gp-action="import"]')!;
+  const ioStatus = root.querySelector<HTMLElement>('[data-gp-io-status]')!;
+  const ioErrorEl = root.querySelector<HTMLElement>('[data-gp-io-error]')!;
+  const dangerInput = root.querySelector<HTMLInputElement>('[data-gp-danger-input]')!;
+  const dangerButton = root.querySelector<HTMLButtonElement>('[data-gp-action="danger-wipe"]')!;
 
   let currentSettings: SyncSettings = {
     serverUrl: '',
@@ -393,6 +470,20 @@ export function openSyncSettingsModal(activeAccountId: string, activeAccountLabe
   document.addEventListener('keydown', onKeyDown);
   window.addEventListener('pagehide', cleanup);
 
+  function selectTab(name: 'sync' | 'settings'): void {
+    for (const tab of tabs) {
+      const active = tab.dataset.gpTab === name;
+      tab.classList.toggle('active', active);
+      tab.setAttribute('aria-selected', String(active));
+    }
+    syncPanel.hidden = name !== 'sync';
+    settingsPanel.hidden = name !== 'settings';
+  }
+  tabs.forEach((tab) => {
+    tab.addEventListener('click', () => selectTab((tab.dataset.gpTab as 'sync' | 'settings') ?? 'sync'));
+  });
+  selectTab('sync');
+
   function syncPassphraseMode(): void {
     const global = globalToggle.checked;
     passphraseLabel.textContent = global
@@ -419,11 +510,11 @@ export function openSyncSettingsModal(activeAccountId: string, activeAccountLabe
         : `Passphrases are stored for ${otherCount} other accounts.`;
   }
 
-  function setError(message: string): void {
-    errorEl.textContent = message;
+  function setSyncError(message: string): void {
+    syncErrorEl.textContent = message;
   }
-  function clearError(): void {
-    errorEl.textContent = '';
+  function clearSyncError(): void {
+    syncErrorEl.textContent = '';
   }
 
   function showTestResult(message: string, tone: 'ok' | 'error' | ''): void {
@@ -473,8 +564,11 @@ export function openSyncSettingsModal(activeAccountId: string, activeAccountLabe
   backdrop.addEventListener('click', (event) => {
     if (event.target === backdrop) cleanup();
   });
-  closeButton.addEventListener('click', cleanup);
-  cancelButton.addEventListener('click', cleanup);
+  root.querySelectorAll<HTMLButtonElement>('[data-gp-action="close"]').forEach((button) => {
+    button.addEventListener('click', cleanup);
+  });
+  root.querySelector<HTMLButtonElement>('[data-gp-action="cancel"]')
+    ?.addEventListener('click', cleanup);
 
   testButton.addEventListener('click', async () => {
     const serverUrl = serverUrlInput.value.trim().replace(/\/+$/, '');
@@ -487,7 +581,7 @@ export function openSyncSettingsModal(activeAccountId: string, activeAccountLabe
       showTestResult('Enter the API key first.', 'error');
       return;
     }
-    clearError();
+    clearSyncError();
     testButton.disabled = true;
     testButton.textContent = 'Testing…';
     showTestResult('', '');
@@ -516,17 +610,17 @@ export function openSyncSettingsModal(activeAccountId: string, activeAccountLabe
     const passphrase = passphraseInput.value;
     const useGlobal = globalToggle.checked;
 
-    clearError();
+    clearSyncError();
     if (!isValidServerUrl(serverUrl)) {
-      setError('Enter a valid http(s) server URL.');
+      setSyncError('Enter a valid http(s) server URL.');
       return;
     }
     if (!apiKey) {
-      setError('API key is required.');
+      setSyncError('API key is required.');
       return;
     }
     if (!passphrase) {
-      setError('Enter an encryption passphrase.');
+      setSyncError('Enter an encryption passphrase.');
       return;
     }
 
@@ -547,7 +641,7 @@ export function openSyncSettingsModal(activeAccountId: string, activeAccountLabe
       await saveSyncSettings(nextSettings);
       const derived = await syncEngine.setPassphrase(activeAccountId, passphrase);
       if (!derived) {
-        setError('Could not derive the encryption key from that passphrase.');
+        setSyncError('Could not derive the encryption key from that passphrase.');
         saveButton.disabled = false;
         return;
       }
@@ -557,8 +651,179 @@ export function openSyncSettingsModal(activeAccountId: string, activeAccountLabe
       );
     } catch (error) {
       console.warn('[gemini-projects] saving sync settings failed', error);
-      setError('Could not save settings. Please try again.');
+      setSyncError('Could not save settings. Please try again.');
       saveButton.disabled = false;
     }
   });
+
+  function setIoStatus(message: string, tone: 'ok' | 'error' | ''): void {
+    ioStatus.textContent = message;
+    ioStatus.classList.remove('ok', 'error');
+    if (tone) ioStatus.classList.add(tone);
+  }
+  function setIoError(message: string): void {
+    ioErrorEl.textContent = message;
+  }
+
+  exportButton.addEventListener('click', async () => {
+    setIoError('');
+    exportButton.disabled = true;
+    try {
+      await exportAllData();
+      setIoStatus('Backup file downloaded.', 'ok');
+    } catch (error) {
+      setIoStatus(`Export failed: ${errorMessage(error)}`, 'error');
+    } finally {
+      exportButton.disabled = false;
+    }
+  });
+
+  importButton.addEventListener('click', () => {
+    setIoError('');
+    setIoStatus('', '');
+    triggerImport((result) => {
+      setIoStatus(result.message, result.success ? 'ok' : 'error');
+      if (result.success) {
+        // The reload rebuilds all state from the restored workspace
+        // partitions; give the user a moment to read the summary first.
+        window.setTimeout(() => window.location.reload(), 900);
+      }
+    });
+  });
+
+  // Danger Zone: the wipe button stays disabled until the exact confirmation
+  // phrase is typed, so an accidental click can never destroy local data.
+  dangerButton.disabled = true;
+  dangerInput.addEventListener('input', () => {
+    dangerButton.disabled = dangerInput.value !== 'DELETE ALL';
+  });
+  dangerButton.addEventListener('click', async () => {
+    if (dangerInput.value !== 'DELETE ALL') return;
+    dangerButton.disabled = true;
+    dangerButton.textContent = 'Deleting…';
+    try {
+      await storageLocalClear();
+      cleanup();
+      window.location.reload();
+    } catch (error) {
+      setIoError(`Could not clear storage: ${errorMessage(error)}`);
+      dangerButton.textContent = 'Delete all local data';
+      dangerButton.disabled = false;
+    }
+  });
+}
+
+function buildMarkup(activeAccountLabel: string): string {
+  return `
+    <div class="gp-sync-backdrop" data-gp-settings-backdrop>
+      <div class="gp-sync-dialog" role="dialog" aria-modal="true" aria-labelledby="gp-settings-title">
+        <div class="gp-sync-header">
+          <div class="gp-sync-title-wrap">
+            <h2 class="gp-sync-title" id="gp-settings-title">Settings</h2>
+            <p class="gp-sync-subtitle">Manage the sync backend and the data stored in this browser.</p>
+          </div>
+          <button class="gp-sync-close" data-gp-action="close" type="button" aria-label="Close">${CLOSE_ICON}</button>
+        </div>
+
+        <div class="gp-sync-tabs" role="tablist" aria-label="Settings sections">
+          <button class="gp-sync-tab active" data-gp-tab="sync" type="button" role="tab" aria-selected="true">Sync</button>
+          <button class="gp-sync-tab" data-gp-tab="settings" type="button" role="tab" aria-selected="false">Settings</button>
+        </div>
+
+        <div class="gp-tab-panel" data-gp-tab-panel="sync">
+          <div class="gp-sync-section">
+            <div class="gp-sync-section-title">Connection</div>
+            <label class="gp-sync-field">
+              <span class="gp-sync-label">Server URL</span>
+              <input class="gp-sync-input" data-gp-server-url type="url" placeholder="https://sync.example.com" spellcheck="false" autocomplete="off" />
+            </label>
+            <div class="gp-sync-field">
+              <span class="gp-sync-label">API Key</span>
+              <div class="gp-sync-password-wrap">
+                <input class="gp-sync-input" data-gp-api-key type="password" placeholder="Paste your API key" spellcheck="false" autocomplete="off" />
+                <button class="gp-sync-eye" data-gp-action="toggle-key" type="button" aria-label="Show or hide API key">${EYE_ICON}</button>
+              </div>
+            </div>
+            <div class="gp-sync-test-row">
+              <button class="gp-sync-ghost" data-gp-action="test" type="button">Test Connection</button>
+              <span class="gp-sync-test-result" data-gp-test-result role="status" aria-live="polite"></span>
+            </div>
+          </div>
+
+          <div class="gp-sync-section">
+            <div class="gp-sync-section-title">Encryption</div>
+            <div class="gp-sync-account-badge">
+              <span class="gp-sync-account-dot" aria-hidden="true"></span>
+              <span class="gp-sync-account-label" data-gp-account-label>${activeAccountLabel}</span>
+            </div>
+            <label class="gp-sync-check-row">
+              <input type="checkbox" data-gp-global-toggle />
+              <span>Use same encryption passphrase for all Google accounts</span>
+            </label>
+            <div class="gp-sync-field">
+              <span class="gp-sync-label" data-gp-passphrase-label>Master Encryption Passphrase</span>
+              <div class="gp-sync-password-wrap">
+                <input class="gp-sync-input" data-gp-passphrase type="password" placeholder="Enter passphrase" spellcheck="false" autocomplete="off" />
+                <button class="gp-sync-eye" data-gp-action="toggle-passphrase" type="button" aria-label="Show or hide passphrase">${EYE_ICON}</button>
+              </div>
+            </div>
+            <p class="gp-sync-hint" data-gp-account-hint style="display: none;"></p>
+          </div>
+
+          <div class="gp-sync-actions">
+            <span class="gp-sync-error" data-gp-sync-error role="alert"></span>
+            <button class="gp-sync-cancel" data-gp-action="cancel" type="button">Cancel</button>
+            <button class="gp-sync-primary" data-gp-action="save" type="button">Save &amp; Sync</button>
+          </div>
+        </div>
+
+        <div class="gp-tab-panel" data-gp-tab-panel="settings" hidden>
+          <div class="gp-sync-section">
+            <div class="gp-sync-section-title">Backup &amp; Restore</div>
+            <div class="gp-settings-io">
+              <button class="gp-io-btn" data-gp-action="export" type="button">
+                ${EXPORT_ICON}
+                <span class="gp-io-text">
+                  <span class="gp-io-title">Export data</span>
+                  <span class="gp-io-desc">Download a JSON backup</span>
+                </span>
+              </button>
+              <button class="gp-io-btn" data-gp-action="import" type="button">
+                ${IMPORT_ICON}
+                <span class="gp-io-text">
+                  <span class="gp-io-title">Import data</span>
+                  <span class="gp-io-desc">Restore from a backup file</span>
+                </span>
+              </button>
+            </div>
+            <p class="gp-sync-hint">
+              The backup contains every Google account's projects, folders, chat assignments, the prompt
+              library and sync settings. Importing never overwrites account data that already exists here.
+            </p>
+            <p class="gp-io-status" data-gp-io-status role="status" aria-live="polite"></p>
+          </div>
+
+          <div class="gp-sync-section gp-sync-danger">
+            <div class="gp-sync-section-title">Danger Zone</div>
+            <p class="gp-sync-danger-hint">
+              Deletes <strong>everything</strong> this extension stored in the browser: all accounts'
+              projects, folders, chat assignments, the prompt library and sync settings. Encrypted
+              per-account data cannot be recovered afterwards. Data already synced to your server is
+              not touched.
+            </p>
+            <div class="gp-sync-field" style="display: flex; flex-direction: column; gap: 5px;">
+              <span class="gp-sync-label">Type DELETE ALL to confirm</span>
+              <input class="gp-sync-input" data-gp-danger-input type="text" placeholder="DELETE ALL" autocomplete="off" spellcheck="false" />
+            </div>
+            <button class="gp-sync-danger-btn" data-gp-action="danger-wipe" type="button" disabled>Delete all local data</button>
+          </div>
+
+          <div class="gp-sync-actions">
+            <span class="gp-sync-error" data-gp-io-error role="alert"></span>
+            <button class="gp-sync-cancel" data-gp-action="close" type="button">Close</button>
+          </div>
+        </div>
+      </div>
+    </div>
+  `;
 }

@@ -14,10 +14,8 @@ import {
   renderIconSvg
 } from './icons';
 import { PANEL_TITLE_FONT_STACK, PANEL_TITLE_TYPOGRAPHY } from './typography';
-import { createSyncStatusBadge } from './syncStatusBadge';
 import { createPromptsBadge, createSettingsBadge } from './headerBadges';
-import { openSyncSettingsModal } from './modals/syncSettingsModal';
-import { openExtensionSettingsModal } from './modals/extensionSettingsModal';
+import { openSettingsModal } from './modals/settingsModal';
 import { openConflictModal } from './modals/conflictModal';
 import { createWorkspaceDrawer, WorkspaceDrawerHandle } from './workspaceDrawer';
 import { PromptPicker } from '../prompts/picker';
@@ -150,17 +148,18 @@ export function createProjectsPanel(options: ProjectsPanelOptions) {
   // Initialize theme observer
   attachThemeObserver(panelRoot, overlayLayer);
 
-  // Sync status badge (opens the Sync Settings modal) + conflict resolver.
-  function openSyncSettings() {
+  // Settings badge: the single combined badge (sync state dot + gear icon)
+  // that opens the tabbed Sync/Settings modal, plus the conflict resolver.
+  function openSettings() {
     const activeAccountId = getActiveAccountHash() ?? '';
     const activeAccountLabel = resolveAccountRawIdentifier();
-    openSyncSettingsModal(activeAccountId, activeAccountLabel);
+    openSettingsModal(activeAccountId, activeAccountLabel);
   }
 
   const initialSyncStatus: SyncStatus = getActiveAccountHash()
     ? syncEngine.getSyncStatus(getActiveAccountHash() ?? '')
     : 'unconfigured';
-  const syncBadge = createSyncStatusBadge(openSyncSettings, lastSyncStatus === 'unconfigured' ? initialSyncStatus : lastSyncStatus);
+  const settingsBadge = createSettingsBadge(openSettings, lastSyncStatus === 'unconfigured' ? initialSyncStatus : lastSyncStatus);
 
   // Prompt library badge: opens the shared prompt picker anchored to the
   // badge; the count chip tracks the active account's saved prompts.
@@ -171,12 +170,9 @@ export function createProjectsPanel(options: ProjectsPanelOptions) {
   promptStore.subscribe(() => promptsBadge.updateCount(promptStore.getAll().length));
   void promptStore.refresh().catch(() => undefined);
 
-  // Settings badge: backup/restore plus the local-data wipe.
-  const settingsBadge = createSettingsBadge(() => openExtensionSettingsModal());
-
   function updateSyncStatus(status: SyncStatus): void {
     lastSyncStatus = status;
-    syncBadge.updateStatus(status);
+    settingsBadge.updateStatus(status);
   }
 
   if (!syncConflictListenerAttached) {
@@ -228,9 +224,8 @@ export function createProjectsPanel(options: ProjectsPanelOptions) {
     // Render markup based on uiPrefs (collapsed state)
     panelRoot.innerHTML = buildPanelMarkup(state);
     const syncHeader = panelRoot.querySelector<HTMLElement>('[data-gp-sync-header]');
-    if (syncHeader && syncHeader !== syncBadge.parentElement) {
+    if (syncHeader && syncHeader !== settingsBadge.parentElement) {
       syncHeader.appendChild(promptsBadge);
-      syncHeader.appendChild(syncBadge);
       syncHeader.appendChild(settingsBadge);
     }
     attachPanelEvents(state);
@@ -1263,6 +1258,7 @@ function ensurePanelRoot(shadow: ShadowRoot): HTMLElement {
         align-items: center;
         justify-content: flex-start;
         padding: 0 12px 6px;
+        gap: 10px;
       }
 
       .gp-sync-badge {
@@ -1321,23 +1317,85 @@ function ensurePanelRoot(shadow: ShadowRoot): HTMLElement {
         color: var(--gp-fg);
       }
 
-      .gp-sync-badge.status-syncing .gp-sync-icon svg {
-        animation: gp-sync-spin 1.1s linear infinite;
+      /* Icon-only settings badge (opens the tabbed Sync/Settings modal). */
+      .gp-settings-badge {
+        position: relative;
+        width: 26px;
+        height: 26px;
+        border: none;
+        border-radius: 50%;
+        background: transparent;
+        color: var(--gp-fg-muted);
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        cursor: pointer;
+        user-select: none;
+        flex-shrink: 0;
+        transition: background 0.15s ease, color 0.15s ease;
       }
 
-      .gp-sync-badge.status-conflict,
-      .gp-sync-badge.status-error {
-        color: #b3261e;
+      .gp-settings-badge:hover {
+        background: var(--gp-bg-hover);
+        color: var(--gp-fg);
       }
 
-      :host(.dark) .gp-sync-badge.status-conflict,
-      :host(.dark) .gp-sync-badge.status-error {
-        color: #f2b8b5;
+      .gp-settings-badge .gp-sync-icon {
+        display: inline-flex;
+        align-items: center;
       }
 
-      @keyframes gp-sync-spin {
-        to {
-          transform: rotate(360deg);
+      .gp-settings-badge .gp-sync-icon svg {
+        width: 16px;
+        height: 16px;
+        display: block;
+      }
+
+      .gp-settings-badge .gp-status-dot {
+        position: absolute;
+        top: 2px;
+        right: 2px;
+        width: 7px;
+        height: 7px;
+        border-radius: 50%;
+        background: var(--gp-fg-muted);
+        transition: background 0.15s ease;
+      }
+
+      .gp-settings-badge.dot-synced .gp-status-dot {
+        background: #188038;
+      }
+
+      .gp-settings-badge.dot-syncing .gp-status-dot {
+        background: #1a73e8;
+        animation: gp-dot-pulse 1.1s ease-in-out infinite;
+      }
+
+      .gp-settings-badge.dot-offline .gp-status-dot {
+        background: #9aa0a6;
+      }
+
+      .gp-settings-badge.dot-conflict .gp-status-dot,
+      .gp-settings-badge.dot-error .gp-status-dot {
+        background: #b3261e;
+      }
+
+      :host(.dark) .gp-settings-badge.dot-synced .gp-status-dot {
+        background: #81c995;
+      }
+
+      :host(.dark) .gp-settings-badge.dot-syncing .gp-status-dot {
+        background: #8ab4f8;
+      }
+
+      :host(.dark) .gp-settings-badge.dot-conflict .gp-status-dot,
+      :host(.dark) .gp-settings-badge.dot-error .gp-status-dot {
+        background: #f2b8b5;
+      }
+
+      @keyframes gp-dot-pulse {
+        50% {
+          opacity: 0.35;
         }
       }
     `;
