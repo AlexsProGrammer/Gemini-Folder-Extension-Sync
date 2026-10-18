@@ -1,8 +1,8 @@
-export const PANEL_TITLE_FONT_STACK = '"Iowan Old Style", "Palatino Linotype", "Book Antiqua", Georgia, "Songti SC", serif';
+export const PANEL_TITLE_FONT_STACK = '"Google Sans Flex", "Google Sans", "Helvetica Neue", "Segoe UI", Roboto, Arial, sans-serif';
 
-// 独立面板和弹窗的主标题共用同一层级，避免各模块单独调整后出现差异。
+// Panel and modal headings share the same type level so modules never drift apart.
 export const PANEL_TITLE_TYPOGRAPHY = `
-  font-family: var(--gp-font-serif);
+  font-family: var(--gp-font-title);
   font-size: 24px;
   line-height: 30px;
   font-weight: 600;

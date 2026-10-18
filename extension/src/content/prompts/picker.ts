@@ -348,8 +348,8 @@ export class PromptPicker {
   private getStyles(): string {
     return `
       :host {
-        --gp-font-serif: ${PANEL_TITLE_FONT_STACK};
-        --gp-font-sans: "Anthropic Sans Text", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+        --gp-font-title: ${PANEL_TITLE_FONT_STACK};
+        --gp-font-sans: "Google Sans Flex", "Google Sans", "Helvetica Neue", "Segoe UI", Roboto, Arial, sans-serif;
         --gp-surface: #ffffff;
         --gp-surface-elevated: #faf9f5;
         --gp-fg: #141413;

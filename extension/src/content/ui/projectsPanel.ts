@@ -1227,9 +1227,9 @@ function ensurePanelRoot(shadow: ShadowRoot): HTMLElement {
         /* 30px chats padding + 1px border + 26px = chat title column (dot 6px + gap 8px + 12px row padding). */
         padding: 8px 16px 8px 26px;
         margin: 0;
+        font-family: var(--gp-font);
         font-size: 12px;
         color: var(--gp-section);
-        font-style: italic;
       }
 
       .gp-project-children {
@@ -1466,7 +1466,7 @@ function ensureOverlayLayer(shadow: ShadowRoot): HTMLElement {
         font-family: inherit;
         color: var(--gp-fg, #1f1f1f);
         --gp-font: "Google Sans Flex", "Google Sans", "Helvetica Neue", "Segoe UI", Roboto, Arial, sans-serif;
-        --gp-font-serif: ${PANEL_TITLE_FONT_STACK};
+        --gp-font-title: ${PANEL_TITLE_FONT_STACK};
         --gp-fg: #1f1f1f;
         --gp-fg-muted: #5f6368;
         --gp-muted: #747775;
@@ -1782,10 +1782,10 @@ function ensureOverlayLayer(shadow: ShadowRoot): HTMLElement {
         position: fixed;
         min-width: 220px;
         background: var(--gp-surface);
-        border-radius: var(--gp-radius-xl);
+        border-radius: 16px;
         box-shadow: 0 8px 20px rgba(60, 64, 67, 0.18);
         border: 1px solid var(--gp-border);
-        padding: 6px; /* Padding: 6px */
+        padding: 8px;
         display: none;
         pointer-events: auto;
         font-family: var(--gp-font);
@@ -1797,13 +1797,13 @@ function ensureOverlayLayer(shadow: ShadowRoot): HTMLElement {
         align-items: center;
         justify-content: space-between;
         gap: 12px;
-        padding: 6px 12px; /* Tighter padding */
-        border-radius: var(--gp-radius);
+        padding: 0 12px;
+        border-radius: 18px;
         cursor: pointer;
-        font-size: 14px;
-        font-weight: 500;
+        font-size: 12px;
+        font-weight: 300;
         color: var(--gp-fg);
-        line-height: 20px;
+        line-height: 16px;
         transition: background var(--gp-transition), color var(--gp-transition);
       }
       .gp-menu-item:hover {
@@ -1817,25 +1817,27 @@ function ensureOverlayLayer(shadow: ShadowRoot): HTMLElement {
         max-width: calc(100vw - 16px);
         box-sizing: border-box;
         padding: 8px;
-        border-radius: 20px;
+        border-radius: 16px;
       }
       .gp-project-menu .gp-menu-item {
         width: 100%;
+        height: 36px;
         min-height: 36px;
         justify-content: flex-start;
-        gap: 10px;
+        gap: 12px;
         padding: 0 12px;
         border: 0;
         background: transparent;
         box-sizing: border-box;
-        border-radius: 12px;
+        border-radius: 18px;
         font-family: inherit;
         text-align: left;
-        font-size: 14px;
-        font-weight: 500;
       }
       .gp-project-menu .gp-menu-item svg {
-        flex: 0 0 18px;
+        width: 16px;
+        height: 16px;
+        flex: 0 0 16px;
+        stroke-width: 2;
       }
       .gp-project-menu .gp-menu-item:hover,
       .gp-project-menu .gp-menu-item:focus-visible {
@@ -1860,20 +1862,19 @@ function ensureOverlayLayer(shadow: ShadowRoot): HTMLElement {
         max-width: calc(100vw - 16px);
         box-sizing: border-box;
         padding: 8px;
-        border-radius: 20px;
+        border-radius: 16px;
       }
       .gp-chat-menu .gp-menu-item {
         justify-content: flex-start;
-        gap: 10px;
+        gap: 12px;
+        height: 36px;
         min-height: 36px;
         padding: 0 12px;
-        border-radius: 12px;
-        font-size: 14px;
-        font-weight: 500;
+        border-radius: 18px;
       }
       .gp-chat-menu .gp-menu-item svg {
-        width: 18px;
-        height: 18px;
+        width: 16px;
+        height: 16px;
         flex-shrink: 0;
       }
       .gp-chat-menu .gp-menu-item span {
@@ -1905,7 +1906,7 @@ function ensureOverlayLayer(shadow: ShadowRoot): HTMLElement {
         overflow-y: auto;
         box-sizing: border-box;
         background: var(--gp-surface);
-        border-radius: 20px;
+        border-radius: 16px;
         box-shadow: 0 8px 20px rgba(60, 64, 67, 0.18);
         border: 1px solid var(--gp-border);
         padding: 8px;
@@ -1915,15 +1916,16 @@ function ensureOverlayLayer(shadow: ShadowRoot): HTMLElement {
       }
       .gp-submenu .gp-menu-item {
         justify-content: flex-start;
-        gap: 10px;
+        gap: 12px;
+        height: 36px;
         min-height: 36px;
         padding: 0 12px;
-        font-size: 14px;
-        border-radius: 12px;
+        border-radius: 18px;
       }
       .gp-submenu .gp-menu-item svg {
-        width: 18px;
-        height: 18px;
+        width: 16px;
+        height: 16px;
+        stroke-width: 2;
       }
       .gp-toast {
         position: fixed;

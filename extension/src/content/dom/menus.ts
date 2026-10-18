@@ -740,37 +740,36 @@ function createInjectedMenuItem(action: string, iconPaths: string, label: string
   item.setAttribute('role', 'menuitem');
   item.setAttribute(MENU_ITEM_ATTR, action);
 
-  // Pixel-perfect native alignment: 280 × 32 items, 0 12px padding,
-  // 18px icon, 14px "Google Sans Flex" at weight 500.
+  // Match Gemini's native menu rows: 36px items, 0 12px padding, 16px icon,
+  // 12px "Google Sans Flex" at weight 300, pill radius (50% of item height).
   item.style.setProperty('display', 'flex', 'important');
   item.style.setProperty('align-items', 'center', 'important');
   item.style.setProperty('gap', '12px', 'important');
-  item.style.setProperty('height', '32px', 'important');
-  item.style.setProperty('min-height', '32px', 'important');
-  item.style.setProperty('max-height', '32px', 'important');
+  item.style.setProperty('height', '36px', 'important');
+  item.style.setProperty('min-height', '36px', 'important');
+  item.style.setProperty('max-height', '36px', 'important');
   item.style.setProperty('padding', '0 12px', 'important');
-  item.style.setProperty('margin', '2px 0', 'important');
   item.style.setProperty('box-sizing', 'border-box', 'important');
   item.style.setProperty('cursor', 'pointer', 'important');
-  item.style.setProperty('border-radius', '8px', 'important');
+  item.style.setProperty('border-radius', '18px', 'important');
   item.style.setProperty('background', 'transparent', 'important');
   item.style.setProperty('color', 'inherit', 'important');
   item.style.setProperty('border', 'none', 'important');
   item.style.setProperty('outline', 'none', 'important');
   item.style.setProperty('font-family', `${ITEM_FONT_STACK}`, 'important');
-  item.style.setProperty('font-size', '14px', 'important');
-  item.style.setProperty('font-weight', '500', 'important');
-  item.style.setProperty('line-height', '20px', 'important');
+  item.style.setProperty('font-size', '12px', 'important');
+  item.style.setProperty('font-weight', '300', 'important');
+  item.style.setProperty('line-height', '16px', 'important');
 
   const icon = document.createElement('span');
-  icon.style.setProperty('width', '18px', 'important');
-  icon.style.setProperty('height', '18px', 'important');
-  icon.style.setProperty('flex', '0 0 18px', 'important');
+  icon.style.setProperty('width', '16px', 'important');
+  icon.style.setProperty('height', '16px', 'important');
+  icon.style.setProperty('flex', '0 0 16px', 'important');
   icon.style.display = 'inline-flex';
   icon.style.alignItems = 'center';
   icon.style.justifyContent = 'center';
   icon.innerHTML = `
-    <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+    <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
       ${iconPaths}
     </svg>
   `;
@@ -791,7 +790,7 @@ function createInjectedMenuItem(action: string, iconPaths: string, label: string
     arrow.style.alignItems = 'center';
     arrow.style.opacity = '0.6';
     arrow.innerHTML = `
-      <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+      <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
         <path d="M10 17l5-5-5-5"/>
       </svg>
     `;

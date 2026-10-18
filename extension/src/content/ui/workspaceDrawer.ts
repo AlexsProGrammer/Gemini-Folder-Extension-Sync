@@ -1,5 +1,4 @@
 import { Project } from '../../shared/types';
-import { PANEL_TITLE_FONT_STACK, PANEL_TITLE_TYPOGRAPHY } from './typography';
 import { instructionsIcon, noteIcon, renderIconSvg } from './icons';
 
 export interface WorkspaceMeta {
