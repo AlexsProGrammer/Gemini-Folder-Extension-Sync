@@ -1,0 +1,47 @@
+# Dependencies
+node_modules/
+
+# Build output
+dist/
+release/
+store-upload*/
+store-upload/
+_local/
+
+# Local backups and notes
+backups/
+Note/
+HANDOFF_NEXT_CHAT.md
+CHANGELOG.md
+
+# Local packages / archives
+*.zip
+*.7z
+*.tar
+*.gz
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+# Logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Private local configuration and browser/test data
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.crx
+*.ldb
+*.jsonl
+chrome-profile*/
+test-results/
+playwright-report/
+coverage/
