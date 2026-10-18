@@ -1,7 +1,10 @@
 import { ChatRef, Project, RuntimeState, StoredState, SyncStatus } from '../shared/types';
 import { debugStep, errorMessage, errorName, errorStack, storageLocalGet, storageLocalSet } from '../shared/webext';
 import {
+  createDefaultFeatureSettings,
   deleteWorkspaceProject,
+  FEATURE_SETTINGS_CHANGED_EVENT,
+  getFeatureSettings,
   getWorkspace,
   moveWorkspaceChat,
   onWorkspaceSaved,
@@ -37,10 +40,16 @@ import {
   injectProjectsSection
 } from './dom/anchors';
 import { attachChatMenuEnhancer } from './dom/menus';
-import { initComposerObserver, hasUserTurnsInChat } from './dom/composerObserver';
+import { findChatComposer, initComposerObserver, hasUserTurnsInChat } from './dom/composerObserver';
 import { initGeminiResponseFolding } from './gemini/responseFolding';
 import * as prompts from './prompts';
-import { injectProjectInstructions } from './prompts/injector';
+import { composerContainsInstructions } from './prompts/composer';
+import {
+  configureInstructionsButton,
+  injectProjectInstructions,
+  prependProjectInstructions,
+  setInstructionsButtonVisible
+} from './prompts/injector';
 import { installSidebarInspector } from './sidebarInspector';
 import { CHAT_DRAG_MIME, createProjectsPanel } from './ui/projectsPanel';
 import { initChatGPT } from './chatgpt';
@@ -232,30 +241,168 @@ async function bootstrap() {
 }
 
 /* ------------------------------------------------------------------ *
- * Project system-prompt injection lifecycle
+ * Project system-prompt & notes injection lifecycle
  * ------------------------------------------------------------------ */
 
-async function resolveProjectSystemPrompt(projectId: string): Promise<string> {
-  const accountHash = getActiveAccountHash();
-  if (accountHash) {
-    try {
-      const workspace = await getWorkspace(accountHash);
-      const project = workspace.projects[projectId];
-      // The account-partitioned workspace is authoritative: once a project
-      // exists there, its (possibly empty) prompt must not leak across
-      // accounts via the legacy global state.
-      if (project) return project.systemPrompt ?? '';
-    } catch (error) {
-      console.warn('[gemini-projects] workspace prompt lookup failed', error);
-    }
-  }
-  return state.projects.find((item) => item.id === projectId)?.systemPrompt ?? '';
+/** Effective instructions resolved for the container a chat lives in. */
+interface ProjectInstructions {
+  systemPrompt: string;
+  notes: string;
+  projectName: string;
 }
 
 /**
- * Watches Gemini's chat surface and auto-injects the active project's system
- * prompt whenever a fresh blank conversation becomes ready. Ongoing multi-turn
- * conversations are never touched.
+ * Walks the container's ancestor chain (subfolder -> project) and, per field,
+ * takes the nearest container that defines a value, so chats inside
+ * subfolders inherit their parent project's system prompt and notes. The
+ * account workspace is authoritative; the sidebar state is only a fallback.
+ */
+async function resolveProjectInstructions(projectId: string | null): Promise<ProjectInstructions | null> {
+  if (!projectId) return null;
+
+  const byId = new Map(state.projects.map((project) => [project.id, project]));
+  const chain: Project[] = [];
+  const seen = new Set<string>();
+  let cursor = byId.get(projectId);
+  while (cursor && !seen.has(cursor.id)) {
+    seen.add(cursor.id);
+    chain.push(cursor);
+    cursor = cursor.parentId ? byId.get(cursor.parentId) : undefined;
+  }
+  if (!chain.length) return null;
+
+  let workspaceProjects: Record<string, Project> | null = null;
+  const accountHash = getActiveAccountHash();
+  if (accountHash) {
+    try {
+      workspaceProjects = (await getWorkspace(accountHash)).projects ?? null;
+    } catch (error) {
+      console.warn('[gemini-projects] workspace instruction lookup failed', error);
+    }
+  }
+
+  const metaOf = (id: string): Project | undefined => workspaceProjects?.[id] ?? byId.get(id);
+
+  let systemPrompt = '';
+  let notes = '';
+  let sourceName = '';
+  for (const node of chain) {
+    const meta = metaOf(node.id);
+    if (!systemPrompt && (meta?.systemPrompt ?? '').trim()) {
+      systemPrompt = (meta?.systemPrompt ?? '').trim();
+      sourceName = meta?.name || node.name;
+    }
+    if (!notes && (meta?.notes ?? '').trim()) {
+      notes = (meta?.notes ?? '').trim();
+      if (!sourceName) sourceName = meta?.name || node.name;
+    }
+    if (systemPrompt && notes) break;
+  }
+
+  if (!systemPrompt && !notes) return null;
+  return { systemPrompt, notes, projectName: sourceName || chain[0].name };
+}
+
+/**
+ * Conversation whose injected instruction block the user removed via the
+ * status pill. `'blank'` covers fresh conversations that do not have an id
+ * yet; the dismissal carries over to the conversation created by the first
+ * send and resets when a different conversation is opened.
+ */
+let dismissedInstructionKey: string | null = null;
+const DISMISS_KEY_BLANK = 'blank';
+
+/**
+ * Synchronous chain check against the sidebar state (kept in sync with the
+ * workspace by every save/sync path): true when the chat's container or any
+ * of its ancestors defines a system prompt or notes.
+ */
+function projectChainHasInstructions(projectId: string | null): boolean {
+  if (!projectId) return false;
+  const byId = new Map(state.projects.map((project) => [project.id, project]));
+  let cursor = byId.get(projectId);
+  const seen = new Set<string>();
+  while (cursor && !seen.has(cursor.id)) {
+    seen.add(cursor.id);
+    if ((cursor.systemPrompt ?? '').trim() || (cursor.notes ?? '').trim()) return true;
+    cursor = cursor.parentId ? byId.get(cursor.parentId) : undefined;
+  }
+  return false;
+}
+
+/** Resolves the container the current conversation (or pending new chat) belongs to. */
+function currentInstructionProjectId(): string | null {
+  const conversationId = getConversationId(window.location.href);
+  const projectId = conversationId
+    ? state.chatIndex.get(conversationId)?.projectId ?? null
+    : null;
+  return projectId ?? activeProjectId ?? pendingNewChatProjectId;
+}
+
+/**
+ * Shows/hides the composer-toolbar "Add instructions" button: only when the
+ * setting is enabled AND the current conversation's project chain has
+ * instructions configured.
+ */
+function refreshInstructionsButton(): void {
+  void (async () => {
+    try {
+      const settings = await getFeatureSettings();
+      const visible =
+        settings.showInstructionsButton &&
+        projectChainHasInstructions(currentInstructionProjectId());
+      setInstructionsButtonVisible(visible);
+    } catch (error) {
+      console.warn('[gemini-projects] instructions button refresh failed', error);
+    }
+  })();
+}
+
+/** Composer-toolbar action: manually add the project instructions to the composer. */
+function handleManualInjectInstructions(): void {
+  void (async () => {
+    try {
+      const composer = findChatComposer();
+      if (!composer) {
+        panel?.showToast('Open a chat to add instructions.');
+        return;
+      }
+      const conversationId = getConversationId(window.location.href);
+      const projectId = currentInstructionProjectId();
+      if (!projectId) {
+        panel?.showToast('This chat is not in a project.');
+        return;
+      }
+      if (composerContainsInstructions(composer)) {
+        panel?.showToast('Instructions are already in the message.');
+        return;
+      }
+      const instructions = await resolveProjectInstructions(projectId);
+      if (!instructions) {
+        panel?.showToast('This project has no system prompt or notes.');
+        return;
+      }
+      const injected = prependProjectInstructions(composer, {
+        ...instructions,
+        onManualRemove: () => {
+          dismissedInstructionKey = conversationId ?? DISMISS_KEY_BLANK;
+        }
+      });
+      if (injected) {
+        panel?.showToast('Instructions added to the message');
+      }
+    } catch (error) {
+      console.warn('[gemini-projects] manual instruction injection failed', error);
+    }
+  })();
+}
+
+/**
+ * Watches Gemini's chat surface and keeps the active project's system prompt
+ * (and notes) in the composer: injected when a project chat is opened or a
+ * fresh project conversation becomes ready, and re-applied after every send
+ * so each outgoing message carries the instructions. Both behaviors honor the
+ * "Automatically add project instructions" setting.
  */
 function initProjectInstructionInjection(): void {
   // A "New chat in project" action navigates to a fresh conversation via a full
@@ -280,6 +427,9 @@ function initProjectInstructionInjection(): void {
     }
   }
 
+  window.addEventListener(FEATURE_SETTINGS_CHANGED_EVENT, () => refreshInstructionsButton());
+  configureInstructionsButton(() => handleManualInjectInstructions());
+
   composerObserver = initComposerObserver({
     onNewChatReady: (composer) => {
       void (async () => {
@@ -287,21 +437,64 @@ function initProjectInstructionInjection(): void {
         if (!projectId) return;
         // Only inject into genuinely new, blank conversations. A conversation
         // that already carries an id (including a just-sent first message whose
-        // turn has not rendered yet) must never be touched.
+        // turn has not rendered yet) must never be touched here.
         const conversationId = getConversationId(window.location.href);
         if (conversationId && !pendingNewChatProjectId) return;
-        const project = state.projects.find((item) => item.id === projectId);
-        const systemPrompt = await resolveProjectSystemPrompt(projectId);
-        if (!systemPrompt) return;
+        const featureSettings = await getFeatureSettings().catch(() => createDefaultFeatureSettings());
+        if (!featureSettings.autoApplyProjectInstructions) return;
+        if (dismissedInstructionKey === (conversationId ?? DISMISS_KEY_BLANK)) return;
+        const instructions = await resolveProjectInstructions(projectId);
+        if (!instructions) return;
         if (hasUserTurnsInChat()) return;
         try {
-          injectProjectInstructions(composer, systemPrompt, project?.name || 'Project');
+          injectProjectInstructions(composer, {
+            ...instructions,
+            onManualRemove: () => {
+              dismissedInstructionKey = conversationId ?? DISMISS_KEY_BLANK;
+            }
+          });
         } catch (error) {
           console.warn('[gemini-projects] instruction injection failed', error);
         }
       })();
     },
-    onConversationChanged: (conversationId) => {
+    onOngoingChatComposerReady: (composer, conversationId) => {
+      void (async () => {
+        try {
+          if (!conversationId) return;
+          const featureSettings = await getFeatureSettings().catch(() => createDefaultFeatureSettings());
+          if (!featureSettings.autoApplyProjectInstructions) return;
+          if (dismissedInstructionKey === conversationId) return;
+          const projectId = state.chatIndex.get(conversationId)?.projectId ?? null;
+          if (!projectId) return;
+          const instructions = await resolveProjectInstructions(projectId);
+          if (!instructions) return;
+          // The user may have started typing or navigated away while the
+          // workspace lookup was in flight; injection only applies to a
+          // blank composer in the same conversation.
+          if (getConversationId(window.location.href) !== conversationId) return;
+          injectProjectInstructions(composer, {
+            ...instructions,
+            onManualRemove: () => {
+              dismissedInstructionKey = conversationId;
+            }
+          });
+        } catch (error) {
+          console.warn('[gemini-projects] ongoing instruction injection failed', error);
+        }
+      })();
+    },
+    onConversationChanged: (conversationId, previousConversationId) => {
+      // Per-conversation instruction dismissal: reset when moving to another
+      // conversation, but carry a fresh-chat removal over to the brand-new
+      // conversation created by that chat's first send.
+      if (!conversationId) {
+        dismissedInstructionKey = null;
+      } else if (previousConversationId) {
+        dismissedInstructionKey = null;
+      } else if (dismissedInstructionKey === DISMISS_KEY_BLANK) {
+        dismissedInstructionKey = state.chatIndex.has(conversationId) ? null : conversationId;
+      }
       if (pendingNewChatProjectId && conversationId) {
         const projectId = pendingNewChatProjectId;
         pendingNewChatProjectId = null;
@@ -328,6 +521,7 @@ function initProjectInstructionInjection(): void {
           panel?.setActiveProject(chat.projectId);
         }
       }
+      refreshInstructionsButton();
     }
   });
 }
@@ -404,6 +598,7 @@ function handleAccountChanged(event: Event): void {
   }
   state.collapsedProjectIds.clear();
   pendingNewChatProjectId = null;
+  dismissedInstructionKey = null;
   sessionStorage.removeItem(PENDING_NEW_CHAT_KEY);
   state.ui = {
     createModalOpen: false,
@@ -1138,6 +1333,7 @@ function renderPanelIfChanged(force = false) {
   if (!force && key === lastRenderKey) return;
   lastRenderKey = key;
   panel.render(state);
+  refreshInstructionsButton();
 }
 
 function getRenderKey(): string {

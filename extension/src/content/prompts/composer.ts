@@ -28,14 +28,18 @@ export function insertPrompt(text: string): boolean {
 export const PROJECT_INSTRUCTIONS_MARKER = '[Project Instructions:';
 
 /**
- * Formats a project's system prompt into the instruction block that is
- * prepended to a fresh composer. Returns '' for empty prompts so callers can
- * short-circuit.
+ * Formats a project's system prompt (and optionally its notes) into the
+ * instruction block that is prepended to a fresh composer. Returns '' when
+ * both inputs are empty so callers can short-circuit.
  */
-export function formatProjectInstructionPrefix(systemPrompt: string): string {
-    const trimmed = (systemPrompt || '').trim();
-    if (!trimmed) return '';
-    return `${PROJECT_INSTRUCTIONS_MARKER}\n${trimmed}\n]\n\n`;
+export function formatProjectInstructionPrefix(systemPrompt: string, notes: string = ''): string {
+    const prompt = (systemPrompt || '').trim();
+    const noteText = (notes || '').trim();
+    const sections: string[] = [];
+    if (prompt) sections.push(prompt);
+    if (noteText) sections.push(`---\nProject Notes:\n${noteText}`);
+    if (!sections.length) return '';
+    return `${PROJECT_INSTRUCTIONS_MARKER}\n${sections.join('\n\n')}\n]\n\n`;
 }
 
 /** Raw text content of the composer (trimmed). */
@@ -64,6 +68,35 @@ export function focusComposer(composer: HTMLElement): void {
     range.collapse(false);
     selection.removeAllRanges();
     selection.addRange(range);
+}
+
+/** Focuses the composer and places the caret at the very start. */
+export function focusComposerStart(composer: HTMLElement): void {
+    composer.focus();
+    if (composer instanceof HTMLTextAreaElement) {
+        composer.setSelectionRange(0, 0);
+        return;
+    }
+    if (!composer.isContentEditable) return;
+    const selection = window.getSelection();
+    if (!selection) return;
+    const range = document.createRange();
+    range.selectNodeContents(composer);
+    range.collapse(true);
+    selection.removeAllRanges();
+    selection.addRange(range);
+}
+
+/**
+ * Inserts `text` at the very start of the composer, keeping any existing
+ * content (used by the manual "Add instructions" action).
+ */
+export function prependTextIntoComposer(composer: HTMLElement, text: string): void {
+    focusComposerStart(composer);
+    const success = document.execCommand('insertText', false, text);
+    if (!success) {
+        insertTextAtCursor(text);
+    }
 }
 
 /**

@@ -1,6 +1,6 @@
 import { requestRemotePull } from '../../../shared/syncClient';
 import { syncEngine } from '../../../shared/syncEngine';
-import { getSyncSettings, saveSyncSettings } from '../../../shared/storage';
+import { getFeatureSettings, getSyncSettings, saveFeatureSettings, saveSyncSettings } from '../../../shared/storage';
 import type { SyncSettings } from '../../../shared/types';
 import { exportAllData, triggerImport } from '../../../shared/backup';
 import { errorMessage, storageLocalClear } from '../../../shared/webext';
@@ -444,6 +444,9 @@ export function openSettingsModal(activeAccountId: string, activeAccountLabel: s
   const dangerInput = root.querySelector<HTMLInputElement>('[data-gp-danger-input]')!;
   const dangerButton = root.querySelector<HTMLButtonElement>('[data-gp-action="danger-wipe"]')!;
 
+  const autoInstructionsToggle = root.querySelector<HTMLInputElement>('[data-gp-feature-auto-instructions]')!;
+  const instructionsButtonToggle = root.querySelector<HTMLInputElement>('[data-gp-feature-instructions-button]')!;
+
   let currentSettings: SyncSettings = {
     serverUrl: '',
     apiKey: '',
@@ -555,6 +558,24 @@ export function openSettingsModal(activeAccountId: string, activeAccountLabel: s
     .catch(() => {
       syncPassphraseMode();
     });
+
+  // Behavior toggles persist immediately and broadcast the change so live
+  // features (auto-injection, the header badge) react without a reload.
+  const persistFeatureSettings = () => {
+    saveFeatureSettings({
+      autoApplyProjectInstructions: autoInstructionsToggle.checked,
+      showInstructionsButton: instructionsButtonToggle.checked
+    }).catch((error) => console.warn('[gemini-projects] feature settings save failed', error));
+  };
+  autoInstructionsToggle.addEventListener('change', persistFeatureSettings);
+  instructionsButtonToggle.addEventListener('change', persistFeatureSettings);
+
+  void getFeatureSettings()
+    .then((featureSettings) => {
+      autoInstructionsToggle.checked = featureSettings.autoApplyProjectInstructions;
+      instructionsButtonToggle.checked = featureSettings.showInstructionsButton;
+    })
+    .catch(() => undefined);
 
   globalToggle.addEventListener('change', () => {
     syncPassphraseMode();
@@ -778,6 +799,26 @@ function buildMarkup(activeAccountLabel: string): string {
         </div>
 
         <div class="gp-tab-panel" data-gp-tab-panel="settings" hidden>
+          <div class="gp-sync-section">
+            <div class="gp-sync-section-title">Behavior</div>
+            <label class="gp-sync-check-row">
+              <input type="checkbox" data-gp-feature-auto-instructions />
+              <span>Automatically add project system prompt &amp; notes to messages in project chats</span>
+            </label>
+            <p class="gp-sync-hint">
+              Prepends the instructions into the chat input when a project chat is opened and re-adds
+              them after every message. Removing the ⚡ pill disables it for that conversation.
+            </p>
+            <label class="gp-sync-check-row">
+              <input type="checkbox" data-gp-feature-instructions-button />
+              <span>Show an "Add instructions" button in the chat window, next to the prompt library button</span>
+            </label>
+            <p class="gp-sync-hint">
+              The button only appears in projects (and their subfolders) that have a system prompt or
+              notes configured, and adds them to the chat input on demand.
+            </p>
+          </div>
+
           <div class="gp-sync-section">
             <div class="gp-sync-section-title">Backup &amp; Restore</div>
             <div class="gp-settings-io">

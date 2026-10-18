@@ -1,6 +1,8 @@
 
 const PROMPT_BTN_ATTR = 'data-gp-prompt-btn';
 const PROMPT_BTN_ID = 'gp-prompt-btn';
+const INSTR_BTN_ATTR = 'data-gp-instructions-btn';
+const INSTR_BTN_ID = 'gp-instructions-btn';
 const TOOL_HINTS = ['tools', '\u5de5\u5177'];
 const UPLOAD_HINTS = [
     'upload',
@@ -22,9 +24,42 @@ const PROMPT_ICON_SVG = `
 </svg>
 `;
 
+const INSTRUCTIONS_ICON_SVG = `
+<svg viewBox="0 0 24 24" width="24" height="24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+  <path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8Z"/>
+  <path d="M14 3v5h5"/>
+  <path d="M12 11v6"/>
+  <path d="M9 14h6"/>
+</svg>
+`;
+
 let observer: MutationObserver | null = null;
 let currentButton: HTMLElement | null = null;
+let currentInstructionsButton: HTMLElement | null = null;
 let onClickHandler: (() => void) | null = null;
+let onInstructionsClick: (() => void) | null = null;
+let instructionsButtonVisible = false;
+
+/**
+ * Registers the click handler for the optional "Add project instructions"
+ * toolbar button and its initial visibility. Both may change later via
+ * `setInstructionsButtonVisible`.
+ */
+export function configureInstructionsButton(onClick: () => void): void {
+    onInstructionsClick = onClick;
+}
+
+/** Shows or hides the "Add project instructions" toolbar button. */
+export function setInstructionsButtonVisible(visible: boolean): void {
+    instructionsButtonVisible = visible;
+    if (currentInstructionsButton) {
+        currentInstructionsButton.style.setProperty(
+            'display',
+            visible ? 'flex' : 'none',
+            'important'
+        );
+    }
+}
 
 function log(...args: any[]) {
     // eslint-disable-next-line no-console
@@ -39,6 +74,7 @@ function isVisibleElement(el: HTMLElement | null): el is HTMLElement {
     if (!el) return false;
     if (!document.body.contains(el)) return false;
     if (el.hasAttribute(PROMPT_BTN_ATTR)) return false;
+    if (el.hasAttribute(INSTR_BTN_ATTR)) return false;
     if (el.closest('#gp-prompt-picker-root')) return false;
     const style = window.getComputedStyle(el);
     if (style.display === 'none' || style.visibility === 'hidden' || style.pointerEvents === 'none') return false;
@@ -381,27 +417,27 @@ function ensurePromptButtonStyle() {
     style.id = 'gp-prompt-button-style';
     // 原生伪类不依赖注入时的主题，也不会因鼠标事件漏发而丢失圆形反馈。
     style.textContent = `
-      #gp-prompt-btn {
+      #gp-prompt-btn, #gp-instructions-btn {
         color: var(--gem-sys-color--on-surface, var(--bard-color-on-surface, inherit)) !important;
         background-color: transparent !important;
         box-shadow: none !important;
         outline: none !important;
         transition: background-color .18s ease, box-shadow .18s ease !important;
       }
-      #gp-prompt-btn:hover {
+      #gp-prompt-btn:hover, #gp-instructions-btn:hover {
         background-color: color-mix(in srgb, currentColor 14%, transparent) !important;
         box-shadow: inset 0 0 0 1px color-mix(in srgb, currentColor 5%, transparent) !important;
       }
-      #gp-prompt-btn:active {
+      #gp-prompt-btn:active, #gp-instructions-btn:active {
         background-color: color-mix(in srgb, currentColor 20%, transparent) !important;
       }
-      #gp-prompt-btn:focus-visible {
+      #gp-prompt-btn:focus-visible, #gp-instructions-btn:focus-visible {
         background-color: color-mix(in srgb, currentColor 14%, transparent) !important;
         outline: 2px solid currentColor !important;
         outline-offset: 2px !important;
       }
       @media (prefers-reduced-motion: reduce) {
-        #gp-prompt-btn { transition: none !important; }
+        #gp-prompt-btn, #gp-instructions-btn { transition: none !important; }
       }
     `;
     document.head.appendChild(style);
@@ -434,6 +470,8 @@ function tryInject() {
         // Gemini 可能保留旧节点但把输入区换走，避免入口留在模式切换或旧输入区中。
         currentButton.remove();
         currentButton = null;
+        currentInstructionsButton?.remove();
+        currentInstructionsButton = null;
     }
 
     const anchorButton = findToolsAnchorByText(composer) || findAnchorNearComposer(composer);
@@ -459,11 +497,90 @@ function tryInject() {
     createAndInjectButton(targetContainer, insertion.sibling);
 }
 
+/** Applies the circular icon-button look shared by both composer buttons. */
+function applyCircularIconButtonStyles(btn: HTMLElement, size: number): void {
+    const sizePx = `${size}px`;
+    btn.style.setProperty('display', 'flex', 'important');
+    btn.style.setProperty('align-items', 'center', 'important');
+    btn.style.setProperty('justify-content', 'center', 'important');
+    btn.style.setProperty('margin', '0', 'important');
+    btn.style.setProperty('cursor', 'pointer', 'important');
+    btn.style.setProperty('flex', '0 0 auto', 'important');
+    btn.style.setProperty('padding', '0', 'important');
+    btn.style.setProperty('gap', '0', 'important');
+    btn.style.setProperty('width', sizePx, 'important');
+    btn.style.setProperty('height', sizePx, 'important');
+    btn.style.setProperty('min-width', sizePx, 'important');
+    btn.style.setProperty('min-height', sizePx, 'important');
+    btn.style.setProperty('max-width', sizePx, 'important');
+    btn.style.setProperty('max-height', sizePx, 'important');
+    btn.style.setProperty('border-radius', '50%', 'important');
+    btn.style.setProperty('border', 'none', 'important');
+}
+
+/** Fixed-size icon span; always SVG to avoid ligature text leaking. */
+function createComposerIconSvg(svgMarkup: string): HTMLSpanElement {
+    const iconSpan = document.createElement('span');
+    iconSpan.style.display = 'flex';
+    iconSpan.style.alignItems = 'center';
+    iconSpan.style.justifyContent = 'center';
+    iconSpan.style.width = '20px';
+    iconSpan.style.height = '20px';
+    iconSpan.style.flex = '0 0 20px';
+    iconSpan.innerHTML = svgMarkup.trim();
+    const svg = iconSpan.querySelector('svg');
+    if (svg) {
+        svg.setAttribute('width', '20');
+        svg.setAttribute('height', '20');
+    }
+    return iconSpan;
+}
+
+/**
+ * Places the optional "Add project instructions" button directly beside the
+ * prompt library button in the composer toolbar. It is recreated together
+ * with the prompt button so the pair always stays adjacent, even when Gemini
+ * rebuilds the input area.
+ */
+function attachInstructionsButton(
+    container: HTMLElement,
+    promptButton: HTMLElement,
+    iconButtonSize: number
+): void {
+    // Drop stale instances left over from a previous composer tree.
+    document.getElementById(INSTR_BTN_ID)?.remove();
+    currentInstructionsButton = null;
+
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.id = INSTR_BTN_ID;
+    btn.setAttribute(INSTR_BTN_ATTR, 'true');
+    btn.setAttribute('aria-label', 'Add project instructions');
+    btn.setAttribute('title', 'Add project system prompt & notes to the message');
+    btn.className = 'gp-prompt-btn';
+    applyCircularIconButtonStyles(btn, iconButtonSize);
+    ensurePromptButtonStyle();
+    btn.appendChild(createComposerIconSvg(INSTRUCTIONS_ICON_SVG));
+
+    btn.onclick = (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        onInstructionsClick?.();
+    };
+
+    promptButton.insertAdjacentElement('afterend', btn);
+    if (!container.contains(btn)) {
+        container.appendChild(btn);
+    }
+    currentInstructionsButton = btn;
+    btn.style.setProperty('display', instructionsButtonVisible ? 'flex' : 'none', 'important');
+}
+
 function createAndInjectButton(container: HTMLElement, sibling: Element) {
     const siblingEl = sibling as HTMLElement;
     const pickStyleSource = (): HTMLElement => {
         const candidates = Array.from(container.querySelectorAll<HTMLElement>('button, div[role="button"]'))
-            .filter((el) => el !== siblingEl && !el.hasAttribute(PROMPT_BTN_ATTR));
+            .filter((el) => el !== siblingEl && !el.hasAttribute(PROMPT_BTN_ATTR) && !el.hasAttribute(INSTR_BTN_ATTR));
         const iconClassCandidates = candidates.filter((el) => /\bicon-button\b/.test(el.className));
         const pool = iconClassCandidates.length ? iconClassCandidates : candidates;
         if (!pool.length) return siblingEl;
@@ -488,56 +605,17 @@ function createAndInjectButton(container: HTMLElement, sibling: Element) {
     btn.setAttribute('title', 'Prompts');
     btn.className = 'gp-prompt-btn';
 
-    // Force flex centering and standard sizing
-    btn.style.setProperty('display', 'flex', 'important');
-    btn.style.setProperty('align-items', 'center', 'important');
-    btn.style.setProperty('justify-content', 'center', 'important');
-    btn.style.setProperty('margin', '0', 'important');
-    btn.style.setProperty('cursor', 'pointer', 'important');
-    btn.style.setProperty('flex', '0 0 auto', 'important');
-    btn.style.setProperty('padding', '0', 'important');
-    btn.style.setProperty('gap', '0', 'important');
-
     // Copy computed styles for width/height and force circular icon button
     const computed = window.getComputedStyle(styleSource);
     const parsedHeight = Number.parseFloat(computed.height || '');
     const iconButtonSize = Number.isFinite(parsedHeight) && parsedHeight > 0
         ? Math.max(36, Math.min(44, Math.round(parsedHeight)))
         : 40;
-    const width = `${iconButtonSize}px`;
-    const height = `${iconButtonSize}px`;
 
-    btn.style.setProperty('width', width, 'important');
-    btn.style.setProperty('height', height, 'important');
-    btn.style.setProperty('min-width', width, 'important');
-    btn.style.setProperty('min-height', height, 'important');
-    btn.style.setProperty('max-width', width, 'important');
-    btn.style.setProperty('max-height', height, 'important');
-    btn.style.setProperty('border-radius', '50%', 'important');
-    btn.style.setProperty('border', 'none', 'important');
+    applyCircularIconButtonStyles(btn, iconButtonSize);
     ensurePromptButtonStyle();
 
-    // Create our icon
-    const iconSpan = document.createElement('span');
-    iconSpan.style.display = 'flex';
-    iconSpan.style.alignItems = 'center';
-    iconSpan.style.justifyContent = 'center';
-    iconSpan.style.width = '20px';
-    iconSpan.style.height = '20px';
-    iconSpan.style.flex = '0 0 20px';
-
-    // Check if source had a specific icon class we might want to mimic (size-wise)
-    // but honestly, we forced the button to 40x40 flex centered, so just inserting our SVG/Icon is safest.
-
-    // Always use SVG to avoid ligature text leaking (e.g. "library_books").
-    iconSpan.innerHTML = PROMPT_ICON_SVG.trim();
-    const svg = iconSpan.querySelector('svg');
-    if (svg) {
-        svg.setAttribute('width', '20');
-        svg.setAttribute('height', '20');
-    }
-
-    btn.appendChild(iconSpan);
+    btn.appendChild(createComposerIconSvg(PROMPT_ICON_SVG));
 
     btn.style.opacity = '1';
 
@@ -553,6 +631,7 @@ function createAndInjectButton(container: HTMLElement, sibling: Element) {
         container.appendChild(btn);
     }
     currentButton = btn;
+    attachInstructionsButton(container, btn, iconButtonSize);
     log('Injected button');
 }
 
@@ -566,7 +645,8 @@ import {
     composerIsEmpty,
     dispatchComposerInputEvents,
     formatProjectInstructionPrefix,
-    insertTextIntoComposer
+    insertTextIntoComposer,
+    prependTextIntoComposer
 } from './composer';
 
 const INSTRUCTION_PILL_ID = 'gp-project-instructions-pill';
@@ -644,7 +724,11 @@ function findInstructionPill(): HTMLElement | null {
     return document.getElementById(INSTRUCTION_PILL_ID);
 }
 
-function renderInstructionPill(composer: HTMLElement, projectName: string): void {
+function renderInstructionPill(
+    composer: HTMLElement,
+    projectName: string,
+    onManualRemove?: () => void
+): void {
     removeInstructionPill();
     ensurePillStyle();
 
@@ -656,6 +740,7 @@ function renderInstructionPill(composer: HTMLElement, projectName: string): void
       <button type="button" class="gp-pill-remove" aria-label="Remove injected instructions">Remove</button>
     `;
     pill.querySelector('.gp-pill-remove')?.addEventListener('click', () => {
+        onManualRemove?.();
         removeProjectInstructions(composer);
     });
 
@@ -691,24 +776,55 @@ function stripInstructionsBlock(composer: HTMLElement): void {
     dispatchComposerInputEvents(composer);
 }
 
+export interface ProjectInstructionPayload {
+    systemPrompt: string;
+    notes?: string;
+    projectName: string;
+    /** Called when the user removes the block via the status pill. */
+    onManualRemove?: () => void;
+}
+
 /**
- * Injects the formatted project instructions into a blank composer and shows
- * the in-composer status pill. Returns false when injection is not applicable
- * (empty prompt, non-blank composer, or an existing block).
+ * Injects the formatted project instructions (system prompt and notes) into a
+ * blank composer and shows the in-composer status pill. Returns false when
+ * injection is not applicable (empty prompt, non-blank composer, or an
+ * existing block).
  */
 export function injectProjectInstructions(
     composer: HTMLElement,
-    systemPrompt: string,
-    projectName: string
+    payload: ProjectInstructionPayload
 ): boolean {
-    const block = formatProjectInstructionPrefix(systemPrompt);
+    const block = formatProjectInstructionPrefix(payload.systemPrompt, payload.notes ?? '');
     if (!block) return false;
     if (composerContainsInstructions(composer)) return false;
     if (!composerIsEmpty(composer)) return false;
 
     insertTextIntoComposer(composer, block);
     dispatchComposerInputEvents(composer);
-    renderInstructionPill(composer, projectName);
+    renderInstructionPill(composer, payload.projectName, payload.onManualRemove);
+    return true;
+}
+
+/**
+ * Manual variant used by the header "Add instructions" button: unlike the
+ * automatic injection it also works when the composer already holds text, in
+ * which case the block is prepended in front of the user's draft.
+ */
+export function prependProjectInstructions(
+    composer: HTMLElement,
+    payload: ProjectInstructionPayload
+): boolean {
+    const block = formatProjectInstructionPrefix(payload.systemPrompt, payload.notes ?? '');
+    if (!block) return false;
+    if (composerContainsInstructions(composer)) return false;
+
+    if (composerIsEmpty(composer)) {
+        insertTextIntoComposer(composer, block);
+    } else {
+        prependTextIntoComposer(composer, block);
+    }
+    dispatchComposerInputEvents(composer);
+    renderInstructionPill(composer, payload.projectName, payload.onManualRemove);
     return true;
 }
 

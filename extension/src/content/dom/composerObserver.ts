@@ -6,8 +6,19 @@ export interface ComposerObserverCallbacks {
    * conversations that already contain user turns.
    */
   onNewChatReady: (composer: HTMLElement) => void;
-  /** Fired when the current conversation id changes (or becomes blank). */
-  onConversationChanged?: (conversationId: string | null) => void;
+  /**
+   * Fired whenever a blank composer is ready inside a conversation that
+   * already has user turns — for example right after a message is sent, or
+   * when an ongoing project chat is opened. Lets the caller re-apply project
+   * instructions to the next outgoing message.
+   */
+  onOngoingChatComposerReady?: (composer: HTMLElement, conversationId: string | null) => void;
+  /**
+   * Fired when the current conversation id changes (or becomes blank).
+   * `previousConversationId` is null when the previous surface was a fresh
+   * chat without a conversation id.
+   */
+  onConversationChanged?: (conversationId: string | null, previousConversationId: string | null) => void;
 }
 
 export interface ComposerObserverHandle {
@@ -77,14 +88,15 @@ export function isComposerBlank(composer: HTMLElement): boolean {
 }
 
 /**
- * Monitors Gemini's chat surface and reports blank conversations. The observer
- * deliberately only fires `onNewChatReady` for conversations that never had a
- * user turn, so system prompts are never injected into ongoing multi-turn chats.
+ * Monitors Gemini's chat surface and reports blank composers. Fresh
+ * conversations (no user turns yet) fire `onNewChatReady`; ongoing
+ * conversations fire `onOngoingChatComposerReady` every time their composer
+ * becomes blank again (typically right after a send), which lets the caller
+ * re-apply project instructions to the next outgoing message.
  */
 export function initComposerObserver(callbacks: ComposerObserverCallbacks): ComposerObserverHandle {
   let lastConversationKey: string | null = null;
   let lastHandledComposer: HTMLElement | null = null;
-  let usedConversations = new Set<string>();
   let fireTimer: number | null = null;
   let debounceTimer: number | null = null;
   let disposed = false;
@@ -108,6 +120,8 @@ export function initComposerObserver(callbacks: ComposerObserverCallbacks): Comp
 
     if (conversationKey !== lastConversationKey) {
       const hadKey = lastConversationKey !== null;
+      const previousConversationId =
+        hadKey && lastConversationKey !== 'blank' ? lastConversationKey : null;
       lastConversationKey = conversationKey;
       lastHandledComposer = null;
       if (fireTimer !== null) {
@@ -115,37 +129,49 @@ export function initComposerObserver(callbacks: ComposerObserverCallbacks): Comp
         fireTimer = null;
       }
       if (hadKey) {
-        callbacks.onConversationChanged?.(conversationId);
+        callbacks.onConversationChanged?.(conversationId, previousConversationId);
       }
     }
 
     if (!composer) return;
 
-    const hasTurns = hasUserTurnsInChat();
-    if (hasTurns) {
-      usedConversations.add(conversationKey);
-    }
-
-    const isBlank = !hasTurns && isComposerBlank(composer) && !usedConversations.has(conversationKey);
-    if (isBlank && composer !== lastHandledComposer) {
+    // An occupied composer (user typing) ends the current blank cycle: forget
+    // the handled marker so the next blank state — typically right after a
+    // send — can trigger another ready callback for the following message.
+    if (!isComposerBlank(composer)) {
+      if (composer === lastHandledComposer) {
+        lastHandledComposer = null;
+      }
       if (fireTimer !== null) {
         window.clearTimeout(fireTimer);
-      }
-      fireTimer = window.setTimeout(() => {
         fireTimer = null;
-        if (disposed) return;
-        if (composer !== findChatComposer()) {
-          lastHandledComposer = null;
-          return;
-        }
-        if (hasUserTurnsInChat() || !isComposerBlank(composer)) return;
-        lastHandledComposer = composer;
-        callbacks.onNewChatReady(composer);
-      }, FIRE_DELAY_MS);
-    } else if (!isBlank && fireTimer !== null) {
-      window.clearTimeout(fireTimer);
-      fireTimer = null;
+      }
+      return;
     }
+
+    if (composer === lastHandledComposer) return;
+
+    if (fireTimer !== null) {
+      window.clearTimeout(fireTimer);
+    }
+    fireTimer = window.setTimeout(() => {
+      fireTimer = null;
+      if (disposed) return;
+      if (composer !== findChatComposer()) {
+        lastHandledComposer = null;
+        return;
+      }
+      if (!isComposerBlank(composer)) {
+        lastHandledComposer = null;
+        return;
+      }
+      lastHandledComposer = composer;
+      if (hasUserTurnsInChat()) {
+        callbacks.onOngoingChatComposerReady?.(composer, getConversationId(window.location.href));
+      } else {
+        callbacks.onNewChatReady(composer);
+      }
+    }, FIRE_DELAY_MS);
   }
 
   function scheduleCheck(): void {

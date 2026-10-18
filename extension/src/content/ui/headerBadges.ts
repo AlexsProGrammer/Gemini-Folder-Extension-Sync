@@ -68,8 +68,7 @@ export function createSettingsBadge(
 }
 
 /** Header pill opening the prompt library (icon, label and a count chip). */
-export function createPromptsBadge(onClick: () => void, initialCount = 0): PromptsBadgeElement {
-  const badge = document.createElement('button');
+export function createPromptsBadge(onClick: () => void, initialCount = 0): PromptsBadgeElement {  const badge = document.createElement('button');
   badge.type = 'button';
   badge.className = 'gp-sync-badge gp-prompts-badge';
   badge.title = 'Prompt library — view, add and edit prompts';
@@ -92,3 +91,4 @@ export function createPromptsBadge(onClick: () => void, initialCount = 0): Promp
     }
   });
 }
+

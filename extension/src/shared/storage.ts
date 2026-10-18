@@ -459,6 +459,47 @@ export async function saveSyncSettings(settings: SyncSettings): Promise<void> {
   await storageLocalSet({ [SYNC_SETTINGS_KEY]: normalized });
 }
 
+/* ------------------------------------------------------------------ *
+ * Feature settings (local behavior toggles, never synced)
+ * ------------------------------------------------------------------ */
+
+export const FEATURE_SETTINGS_KEY = 'gp_feature_settings';
+/** Fired (with the new settings as detail) after they are persisted. */
+export const FEATURE_SETTINGS_CHANGED_EVENT = 'gemini-projects:feature-settings-changed';
+
+export interface FeatureSettings {
+  /** Automatically prepend the project's system prompt & notes to messages. */
+  autoApplyProjectInstructions: boolean;
+  /** Show the manual "Add instructions" header button in project chats. */
+  showInstructionsButton: boolean;
+}
+
+export function createDefaultFeatureSettings(): FeatureSettings {
+  return { autoApplyProjectInstructions: true, showInstructionsButton: false };
+}
+
+export async function getFeatureSettings(): Promise<FeatureSettings> {
+  const result = await storageLocalGet<Record<string, unknown>>([FEATURE_SETTINGS_KEY]);
+  const raw = result[FEATURE_SETTINGS_KEY];
+  if (!raw || typeof raw !== 'object') return createDefaultFeatureSettings();
+  const candidate = raw as Partial<FeatureSettings>;
+  return {
+    autoApplyProjectInstructions: candidate.autoApplyProjectInstructions !== false,
+    showInstructionsButton: candidate.showInstructionsButton === true
+  };
+}
+
+export async function saveFeatureSettings(settings: FeatureSettings): Promise<void> {
+  const normalized: FeatureSettings = {
+    autoApplyProjectInstructions: settings.autoApplyProjectInstructions === true,
+    showInstructionsButton: settings.showInstructionsButton === true
+  };
+  await storageLocalSet({ [FEATURE_SETTINGS_KEY]: normalized });
+  if (typeof window !== 'undefined') {
+    window.dispatchEvent(new CustomEvent(FEATURE_SETTINGS_CHANGED_EVENT, { detail: normalized }));
+  }
+}
+
 function nextSiblingOrder(workspace: WorkspacePayload, parentId: string | null): number {
   return Object.values(workspace.projects)
     .filter((project) => project.parentId === parentId)
