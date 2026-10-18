@@ -369,14 +369,23 @@ export function createProjectsPanel(options: ProjectsPanelOptions) {
     }, { signal: panelEventsController.signal });
 
     panelRoot.addEventListener('drop', (event) => {
+      const types = event.dataTransfer?.types;
+      const isChatDrag = Array.from(types ?? []).includes(CHAT_DRAG_MIME);
       panelRoot.querySelectorAll<HTMLElement>('.gp-drag-over').forEach((row) => row.classList.remove('gp-drag-over'));
+      if (!isChatDrag) return;
+      // Suppress the browser's default drop action (e.g. navigating to the
+      // dragged chat link) even when the release misses a droppable row.
+      event.preventDefault();
       const dropRow = (event.target as HTMLElement | null)?.closest?.('[data-gp-droppable]') as HTMLElement | null;
       if (!dropRow) return;
       const conversationId = event.dataTransfer?.getData(CHAT_DRAG_MIME) || event.dataTransfer?.getData('text/plain');
       if (!conversationId) return;
-      event.preventDefault();
       event.stopPropagation();
-      const projectId = dropRow.dataset.gpProjectId;
+      // `data-gp-droppable` sits on the inner .gp-project-row while
+      // `data-gp-project-id` sits on the outer .gp-project wrapper, so the id
+      // must be resolved from the closest ancestor, not from the row itself.
+      const projectRow = dropRow.closest<HTMLElement>('[data-gp-project-id]');
+      const projectId = projectRow?.dataset.gpProjectId;
       if (projectId) {
         options.onMoveChatToProject(conversationId, projectId);
       }
