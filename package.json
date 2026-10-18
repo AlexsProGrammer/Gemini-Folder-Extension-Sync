@@ -1,0 +1,18 @@
+{
+  "name": "gemini-project-extension",
+  "private": true,
+  "version": "2.0.6",
+  "type": "module",
+  "scripts": {
+    "build": "node ./scripts/build.mjs",
+    "dev": "vite build --watch",
+    "lint": "tsc -p tsconfig.json --noEmit",
+    "package:store": "node ./scripts/package-store.mjs",
+    "package:firefox": "powershell -NoProfile -ExecutionPolicy Bypass -File ./scripts/package-firefox.ps1"
+  },
+  "devDependencies": {
+    "@types/chrome": "^0.0.262",
+    "typescript": "^5.3.3",
+    "vite": "^5.0.0"
+  }
+}
