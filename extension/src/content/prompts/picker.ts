@@ -34,6 +34,11 @@ export class PromptPicker {
   private themeObserver: MutationObserver | null = null;
   private modalDeleteConfirm = false;
   private modalDeleteTimer: number | null = null;
+  // External toggle buttons (e.g. the sidebar prompt badge) that may open the
+  // picker; mousedown on them must not close the picker, and Escape refocuses
+  // the trigger that opened it last.
+  private externalTriggers: Set<HTMLElement> = new Set();
+  private lastExternalTrigger: HTMLElement | null = null;
 
   // Modal 鐘舵€?
   private editingPrompt: Prompt | null = null;
@@ -59,7 +64,8 @@ export class PromptPicker {
       if (this.isOpen) {
         const path = e.composedPath();
         const inHost = path.includes(this.host);
-        if (!inHost && !(e.target as HTMLElement).closest('[data-gp-prompt-btn]')) {
+        const inTrigger = Array.from(this.externalTriggers).some((el) => el.isConnected && path.includes(el));
+        if (!inHost && !inTrigger && !(e.target as HTMLElement).closest('[data-gp-prompt-btn]')) {
           // 濡傛灉 Modal 鎵撳紑锛屼笉鍏抽棴 Picker
           const modal = this.shadow.querySelector('.modal-overlay');
           if (modal && (modal as HTMLElement).style.display !== 'none') return;
@@ -80,7 +86,12 @@ export class PromptPicker {
           this.closeModal();
         } else {
           this.close();
-          document.querySelector<HTMLButtonElement>('[data-gp-prompt-btn]')?.focus();
+          const trigger = this.lastExternalTrigger;
+          if (trigger?.isConnected) {
+            trigger.focus();
+          } else {
+            document.querySelector<HTMLButtonElement>('[data-gp-prompt-btn]')?.focus();
+          }
         }
         return;
       }
@@ -138,12 +149,24 @@ export class PromptPicker {
     return PromptPicker.instance;
   }
 
-  public toggle(rect: DOMRect) {
+  public toggle(rect: DOMRect, trigger?: HTMLElement) {
     if (this.isOpen) {
       this.close();
     } else {
+      this.lastExternalTrigger = trigger ?? null;
       this.open(rect);
     }
+  }
+
+  /**
+   * Registers an external toggle (e.g. the sidebar prompt badge) so a
+   * mousedown on it does not close the picker before its click toggles it.
+   */
+  public registerTrigger(element: HTMLElement): void {
+    Array.from(this.externalTriggers).forEach((el) => {
+      if (!el.isConnected) this.externalTriggers.delete(el);
+    });
+    this.externalTriggers.add(element);
   }
 
   public open(rect: DOMRect) {

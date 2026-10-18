@@ -1,7 +1,6 @@
 import { requestRemotePull } from '../../../shared/syncClient';
 import { syncEngine } from '../../../shared/syncEngine';
 import { getSyncSettings, saveSyncSettings } from '../../../shared/storage';
-import { errorMessage, storageLocalClear } from '../../../shared/webext';
 import type { SyncSettings } from '../../../shared/types';
 
 const ROOT_ID = 'gp-sync-settings-root';
@@ -234,45 +233,6 @@ const STYLE = `
   gap: 10px;
   margin-top: 2px;
 }
-.gp-sync-modal-root .gp-sync-danger {
-  border: 1px solid rgba(179, 38, 30, 0.4);
-  background: rgba(179, 38, 30, 0.05);
-  border-radius: 16px;
-  padding: 14px;
-}
-.gp-sync-modal-root.gp-sync-dark .gp-sync-danger {
-  border-color: rgba(242, 184, 181, 0.4);
-  background: rgba(242, 184, 181, 0.07);
-}
-.gp-sync-modal-root .gp-sync-danger .gp-sync-section-title { color: var(--gp-danger); }
-.gp-sync-modal-root .gp-sync-danger-hint {
-  margin: 0;
-  font-size: 12px;
-  line-height: 16px;
-  color: var(--gp-fg-muted);
-}
-.gp-sync-modal-root .gp-sync-danger-btn {
-  align-self: flex-start;
-  height: 38px;
-  padding: 0 16px;
-  border: 1px solid var(--gp-danger);
-  border-radius: 999px;
-  background: transparent;
-  color: var(--gp-danger);
-  cursor: not-allowed;
-  font-family: var(--gp-font);
-  font-size: 13.5px;
-  font-weight: 700;
-  opacity: 0.5;
-}
-.gp-sync-modal-root .gp-sync-danger-btn:not(:disabled) {
-  cursor: pointer;
-  opacity: 1;
-}
-.gp-sync-modal-root .gp-sync-danger-btn:not(:disabled):hover {
-  background: var(--gp-danger);
-  color: var(--gp-on-accent);
-}
 .gp-sync-modal-root .gp-sync-error {
   flex: 1;
   min-width: 0;
@@ -364,21 +324,6 @@ function buildMarkup(activeAccountLabel: string): string {
           <p class="gp-sync-hint" data-gp-account-hint style="display: none;"></p>
         </div>
 
-        <div class="gp-sync-section gp-sync-danger">
-          <div class="gp-sync-section-title">Danger Zone</div>
-          <p class="gp-sync-danger-hint">
-            Deletes <strong>everything</strong> this extension stored in the browser: all accounts'
-            projects, folders, chat assignments, the prompt library and sync settings. Encrypted
-            per-account data cannot be recovered afterwards. Data already synced to your server is
-            not touched.
-          </p>
-          <div class="gp-sync-field">
-            <span class="gp-sync-label">Type DELETE ALL to confirm</span>
-            <input class="gp-sync-input" data-gp-danger-input type="text" placeholder="DELETE ALL" autocomplete="off" spellcheck="false" />
-          </div>
-          <button class="gp-sync-danger-btn" data-gp-action="danger-wipe" type="button" disabled>Delete all local data</button>
-        </div>
-
         <div class="gp-sync-actions">
           <span class="gp-sync-error" data-gp-error role="alert"></span>
           <button class="gp-sync-cancel" data-gp-action="cancel" type="button">Cancel</button>
@@ -421,8 +366,6 @@ export function openSyncSettingsModal(activeAccountId: string, activeAccountLabe
   const saveButton = root.querySelector<HTMLButtonElement>('[data-gp-action="save"]')!;
   const closeButton = root.querySelector<HTMLButtonElement>('[data-gp-action="close"]')!;
   const cancelButton = root.querySelector<HTMLButtonElement>('[data-gp-action="cancel"]')!;
-  const dangerInput = root.querySelector<HTMLInputElement>('[data-gp-danger-input]')!;
-  const dangerButton = root.querySelector<HTMLButtonElement>('[data-gp-action="danger-wipe"]')!;
 
   let currentSettings: SyncSettings = {
     serverUrl: '',
@@ -532,26 +475,6 @@ export function openSyncSettingsModal(activeAccountId: string, activeAccountLabe
   });
   closeButton.addEventListener('click', cleanup);
   cancelButton.addEventListener('click', cleanup);
-
-  // Danger Zone: the wipe button stays disabled until the exact confirmation
-  // phrase is typed, so an accidental click can never destroy local data.
-  dangerButton.disabled = true;
-  dangerInput.addEventListener('input', () => {
-    dangerButton.disabled = dangerInput.value !== 'DELETE ALL';
-  });
-  dangerButton.addEventListener('click', async () => {
-    if (dangerInput.value !== 'DELETE ALL') return;
-    dangerButton.disabled = true;
-    dangerButton.textContent = 'Deleting…';
-    try {
-      await storageLocalClear();
-      cleanup();
-      window.location.reload();
-    } catch (error) {
-      setError(`Could not clear storage: ${errorMessage(error)}`);
-      dangerButton.textContent = 'Delete all local data';
-    }
-  });
 
   testButton.addEventListener('click', async () => {
     const serverUrl = serverUrlInput.value.trim().replace(/\/+$/, '');

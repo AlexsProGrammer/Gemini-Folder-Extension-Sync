@@ -1,5 +1,4 @@
 ﻿import { ChatRef, Project, ProjectIcon, RuntimeState, SyncStatus, WorkspacePayload } from '../../shared/types';
-import { exportAllData, triggerImport } from '../../shared/backup';
 import { resolveAccountRawIdentifier } from '../../shared/account';
 import { getActiveAccountHash } from '../accountWatcher';
 import { getWorkspace, saveWorkspace } from '../../shared/storage';
@@ -16,9 +15,13 @@ import {
 } from './icons';
 import { PANEL_TITLE_FONT_STACK, PANEL_TITLE_TYPOGRAPHY } from './typography';
 import { createSyncStatusBadge } from './syncStatusBadge';
+import { createPromptsBadge, createSettingsBadge } from './headerBadges';
 import { openSyncSettingsModal } from './modals/syncSettingsModal';
+import { openExtensionSettingsModal } from './modals/extensionSettingsModal';
 import { openConflictModal } from './modals/conflictModal';
 import { createWorkspaceDrawer, WorkspaceDrawerHandle } from './workspaceDrawer';
+import { PromptPicker } from '../prompts/picker';
+import { promptStore } from '../prompts/store';
 
 export type PanelSection = 'projects' | 'folders';
 export type TargetPickerMode = 'project' | 'folder' | 'all';
@@ -159,6 +162,18 @@ export function createProjectsPanel(options: ProjectsPanelOptions) {
     : 'unconfigured';
   const syncBadge = createSyncStatusBadge(openSyncSettings, lastSyncStatus === 'unconfigured' ? initialSyncStatus : lastSyncStatus);
 
+  // Prompt library badge: opens the shared prompt picker anchored to the
+  // badge; the count chip tracks the active account's saved prompts.
+  const promptsBadge = createPromptsBadge(() => {
+    PromptPicker.getInstance().toggle(promptsBadge.getBoundingClientRect(), promptsBadge);
+  });
+  PromptPicker.getInstance().registerTrigger(promptsBadge);
+  promptStore.subscribe(() => promptsBadge.updateCount(promptStore.getAll().length));
+  void promptStore.refresh().catch(() => undefined);
+
+  // Settings badge: backup/restore plus the local-data wipe.
+  const settingsBadge = createSettingsBadge(() => openExtensionSettingsModal());
+
   function updateSyncStatus(status: SyncStatus): void {
     lastSyncStatus = status;
     syncBadge.updateStatus(status);
@@ -214,7 +229,9 @@ export function createProjectsPanel(options: ProjectsPanelOptions) {
     panelRoot.innerHTML = buildPanelMarkup(state);
     const syncHeader = panelRoot.querySelector<HTMLElement>('[data-gp-sync-header]');
     if (syncHeader && syncHeader !== syncBadge.parentElement) {
+      syncHeader.appendChild(promptsBadge);
       syncHeader.appendChild(syncBadge);
+      syncHeader.appendChild(settingsBadge);
     }
     attachPanelEvents(state);
   }
@@ -476,8 +493,6 @@ export function createProjectsPanel(options: ProjectsPanelOptions) {
     const confirm = modal.element.querySelector<HTMLButtonElement>('[data-gp-action="confirm"]');
     const iconRow = modal.element.querySelector<HTMLElement>('[data-gp-template-row]');
     const colorRow = modal.element.querySelector<HTMLElement>('[data-gp-color-row]');
-    const backupButton = modal.element.querySelector<HTMLButtonElement>('[data-gp-action="backup"]');
-    const restoreButton = modal.element.querySelector<HTMLButtonElement>('[data-gp-action="restore"]');
     iconButton = modal.element.querySelector<HTMLButtonElement>('[data-gp-current-icon]');
 
     if (input) {
@@ -532,14 +547,6 @@ export function createProjectsPanel(options: ProjectsPanelOptions) {
       options.onSaveProject(projectData);
       modal.close();
     };
-
-    if (backupButton) {
-      backupButton.onclick = handleBackupClick;
-    }
-
-    if (restoreButton) {
-      restoreButton.onclick = handleRestoreClick;
-    }
 
     iconRow?.querySelectorAll<HTMLElement>('[data-gp-template]').forEach((chip) => {
       chip.onclick = () => {
@@ -636,25 +643,6 @@ export function createProjectsPanel(options: ProjectsPanelOptions) {
 
   function showToast(message: string) {
     toast.show(message);
-  }
-
-  async function handleBackupClick() {
-    try {
-      await exportAllData();
-    } catch (error) {
-      console.error('[Gemini Projects] Backup failed', error);
-      showToast('Backup failed. Please try again.');
-    }
-  }
-
-  function handleRestoreClick() {
-    triggerImport(async (result) => {
-      showToast(result.message);
-      if (!result.success) return;
-      // The reload rebuilds all state from the (now encrypted) workspace
-      // partitions; no separate cache-refresh step is needed anymore.
-      window.location.reload();
-    });
   }
 
   function closeAllOverlays() {
@@ -1313,6 +1301,26 @@ function ensurePanelRoot(shadow: ShadowRoot): HTMLElement {
         display: block;
       }
 
+      .gp-sync-badge .gp-prompts-count {
+        min-width: 16px;
+        height: 16px;
+        padding: 0 5px;
+        border-radius: 999px;
+        background: var(--gp-bg-active);
+        color: var(--gp-fg-muted);
+        font-size: 10px;
+        font-weight: 700;
+        line-height: 16px;
+        text-align: center;
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+      }
+
+      .gp-sync-badge:hover .gp-prompts-count {
+        color: var(--gp-fg);
+      }
+
       .gp-sync-badge.status-syncing .gp-sync-icon svg {
         animation: gp-sync-spin 1.1s linear infinite;
       }
@@ -1432,9 +1440,6 @@ function ProjectNameInputWithIcon(): string {
     </div>
   `;
 }
-
-const BACKUP_ICON = `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 4v10"/><path d="m7.5 10 4.5 4.5 4.5-4.5"/><path d="M5.5 20h13"/></svg>`;
-const RESTORE_ICON = `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 12a8 8 0 1 0 2.35-5.65"/><path d="M4 4.5v5h5"/></svg>`;
 
 function getModalIconRows(): IconOption[][] {
   const perRow = 10;
@@ -1725,21 +1730,13 @@ function ensureOverlayLayer(shadow: ShadowRoot): HTMLElement {
       }
 
       .gp-modal-actions {
-        display: grid;
-        grid-template-columns: var(--gp-action-width) var(--gp-action-width) 1fr var(--gp-action-width);
+        display: flex;
         align-items: center;
-        column-gap: 10px;
+        justify-content: flex-end;
         width: 100%;
         margin-top: 6px;
       }
-      .gp-modal-tools {
-        display: contents;
-      }
-      .gp-action-spacer {
-        min-width: 0;
-      }
-      .gp-primary,
-      .gp-tool-button {
+      .gp-primary {
         width: var(--gp-action-width);
         height: var(--gp-action-height);
         border-radius: 16px 14px 14px 16px;
@@ -1752,43 +1749,6 @@ function ensureOverlayLayer(shadow: ShadowRoot): HTMLElement {
         box-shadow: none;
         -webkit-font-smoothing: antialiased;
         -webkit-text-stroke: 0 transparent;
-        text-shadow: none;
-        paint-order: normal;
-      }
-      .gp-tool-button {
-        padding: 0 12px;
-        border: 1px solid var(--gp-border);
-        background: var(--gp-hover);
-        color: var(--gp-fg-muted);
-        font-size: 13px;
-        font-weight: 700;
-        gap: 9px;
-        transition: background var(--gp-transition), border-color var(--gp-transition), color var(--gp-transition);
-      }
-      .gp-tool-button:first-child {
-        margin-left: 0;
-      }
-      .gp-tool-button:hover {
-        background: var(--gp-hover);
-        border-color: var(--gp-border);
-        color: var(--gp-fg);
-      }
-      .gp-tool-button svg {
-        width: 20px;
-        height: 20px;
-        fill: none;
-        stroke: currentColor;
-        stroke-width: 2.35;
-        stroke-linecap: round;
-        stroke-linejoin: round;
-        flex: 0 0 20px;
-        display: block;
-      }
-      .gp-tool-button span {
-        display: inline-block;
-        line-height: 1;
-        -webkit-text-stroke: 0 transparent;
-        -webkit-text-fill-color: currentColor;
         text-shadow: none;
         paint-order: normal;
       }
@@ -2326,15 +2286,6 @@ function createModal(layer: HTMLElement) {
         `).join('')}
       </div>
       <div class="gp-modal-actions">
-        <div class="gp-modal-tools" aria-label="Project data tools">
-          <button class="gp-tool-button" type="button" data-gp-action="backup" title="Backup projects and prompts">
-            ${BACKUP_ICON}<span>Backup</span>
-          </button>
-          <button class="gp-tool-button" type="button" data-gp-action="restore" title="Restore from backup file">
-            ${RESTORE_ICON}<span>Restore</span>
-          </button>
-        </div>
-        <div class="gp-action-spacer" aria-hidden="true"></div>
         <button class="gp-primary" data-gp-action="confirm" disabled>Done</button>
       </div>
     </div>

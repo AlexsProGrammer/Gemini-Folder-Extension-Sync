@@ -7,7 +7,7 @@ export function bootstrap() {
         const btn = document.getElementById('gp-prompt-btn');
         if (btn) {
             const rect = btn.getBoundingClientRect();
-            PromptPicker.getInstance().toggle(rect);
+            PromptPicker.getInstance().toggle(rect, btn);
         }
     });
 }

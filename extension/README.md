@@ -42,6 +42,7 @@ Optional, self-hosted, zero-knowledge sync of your entire workspace across devic
 - **Local-first** — every change saves locally immediately; pushes are debounced (750 ms) in the background. Pulls happen automatically on window focus and on network reconnect.
 - **Conflict resolution** — when two devices change the same workspace, a modal offers *Use Newest*, *Merge Both*, *Keep This Device*, or *Keep Other Device*. A 10-second countdown auto-resolves with "Use Newest" and pauses while you hover.
 - **Sync status badge** — a live pill in the panel header shows Synced / Syncing / Offline / Conflict / Error / Unconfigured; click it to open settings.
+- **Header badges** — the panel header carries three pills: **Prompts** (opens the prompt library with a live count of saved prompts), **Config** (sync settings) and **Settings** (backup/restore and local-data wipe).
 - **Settings** — server URL, API key, a Test Connection button (distinguishes unreachable server vs. invalid key), and a global-or-per-account passphrase switcher with masked inputs and reveal toggles.
 - **No telemetry** — network requests go only to the server URL you configure. No external CDNs, fonts, or trackers are ever contacted.
 
@@ -90,6 +91,7 @@ The Prompt Library uses the color roles, typography scale, and form structure fr
 - Zero-knowledge AES-GCM-256 sync engine (PBKDF2 key derivation) with debounced local-first pushes, auto-pull on focus/reconnect, and a 4-way conflict modal with 10-second auto-resolution countdown.
 - Multi-account identity engine: SHA-256-hashed, fully partitioned workspaces per Google account, with legacy flat-data auto-migration.
 - Sync Settings modal (server URL, API key with masked inputs, connection tester, global/per-account passphrase switcher) and live sync status badge in the panel header.
+- Panel header badge row: **Prompts** pill (opens the prompt library, live saved-prompt count, add/edit/search), **Config** pill (sync settings) and a **Settings** gear pill with data Export/Import and the Delete-all-local-data danger zone (moved out of the sync modal; Backup/Restore buttons also left the project dialog for the new home).
 - Cross-browser Manifest V3 builds for Chrome and Firefox/Zen.
 
 ### v2.0.6
