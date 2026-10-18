@@ -1,0 +1,15 @@
+services:
+  gemini-sync-backend:
+    build:
+      context: .
+    container_name: gemini-sync-backend
+    ports:
+      - "127.0.0.1:3000:3000"
+    volumes:
+      - ./data:/app/data
+    environment:
+      PORT: 3000
+      DB_PATH: /app/data/sync.db
+      API_KEY: ${API_KEY:-test_secret_key_1234567890}
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+    restart: unless-stopped

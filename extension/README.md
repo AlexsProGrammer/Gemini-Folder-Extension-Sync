@@ -1,8 +1,10 @@
-# Projects for Gemini™: Projects and Prompt Manager
+# Synced Projects for Gemini
 
-Add local Projects and a Prompt Library to Gemini.
+Add local Projects, a Prompt Library, and encrypted multi-device sync to Gemini.
 
 English
+
+> Fork of [linyushuo0818/gemini-folder-extension](https://github.com/linyushuo0818/gemini-folder-extension) — the original local Projects & Prompt Library extension — heavily extended with hierarchical workspaces, per-project System Prompts & Notes, and zero-knowledge encrypted sync to your own backend.
 
 ## What It Does
 
@@ -13,6 +15,8 @@ It also includes a local Prompt Library, so you can save prompts you reuse often
 ## Highlights
 
 - Create local Projects in the Gemini sidebar
+- **Nested subfolders** inside projects and folders (up to 3 levels), with collapsible trees whose expand/collapse state persists per Google account
+- **Move to…** context action to reparent projects and folders, and drag-and-drop chats into any subfolder
 - Move existing chats into Projects
 - Remove a chat from a Project without deleting the original Gemini chat
 - See when a Project chat is missing because it was deleted from Gemini history on another device
@@ -22,30 +26,51 @@ It also includes a local Prompt Library, so you can save prompts you reuse often
 - Save, search, edit, and reuse prompts from a local Prompt Library
 - Keep your organization data in browser-local storage
 
-## Download
+## Project Workspace (New)
 
-Download the latest zip from the [GitHub Releases](https://github.com/linyushuo0818/Gemini-Folder-Extension/releases) page.
+Every project now has a **Workspace drawer** (open it via the instructions icon on a project row):
 
-For the current release, use:
+- **System Prompt** — freeform instructions that are automatically injected into the composer when you start a new chat inside the project. An in-composer pill confirms "Instructions Applied" with a one-click Remove; ongoing multi-turn conversations are never touched.
+- **Project Notes** — a freeform scratchpad for references, outlines, and links. Both fields autosave 400 ms after you stop typing and are included in encrypted sync.
 
-- `gemini-projects-2.0.6-webstore-*.zip`
+## Encrypted Multi-Device Sync (New)
 
-## Install Manually
+Optional, self-hosted, zero-knowledge sync of your entire workspace across devices and browsers:
 
-1. Download the zip file from Releases.
-2. Extract it to a local folder.
-3. Open `chrome://extensions`.
-4. Enable `Developer mode`.
-5. Click `Load unpacked`.
-6. Select the extracted folder that contains `manifest.json`.
+- **How it works** — the workspace (projects, subfolders, notes, system prompts, prompt library) is encrypted in the browser with AES-GCM-256 using a key derived from your passphrase (PBKDF2, 310,000 iterations, SHA-256). Only opaque ciphertext and IV are sent to the server — the backend can never read your data, and your passphrase is never transmitted or stored.
+- **Multi-account isolation** — each Google account (`/u/0/`, `/u/1/`, …) gets its own workspace, identified only by a locally computed SHA-256 hash. Raw email addresses never leave the browser.
+- **Local-first** — every change saves locally immediately; pushes are debounced (750 ms) in the background. Pulls happen automatically on window focus and on network reconnect.
+- **Conflict resolution** — when two devices change the same workspace, a modal offers *Use Newest*, *Merge Both*, *Keep This Device*, or *Keep Other Device*. A 10-second countdown auto-resolves with "Use Newest" and pauses while you hover.
+- **Sync status badge** — a live pill in the panel header shows Synced / Syncing / Offline / Conflict / Error / Unconfigured; click it to open settings.
+- **Settings** — server URL, API key, a Test Connection button (distinguishes unreachable server vs. invalid key), and a global-or-per-account passphrase switcher with masked inputs and reveal toggles.
+- **No telemetry** — network requests go only to the server URL you configure. No external CDNs, fonts, or trackers are ever contacted.
 
-Gemini Projects is designed for Chrome and Chromium-based browsers.
+To use sync you need a backend; see the repository root README and `backend/README.md` for a one-command Docker setup. Without a backend the extension works exactly as before, fully locally.
+
+## Cross-Browser Builds
+
+- `npm run build:chrome` → `dist/chrome` (Chromium: Chrome, Brave, Edge)
+- `npm run build:firefox` → `dist/firefox` (Firefox & Zen Browser)
+- `npm run build:all` → both
+
+## Install (from source)
+
+1. Build: `npm install && npm run build:all`.
+2. Open `chrome://extensions` (or Zen/Firefox `about:debugging#/runtime/this-firefox`).
+3. Enable `Developer mode`.
+4. Click `Load unpacked` (Chrome) or `Load Temporary Add-on` (Firefox/Zen).
+5. Select `dist/chrome` or `dist/firefox`.
+
+## Install from Upstream Releases
+
+Download the latest zip from the [GitHub Releases](https://github.com/linyushuo0818/Gemini-Folder-Extension/releases) page of the original project, extract it, then follow steps 3–5 above with the extracted folder. Note that the upstream release does not include this fork's sync, workspace drawer, or subfolder features — build from source for those.
 
 ## Privacy
 
-- Projects and prompts are stored locally with Chrome extension storage.
-- The extension does not require a separate account or backend.
-- The extension does not proactively upload your Projects, prompts, or chat organization data.
+- Projects, notes, prompts, and system prompts are stored locally with browser extension storage.
+- When sync is configured, all data is AES-GCM-256 encrypted client-side before leaving the browser; only ciphertext reaches your backend. Your passphrase never leaves the device.
+- Account identifiers are SHA-256 hashed locally; raw emails are never stored or transmitted by the extension.
+- The extension does not require a separate account and contacts only the server URL you explicitly configure — no telemetry or third-party calls.
 - Gemini itself still runs on Google's website, so Gemini account activity is governed by Google's own policies.
 
 ## Build and package
@@ -57,6 +82,15 @@ For local testing, build first and load the folder containing the generated `man
 The Prompt Library uses the color roles, typography scale, and form structure from the [MCP Apps for Claude UI kit](https://www.figma.com/community/file/1597641111449594397/mcp-apps-for-claude): 14px body text, 40px inputs, 36px buttons, and 16px textarea padding. Forms use the Primary surface with separate container, control, and secondary-button border strengths. Fonts use system fallbacks when Anthropic Sans Text or JetBrains Mono is unavailable; no font files are bundled. Peer headings in the library, prompt editors, and project dialogs share the same 24px system-serif type with weight 600. The unified serif headings and 28px panel, 16px row, and 12px control corners are project adaptations rather than the kit's default desktop component specifications.
 
 ## Current Version
+
+### Fork additions (this repository)
+
+- Hierarchical projects & nested subfolders with persistent per-account collapse state and Move to… reparenting.
+- Project Workspace drawer with autosaving System Prompts (auto-injected into new chats, with in-composer Remove pill) and Project Notes.
+- Zero-knowledge AES-GCM-256 sync engine (PBKDF2 key derivation) with debounced local-first pushes, auto-pull on focus/reconnect, and a 4-way conflict modal with 10-second auto-resolution countdown.
+- Multi-account identity engine: SHA-256-hashed, fully partitioned workspaces per Google account, with legacy flat-data auto-migration.
+- Sync Settings modal (server URL, API key with masked inputs, connection tester, global/per-account passphrase switcher) and live sync status badge in the panel header.
+- Cross-browser Manifest V3 builds for Chrome and Firefox/Zen.
 
 ### v2.0.6
 

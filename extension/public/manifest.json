@@ -1,8 +1,8 @@
 {
     "manifest_version": 3,
-    "name": "Projects for Gemini™: Projects and Prompt Manager",
+    "name": "Synced Projects for Gemini",
     "version": "2.0.7",
-    "description": "Group Gemini chats into local Projects.",
+    "description": "Group Gemini chats into local Projects/Folders + Prompt Library + self-hosted backend to sync Devices.",
     "permissions": [
         "storage",
         "tabs"
@@ -59,7 +59,7 @@
         }
     ],
     "action": {
-        "default_title": "Projects for Gemini™: Projects and Prompt Manager",
+        "default_title": "Synced Projects for Gemini",
         "default_icon": {
             "16": "icons/icon-16.png",
             "32": "icons/icon-32.png",
