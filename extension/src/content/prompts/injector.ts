@@ -556,3 +556,165 @@ function createAndInjectButton(container: HTMLElement, sibling: Element) {
     log('Injected button');
 }
 
+/* ------------------------------------------------------------------ *
+ * Project system-prompt injection (auto-applied on blank conversations)
+ * ------------------------------------------------------------------ */
+
+import {
+    PROJECT_INSTRUCTIONS_MARKER,
+    composerContainsInstructions,
+    composerIsEmpty,
+    dispatchComposerInputEvents,
+    formatProjectInstructionPrefix,
+    insertTextIntoComposer
+} from './composer';
+
+const INSTRUCTION_PILL_ID = 'gp-project-instructions-pill';
+
+function escapeHtml(value: string): string {
+    return value
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#39;');
+}
+
+function composerRoot(composer: HTMLElement): HTMLElement {
+    return (
+        composer.closest<HTMLElement>('input-area-v2, [data-node-type="input-area"], .input-area') ||
+        composer.parentElement ||
+        composer
+    );
+}
+
+function ensurePillStyle(): void {
+    if (document.getElementById('gp-project-instructions-pill-style')) return;
+    const style = document.createElement('style');
+    style.id = 'gp-project-instructions-pill-style';
+    style.textContent = `
+      #gp-project-instructions-pill {
+        display: inline-flex;
+        align-items: center;
+        gap: 8px;
+        max-width: 100%;
+        margin: 0 0 8px;
+        padding: 5px 12px;
+        border-radius: 999px;
+        border: 1px solid color-mix(in srgb, currentColor 24%, transparent);
+        background: color-mix(in srgb, currentColor 8%, transparent);
+        color: inherit;
+        font: 12px/18px "Google Sans Flex", "Google Sans", "Helvetica Neue", sans-serif;
+        box-sizing: border-box;
+      }
+      #gp-project-instructions-pill .gp-pill-bolt {
+        flex: 0 0 auto;
+        font-size: 13px;
+        line-height: 1;
+      }
+      #gp-project-instructions-pill .gp-pill-text {
+        min-width: 0;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+      #gp-project-instructions-pill .gp-pill-remove {
+        appearance: none;
+        border: none;
+        background: transparent;
+        padding: 2px 4px;
+        margin: 0 -4px 0 0;
+        border-radius: 6px;
+        color: inherit;
+        opacity: 0.78;
+        font: inherit;
+        font-weight: 600;
+        cursor: pointer;
+        flex: 0 0 auto;
+      }
+      #gp-project-instructions-pill .gp-pill-remove:hover {
+        opacity: 1;
+        background: color-mix(in srgb, currentColor 14%, transparent);
+      }
+    `;
+    document.head.appendChild(style);
+}
+
+function findInstructionPill(): HTMLElement | null {
+    return document.getElementById(INSTRUCTION_PILL_ID);
+}
+
+function renderInstructionPill(composer: HTMLElement, projectName: string): void {
+    removeInstructionPill();
+    ensurePillStyle();
+
+    const pill = document.createElement('div');
+    pill.id = INSTRUCTION_PILL_ID;
+    pill.innerHTML = `
+      <span class="gp-pill-bolt" aria-hidden="true">⚡</span>
+      <span class="gp-pill-text">${escapeHtml(projectName || 'Project')} Instructions Applied</span>
+      <button type="button" class="gp-pill-remove" aria-label="Remove injected instructions">Remove</button>
+    `;
+    pill.querySelector('.gp-pill-remove')?.addEventListener('click', () => {
+        removeProjectInstructions(composer);
+    });
+
+    const root = composerRoot(composer);
+    root.insertBefore(pill, composer);
+}
+
+function removeInstructionPill(): void {
+    findInstructionPill()?.remove();
+}
+
+/** Strips the injected instruction block from the composer, keeping user text. */
+function stripInstructionsBlock(composer: HTMLElement): void {
+    const full = composer.textContent || '';
+    const start = full.indexOf(PROJECT_INSTRUCTIONS_MARKER);
+    if (start === -1) return;
+
+    const newlineClose = full.indexOf('\n]', start);
+    const close = newlineClose >= 0
+        ? newlineClose + 2
+        : full.indexOf(']', start + PROJECT_INSTRUCTIONS_MARKER.length) + 1;
+    const end = close > start ? close : full.length;
+
+    const before = full.slice(0, start).replace(/\s+$/, '');
+    const after = full.slice(end).replace(/^\s+/, '');
+    const remaining = before
+        ? after
+            ? `${before}\n${after}`
+            : before
+        : after;
+
+    composer.textContent = remaining;
+    dispatchComposerInputEvents(composer);
+}
+
+/**
+ * Injects the formatted project instructions into a blank composer and shows
+ * the in-composer status pill. Returns false when injection is not applicable
+ * (empty prompt, non-blank composer, or an existing block).
+ */
+export function injectProjectInstructions(
+    composer: HTMLElement,
+    systemPrompt: string,
+    projectName: string
+): boolean {
+    const block = formatProjectInstructionPrefix(systemPrompt);
+    if (!block) return false;
+    if (composerContainsInstructions(composer)) return false;
+    if (!composerIsEmpty(composer)) return false;
+
+    insertTextIntoComposer(composer, block);
+    dispatchComposerInputEvents(composer);
+    renderInstructionPill(composer, projectName);
+    return true;
+}
+
+/** Removes the injected block and the status pill, re-syncing Gemini's state. */
+export function removeProjectInstructions(composer: HTMLElement): void {
+    stripInstructionsBlock(composer);
+    removeInstructionPill();
+}
+

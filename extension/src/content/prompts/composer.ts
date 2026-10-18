@@ -20,7 +20,41 @@ export function insertPrompt(text: string): boolean {
     return true;
 }
 
-function focusComposer(composer: HTMLElement) {
+/* ------------------------------------------------------------------ *
+ * Project system-prompt injection helpers
+ * ------------------------------------------------------------------ */
+
+/** Marker identifying the injected project-instruction block. */
+export const PROJECT_INSTRUCTIONS_MARKER = '[Project Instructions:';
+
+/**
+ * Formats a project's system prompt into the instruction block that is
+ * prepended to a fresh composer. Returns '' for empty prompts so callers can
+ * short-circuit.
+ */
+export function formatProjectInstructionPrefix(systemPrompt: string): string {
+    const trimmed = (systemPrompt || '').trim();
+    if (!trimmed) return '';
+    return `${PROJECT_INSTRUCTIONS_MARKER}\n${trimmed}\n]\n\n`;
+}
+
+/** Raw text content of the composer (trimmed). */
+export function composerText(composer: HTMLElement): string {
+    return (composer.textContent || '').trim();
+}
+
+/** True when the composer contains no text at all. */
+export function composerIsEmpty(composer: HTMLElement): boolean {
+    return composerText(composer).length === 0;
+}
+
+/** True when the composer already carries the injected instruction block. */
+export function composerContainsInstructions(composer: HTMLElement): boolean {
+    return composerText(composer).includes(PROJECT_INSTRUCTIONS_MARKER);
+}
+
+/** Focuses the composer and moves the caret to the end. */
+export function focusComposer(composer: HTMLElement): void {
     composer.focus();
     if (!composer.isContentEditable) return;
     const selection = window.getSelection();
@@ -30,6 +64,42 @@ function focusComposer(composer: HTMLElement) {
     range.collapse(false);
     selection.removeAllRanges();
     selection.addRange(range);
+}
+
+/**
+ * Inserts `text` into the composer using the native editing command first,
+ * falling back to a DOM range insertion for engines that reject execCommand.
+ */
+export function insertTextIntoComposer(composer: HTMLElement, text: string): void {
+    focusComposer(composer);
+    const success = document.execCommand('insertText', false, text);
+    if (!success) {
+        insertTextAtCursor(text);
+    }
+}
+
+/**
+ * Dispatches synthetic input events so Gemini's Angular/Wiz state wrapper
+ * re-enables the "Send" button after a programmatic insertion.
+ */
+export function dispatchComposerInputEvents(composer: HTMLElement): void {
+    composer.dispatchEvent(new InputEvent('beforeinput', {
+        bubbles: true,
+        cancelable: true,
+        inputType: 'insertText'
+    }));
+    composer.dispatchEvent(new InputEvent('input', {
+        bubbles: true,
+        cancelable: true,
+        inputType: 'insertText'
+    }));
+    composer.dispatchEvent(new Event('change', { bubbles: true }));
+}
+
+/** Replaces the composer content with `text`, preserving surrounding content. */
+export function setComposerText(composer: HTMLElement, text: string): void {
+    composer.textContent = text;
+    dispatchComposerInputEvents(composer);
 }
 
 function findComposer(): HTMLElement | null {

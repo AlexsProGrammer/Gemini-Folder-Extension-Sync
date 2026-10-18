@@ -3,12 +3,23 @@ import { exportAllData, triggerImport } from '../../shared/backup';
 import { runtimeSendMessage } from '../../shared/webext';
 import { resolveAccountRawIdentifier } from '../../shared/account';
 import { getActiveAccountHash } from '../accountWatcher';
+import { getWorkspace, saveWorkspace } from '../../shared/storage';
 import { SYNC_CONFLICT_EVENT, syncEngine } from '../../shared/syncEngine';
-import { ICON_OPTIONS, COLOR_OPTIONS, IconOption, getIconLabel, renderIconSvg } from './icons';
+import {
+  ICON_OPTIONS,
+  COLOR_OPTIONS,
+  IconOption,
+  chevronDownIcon,
+  chevronRightIcon,
+  getIconLabel,
+  instructionsIcon,
+  renderIconSvg
+} from './icons';
 import { PANEL_TITLE_FONT_STACK, PANEL_TITLE_TYPOGRAPHY } from './typography';
 import { createSyncStatusBadge } from './syncStatusBadge';
 import { openSyncSettingsModal } from './modals/syncSettingsModal';
 import { openConflictModal } from './modals/conflictModal';
+import { createWorkspaceDrawer, WorkspaceDrawerHandle } from './workspaceDrawer';
 
 export type PanelSection = 'projects' | 'folders';
 export type TargetPickerMode = 'project' | 'folder' | 'all';
@@ -31,6 +42,12 @@ interface ProjectsPanelOptions {
   onAddSubfolder: (parentId: string) => void;
   onEditDetails: (project: Project) => void;
   onAddCurrentChat: (projectId: string) => void;
+  /** Moves an existing project/folder into another container or back to root. */
+  onMoveProject: (projectId: string, targetParentId: string | null) => void;
+  /** Creates a brand-new chat inside the given project (with auto-assignment). */
+  onNewChat: (projectId: string) => void;
+  /** Fired when a project chat row is opened from the panel. */
+  onNavigateToChat: (conversationId: string, projectId: string | null) => void;
   /** Opens Gemini's native chat menu (falls back to the panel menu). */
   onChatMenuOpen: (conversationId: string, anchorRect: DOMRect) => void;
 }
@@ -68,6 +85,64 @@ export function createProjectsPanel(options: ProjectsPanelOptions) {
   const detailsModal = createDetailsModal(overlayLayer, (project, systemPrompt, notes) => {
     options.onSaveProject({ ...project, systemPrompt, notes, updatedAt: Date.now() });
     showToast(systemPrompt || notes ? 'Project details saved' : 'Project details cleared');
+  });
+
+  // Tracks the project that should receive system-prompt injection for new chats.
+  let activeProjectId: string | null = null;
+  let currentState: RuntimeState | null = null;
+
+  // Slide-over Project Workspace drawer (system prompt + notes) with autosave.
+  // Metadata is persisted into the account-partitioned workspace (which fires
+  // the encrypted sync push) and mirrored into the sidebar state for badges.
+  const drawer: WorkspaceDrawerHandle = createWorkspaceDrawer({
+    layer: overlayLayer,
+    loadProjectMeta: async (projectId) => {
+      const accountHash = getActiveAccountHash();
+      if (accountHash) {
+        try {
+          const workspace = await getWorkspace(accountHash);
+          const project = workspace.projects[projectId];
+          if (project) {
+            return { systemPrompt: project.systemPrompt ?? '', notes: project.notes ?? '' };
+          }
+        } catch (error) {
+          console.warn('[Gemini Projects] workspace metadata load failed', error);
+        }
+      }
+      const local = currentState?.projects.find((item) => item.id === projectId);
+      return { systemPrompt: local?.systemPrompt ?? '', notes: local?.notes ?? '' };
+    },
+    saveProjectMeta: async (projectId, updates) => {
+      const local = currentState?.projects.find((item) => item.id === projectId);
+      if (local) {
+        options.onSaveProject({ ...local, ...updates, updatedAt: Date.now() });
+      }
+      const accountHash = getActiveAccountHash();
+      if (!accountHash) return;
+      const workspace = await getWorkspace(accountHash);
+      const existing = workspace.projects[projectId];
+      workspace.projects[projectId] = existing
+        ? { ...existing, ...updates, updatedAt: Date.now() }
+        : {
+            id: projectId,
+            name: local?.name ?? 'Untitled',
+            kind: local?.kind ?? 'project',
+            parentId: local?.parentId ?? null,
+            icon: local?.icon ?? 'default',
+            color: local?.color,
+            chatIds: local?.chatIds,
+            isPinned: local?.isPinned,
+            createdAt: local?.createdAt ?? Date.now(),
+            updatedAt: Date.now(),
+            sortIndex: local?.sortIndex ?? 0,
+            order: local?.order ?? 0,
+            ...updates
+          };
+      await saveWorkspace(accountHash, workspace);
+    },
+    onActiveProjectChange: (projectId) => {
+      activeProjectId = projectId;
+    }
   });
 
   // Initialize theme observer
@@ -119,7 +194,6 @@ export function createProjectsPanel(options: ProjectsPanelOptions) {
   }
 
   // 用于存储当前 state 以供 chatMenu 获取项目列表
-  let currentState: RuntimeState | null = null;
   const chatMenu = createChatMenu(overlayLayer);
   targetPicker.setProjectsProvider(() => currentState?.projects ?? []);
   let panelEventsController: AbortController | null = null;
@@ -186,7 +260,22 @@ export function createProjectsPanel(options: ProjectsPanelOptions) {
         event.preventDefault();
         event.stopPropagation();
         event.stopImmediatePropagation();
+        options.onNavigateToChat(chatId, chatRow.dataset.gpProjectId ?? null);
         navigateToProjectChat(chatId, chatLink?.href || `/app/${chatId}`);
+        return;
+      }
+
+      const workspaceButton = target.closest<HTMLButtonElement>('[data-gp-action="open-workspace"]');
+      if (workspaceButton) {
+        event.preventDefault();
+        event.stopPropagation();
+        event.stopImmediatePropagation();
+        const projectRow = workspaceButton.closest<HTMLElement>('[data-gp-project-id]');
+        const projectId = projectRow?.dataset.gpProjectId;
+        const project = state.projects.find((item) => item.id === projectId);
+        if (project) {
+          openWorkspaceDrawer(project);
+        }
         return;
       }
 
@@ -488,8 +577,31 @@ export function createProjectsPanel(options: ProjectsPanelOptions) {
       onAddCurrentChat: () => options.onAddCurrentChat(project.id),
       onAddSubfolder: () => options.onAddSubfolder(project.id),
       onEditDetails: () => options.onEditDetails(project),
+      onMove: () => openReparentPicker(project),
+      onNewChat: () => options.onNewChat(project.id),
       onEdit: () => openEditModal(project),
       onDelete: () => options.onDeleteProject(project.id)
+    });
+  }
+
+  /** Opens the slide-over workspace drawer for a project. */
+  function openWorkspaceDrawer(project: Project) {
+    activeProjectId = project.id;
+    drawer.close();
+    drawer.open(project).catch((error) =>
+      console.warn('[Gemini Projects] workspace drawer failed to open', error)
+    );
+  }
+
+  /**
+   * Opens the hierarchical picker in reparent mode so a project/folder can be
+   * moved into any other container or back to root (self and descendants are
+   * excluded).
+   */
+  function openReparentPicker(project: Project) {
+    const projects = currentState?.projects ?? [];
+    targetPicker.openReparent(project.id, projects, (targetParentId) => {
+      options.onMoveProject(project.id, targetParentId);
     });
   }
 
@@ -506,7 +618,7 @@ export function createProjectsPanel(options: ProjectsPanelOptions) {
       projects,
       chatIndex,
       currentProjectId,
-      onPick: (targetProjectId) => options.onMoveChatToProject(conversationId, targetProjectId)
+      onPick: (targetProjectId) => options.onMoveChatToProject(conversationId, targetProjectId ?? '')
     });
   }
 
@@ -563,6 +675,7 @@ export function createProjectsPanel(options: ProjectsPanelOptions) {
     chatMenu.close();
     targetPicker.close();
     detailsModal.close();
+    drawer.close();
     toast.hide();
   }
 
@@ -574,7 +687,11 @@ export function createProjectsPanel(options: ProjectsPanelOptions) {
     openDetailsModal,
     openTargetPicker,
     showChatMenuFallback,
-    updateSyncStatus
+    updateSyncStatus,
+    setActiveProject: (projectId: string | null) => {
+      activeProjectId = projectId;
+    },
+    getActiveProjectId: () => activeProjectId
   };
 }
 
@@ -591,7 +708,7 @@ const TWIST_CHEVRON_ICON = '<svg viewBox="0 0 24 24" width="12" height="12" fill
 export function renderProjectsSection(
   projects: Project[],
   chatIndex: Map<string, ChatRef>,
-  expandedProjectIds: Set<string>,
+  collapsedProjectIds: Set<string>,
   rootKind: 'project' | 'folder',
   nativeConversationIds: Set<string> = new Set(),
   nativeChatsReady = false
@@ -642,7 +759,7 @@ export function renderProjectsSection(
   };
 
   const renderNode = (project: Project, depth: number): string => {
-    const isExpanded = expandedProjectIds.has(project.id);
+    const isExpanded = !collapsedProjectIds.has(project.id);
     const accentColor = getProjectAccentColor(project);
     const isFolder = project.kind === 'folder';
     const hasDetails = Boolean(project.systemPrompt || project.notes);
@@ -659,14 +776,19 @@ export function renderProjectsSection(
       ? `<span class="gp-icon gp-folder-icon" style="color: ${escapeAttr(accentColor)};">${FOLDER_ROW_ICON}</span>`
       : `<span class="gp-icon">${renderIconSvg(project.icon, project.color)}</span>`;
 
+    const twistMarkup = hasDescendants
+      ? `<span class="gp-twist ${isExpanded ? 'open' : ''}" aria-hidden="true">${isExpanded ? chevronDownIcon(14) : chevronRightIcon(14)}</span>`
+      : '<span class="gp-twist-spacer" aria-hidden="true"></span>';
+
     return `
         <div class="gp-project" data-gp-project-id="${project.id}" style="--gp-project-color: ${escapeAttr(accentColor)};">
           <div class="gp-row gp-project-row ${isExpanded ? 'active' : ''}" data-gp-action="toggle-project" data-gp-droppable="true">
-            ${hasDescendants ? `<span class="gp-twist ${isExpanded ? 'open' : ''}" aria-hidden="true">${TWIST_CHEVRON_ICON}</span>` : '<span class="gp-twist-spacer" aria-hidden="true"></span>'}
+            ${twistMarkup}
             ${iconMarkup}
             <span class="gp-label">${escapeHtml(project.name)}</span>
             ${hasDetails ? `<span class="gp-details-badge" role="img" aria-label="Has system prompt or notes" title="Has system prompt or notes">${DETAILS_BADGE_ICON}</span>` : ''}
             ${project.isPinned ? `<span class="gp-project-pin" role="img" aria-label="Pinned project" title="Pinned project">${renderProjectActionIcon('pin')}</span>` : ''}
+            ${isFolder ? '' : `<button class="gp-workspace-btn" data-gp-action="open-workspace" aria-label="Open project workspace" title="Project workspace">${instructionsIcon(18)}</button>`}
             <button class="gp-kebab" data-gp-action="project-menu" aria-label="${isFolder ? 'Folder menu' : 'Project menu'}"><svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="5" r="1"/><circle cx="12" cy="12" r="1"/><circle cx="12" cy="19" r="1"/></svg></button>
           </div>
           ${chatRows}
@@ -906,7 +1028,7 @@ function ensurePanelRoot(shadow: ShadowRoot): HTMLElement {
       }
 
       .gp-twist.open svg {
-        transform: rotate(90deg);
+        transform: rotate(0deg);
       }
 
       .gp-twist-spacer {
@@ -931,6 +1053,29 @@ function ensurePanelRoot(shadow: ShadowRoot): HTMLElement {
         flex-shrink: 0;
       }
 
+      .gp-workspace-btn {
+        width: 32px;
+        height: 32px;
+        border-radius: 50%;
+        border: none;
+        background: transparent;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        color: var(--gp-fg-muted);
+        cursor: pointer;
+        opacity: 0;
+        transition: background 0.15s ease, opacity 0.15s ease;
+        margin-right: -4px;
+        flex-shrink: 0;
+      }
+
+      .gp-workspace-btn svg {
+        width: 18px;
+        height: 18px;
+        display: block;
+      }
+
       .gp-kebab svg {
         width: 20px;
         height: 20px;
@@ -938,11 +1083,15 @@ function ensurePanelRoot(shadow: ShadowRoot): HTMLElement {
 
       .gp-row:hover .gp-kebab, 
       .gp-row.gp-force-hover .gp-kebab,
-      .gp-kebab:focus {
+      .gp-kebab:focus,
+      .gp-row:hover .gp-workspace-btn,
+      .gp-row.gp-force-hover .gp-workspace-btn,
+      .gp-workspace-btn:focus {
         opacity: 1;
       }
 
-      .gp-kebab:hover {
+      .gp-kebab:hover,
+      .gp-workspace-btn:hover {
         background: var(--gp-bg-active);
         color: var(--gp-fg);
       }
@@ -1233,7 +1382,7 @@ function buildPanelMarkup(state: RuntimeState): string {
           ${renderProjectsSection(
     state.projects,
     state.chatIndex,
-    state.expandedProjectIds,
+    state.collapsedProjectIds,
     'project',
     state.nativeConversationIds,
     state.nativeChatsReady
@@ -1248,7 +1397,7 @@ function buildPanelMarkup(state: RuntimeState): string {
           ${renderProjectsSection(
     state.projects,
     state.chatIndex,
-    state.expandedProjectIds,
+    state.collapsedProjectIds,
     'folder',
     state.nativeConversationIds,
     state.nativeChatsReady
@@ -2346,6 +2495,8 @@ function createProjectMenu(layer: HTMLElement) {
     onAddCurrentChat: () => void;
     onAddSubfolder: () => void;
     onEditDetails: () => void;
+    onMove: () => void;
+    onNewChat: () => void;
     onEdit: () => void;
     onDelete: () => void;
   };
@@ -2362,7 +2513,9 @@ function createProjectMenu(layer: HTMLElement) {
     // system prompt & notes workspace settings.
     menu.innerHTML = `
       <button type="button" role="menuitem" class="gp-menu-item" data-gp-menu="add-chat">${renderProjectActionIcon('addChat')}<span>Add current chat</span></button>
+      <button type="button" role="menuitem" class="gp-menu-item" data-gp-menu="new-chat">${renderProjectActionIcon('addChat')}<span>New chat in ${isFolder ? 'folder' : 'project'}</span></button>
       <button type="button" role="menuitem" class="gp-menu-item" data-gp-menu="subfolder">${renderProjectActionIcon('subfolder')}<span>New subfolder</span></button>
+      <button type="button" role="menuitem" class="gp-menu-item" data-gp-menu="move">${renderProjectActionIcon('subfolder')}<span>Move to…</span></button>
       ${isFolder ? '' : `<button type="button" role="menuitem" class="gp-menu-item" data-gp-menu="details">${renderProjectActionIcon('details')}<span>System prompt &amp; notes</span></button>`}
       <div class="gp-menu-divider" role="separator"></div>
       <button type="button" role="menuitem" class="gp-menu-item" data-gp-menu="pin">${renderProjectActionIcon(project.isPinned ? 'unpin' : 'pin')}<span>${project.isPinned ? 'Unpin' : 'Pin'}</span></button>
@@ -2415,8 +2568,10 @@ function createProjectMenu(layer: HTMLElement) {
       return;
     }
     if (action === 'add-chat') callbacks.onAddCurrentChat();
+    if (action === 'new-chat') callbacks.onNewChat();
     if (action === 'subfolder') callbacks.onAddSubfolder();
     if (action === 'details') callbacks.onEditDetails();
+    if (action === 'move') callbacks.onMove();
     if (action === 'edit') callbacks.onEdit();
     if (action === 'delete') callbacks.onDelete();
     close();
@@ -2591,10 +2746,19 @@ function createTargetPickerModal(layer: HTMLElement) {
   let currentChatIndex: Map<string, ChatRef> = new Map();
   let expandedNodes = new Set<string>();
   let query = '';
-  let pickHandler: ((projectId: string) => void) | null = null;
+  let pickHandler: ((projectId: string | null) => void) | null = null;
   let currentProjectId: string | null = null;
   let currentMode: TargetPickerMode = 'all';
   let currentStateProjectsProvider: (() => Project[]) | null = null;
+  let reparentExcludeId: string | null = null;
+
+  /** True when the node (or any of its ancestors) is the reparenting target. */
+  function isExcludedFromReparent(projects: Project[], projectId: string | null): boolean {
+    if (!reparentExcludeId || !projectId) return false;
+    if (projectId === reparentExcludeId) return true;
+    const project = projects.find((item) => item.id === projectId);
+    return project ? isExcludedFromReparent(projects, project.parentId) : false;
+  }
 
   function buildForest(projects: Project[], mode: TargetPickerMode): PickerEntry[] {
     const chatCountOf = (projectId: string): number =>
@@ -2608,7 +2772,7 @@ function createTargetPickerModal(layer: HTMLElement) {
 
     const buildChildren = (parentId: string, depth: number): PickerEntry[] => {
       const children = projects
-        .filter((project) => (project.parentId ?? null) === parentId)
+        .filter((project) => (project.parentId ?? null) === parentId && !isExcludedFromReparent(projects, project.id))
         .map((project) => ({
           project,
           depth,
@@ -2624,7 +2788,12 @@ function createTargetPickerModal(layer: HTMLElement) {
     const forest: PickerEntry[] = [];
     for (const kind of rootKinds) {
       forest.push(...sortEntries(projects
-        .filter((project) => (project.parentId ?? null) === null && project.kind === kind)
+        .filter(
+          (project) =>
+            (project.parentId ?? null) === null &&
+            project.kind === kind &&
+            !isExcludedFromReparent(projects, project.id)
+        )
         .map((project) => ({
           project,
           depth: 0,
@@ -2693,13 +2862,24 @@ function createTargetPickerModal(layer: HTMLElement) {
       ? forest.filter((entry) => matchesQuery(entry, normalizedQuery))
       : forest;
 
-    if (!visibleForest.length) {
+    const rootRow = reparentExcludeId
+      ? `
+        <div class="gp-picker-node" data-gp-picker-id="__root__" role="option" tabindex="0">
+          <div class="gp-picker-row" style="padding-left: 10px;">
+            <span class="gp-picker-twist-spacer"></span>
+            <span class="gp-picker-icon"><svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M8 3H4a1 1 0 0 0-1 1v4a1 1 0 0 0 1 1h4a1 1 0 0 0 1-1V4a1 1 0 0 0-1-1Z"/><path d="M20 3h-4a1 1 0 0 0-1 1v4a1 1 0 0 0 1 1h4a1 1 0 0 0 1-1V4a1 1 0 0 0-1-1Z"/><path d="M8 15H4a1 1 0 0 0-1 1v4a1 1 0 0 0 1 1h4a1 1 0 0 0 1-1v-4a1 1 0 0 0-1-1Z"/><path d="M20 15h-4a1 1 0 0 0-1 1v4a1 1 0 0 0 1 1h4a1 1 0 0 0 1-1v-4a1 1 0 0 0-1-1Z"/></svg></span>
+            <span class="gp-picker-name">Root (top level)</span>
+          </div>
+        </div>`
+      : '';
+
+    if (!visibleForest.length && !rootRow) {
       listElement.innerHTML = '';
       if (emptyElement) emptyElement.style.display = 'block';
       return;
     }
     if (emptyElement) emptyElement.style.display = 'none';
-    listElement.innerHTML = visibleForest.map((entry) => renderEntry(entry, normalizedQuery)).join('');
+    listElement.innerHTML = `${rootRow}${visibleForest.map((entry) => renderEntry(entry, normalizedQuery)).join('')}`;
   }
 
   function open(config: {
@@ -2707,12 +2887,13 @@ function createTargetPickerModal(layer: HTMLElement) {
     projects: Project[];
     chatIndex: Map<string, ChatRef>;
     currentProjectId: string | null;
-    onPick: (projectId: string) => void;
+    onPick: (projectId: string | null) => void;
   }) {
     currentChatIndex = config.chatIndex;
     currentProjectId = config.currentProjectId;
     currentMode = config.mode;
     pickHandler = config.onPick;
+    reparentExcludeId = null;
     query = '';
     expandedNodes = new Set(config.projects.map((project) => project.id));
     if (titleElement) titleElement.textContent = TITLE_BY_MODE[config.mode];
@@ -2722,9 +2903,34 @@ function createTargetPickerModal(layer: HTMLElement) {
     window.setTimeout(() => searchInput?.focus(), 30);
   }
 
+  /**
+   * Opens the picker to reparent an existing project/folder. Self and its
+   * subtree are hidden, and a "Root (top level)" entry lets the user return
+   * the container to the top level.
+   */
+  function openReparent(
+    projectId: string,
+    projects: Project[],
+    onPick: (targetParentId: string | null) => void
+  ) {
+    currentChatIndex = new Map();
+    currentProjectId = projectId;
+    currentMode = 'all';
+    pickHandler = onPick;
+    reparentExcludeId = projectId;
+    query = '';
+    expandedNodes = new Set(projects.map((project) => project.id));
+    if (titleElement) titleElement.textContent = 'Move to…';
+    if (searchInput) searchInput.value = '';
+    renderList(projects, 'all');
+    backdrop.style.display = 'flex';
+    window.setTimeout(() => searchInput?.focus(), 30);
+  }
+
   function close() {
     backdrop.style.display = 'none';
     pickHandler = null;
+    reparentExcludeId = null;
   }
 
   backdrop.addEventListener('click', (event) => {
@@ -2770,7 +2976,7 @@ function createTargetPickerModal(layer: HTMLElement) {
     const row = target.closest<HTMLElement>('.gp-picker-node');
     const id = row?.dataset.gpPickerId;
     if (id && pickHandler) {
-      pickHandler(id);
+      pickHandler(id === '__root__' ? null : id);
       close();
     }
   });
@@ -2781,7 +2987,7 @@ function createTargetPickerModal(layer: HTMLElement) {
     const id = row?.dataset.gpPickerId;
     if (id && pickHandler) {
       event.preventDefault();
-      pickHandler(id);
+      pickHandler(id === '__root__' ? null : id);
       close();
     }
   });
@@ -2794,6 +3000,7 @@ function createTargetPickerModal(layer: HTMLElement) {
 
   return {
     open,
+    openReparent,
     close,
     setProjectsProvider: (provider: () => Project[]) => {
       currentStateProjectsProvider = provider;

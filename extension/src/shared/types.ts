@@ -123,7 +123,12 @@ export interface UiState {
 export interface RuntimeState {
   projects: Project[];
   chatIndex: Map<string, ChatRef>;
-  expandedProjectIds: Set<string>;
+  /**
+   * Ids of projects/folders the user has explicitly collapsed. A node is
+   * expanded by default and collapses when its id is present in this set.
+   * Persisted per account under `collapsed_folders_${accountHash}`.
+   */
+  collapsedProjectIds: Set<string>;
   nativeConversationIds: Set<string>;
   nativeChatsReady: boolean;
   ui: UiState;

@@ -1,6 +1,6 @@
 import { BackgroundRequest, BackgroundResponse, ChatRef, Project, RuntimeState, SyncStatus } from '../shared/types';
-import { runtimeSendMessage } from '../shared/webext';
-import { onWorkspaceSaved } from '../shared/storage';
+import { runtimeSendMessage, storageLocalGet, storageLocalSet } from '../shared/webext';
+import { getWorkspace, onWorkspaceSaved } from '../shared/storage';
 import {
   syncEngine,
   SYNC_CONFLICT_EVENT,
@@ -19,23 +19,28 @@ import {
   injectProjectsSection
 } from './dom/anchors';
 import { attachChatMenuEnhancer } from './dom/menus';
+import { initComposerObserver, hasUserTurnsInChat } from './dom/composerObserver';
 import { initGeminiResponseFolding } from './gemini/responseFolding';
 import * as prompts from './prompts';
+import { injectProjectInstructions } from './prompts/injector';
 import { installSidebarInspector } from './sidebarInspector';
 import { CHAT_DRAG_MIME, createProjectsPanel } from './ui/projectsPanel';
 import { initChatGPT } from './chatgpt';
 
-const BUILD_MARKER = '2.0.6';
+const BUILD_MARKER = '2.0.7';
 const HIDDEN_ATTR = 'data-gp-native-hidden';
 const RESCAN_DELAY_MS = 350;
 const PANEL_READY_RETRY_MS = 120;
 const PANEL_READY_RETRY_LIMIT = 40;
 const MIN_EXPANDED_SIDEBAR_WIDTH = 180;
+const COLLAPSED_FOLDERS_KEY_PREFIX = 'collapsed_folders_';
+/** Survives the full page navigation that opening a new chat triggers. */
+const PENDING_NEW_CHAT_KEY = 'gp_pending_new_chat_project';
 
 const state: RuntimeState = {
   projects: [],
   chatIndex: new Map(),
-  expandedProjectIds: new Set(),
+  collapsedProjectIds: new Set(),
   nativeConversationIds: new Set(),
   nativeChatsReady: false,
   ui: {
@@ -59,6 +64,12 @@ let pendingPanelRetryCount = 0;
 let lastRenderKey = '';
 let chatMenuHandle: { openNativeChatMenu: (conversationId: string, anchorRect: DOMRect) => Promise<boolean> } | null = null;
 let chatMenuOverlayShadow: ShadowRoot | null = null;
+
+/** Project that should receive system-prompt injection for new conversations. */
+let activeProjectId: string | null = null;
+/** Project awaiting auto-assignment for a freshly created chat. */
+let pendingNewChatProjectId: string | null = null;
+let composerObserver: { stop: () => void } | null = null;
 
 function sendMessage(message: BackgroundRequest): Promise<BackgroundResponse> {
   return runtimeSendMessage<BackgroundResponse>(message);
@@ -147,6 +158,108 @@ async function bootstrap() {
   installLifecycleRescans();
   runStage('responseFolding', () => initGeminiResponseFolding());
   runStage('prompts', () => prompts.bootstrap());
+  runStage('projectInstructions', () => initProjectInstructionInjection());
+}
+
+/* ------------------------------------------------------------------ *
+ * Project system-prompt injection lifecycle
+ * ------------------------------------------------------------------ */
+
+async function resolveProjectSystemPrompt(projectId: string): Promise<string> {
+  const accountHash = getActiveAccountHash();
+  if (accountHash) {
+    try {
+      const workspace = await getWorkspace(accountHash);
+      const project = workspace.projects[projectId];
+      // The account-partitioned workspace is authoritative: once a project
+      // exists there, its (possibly empty) prompt must not leak across
+      // accounts via the legacy global state.
+      if (project) return project.systemPrompt ?? '';
+    } catch (error) {
+      console.warn('[gemini-projects] workspace prompt lookup failed', error);
+    }
+  }
+  return state.projects.find((item) => item.id === projectId)?.systemPrompt ?? '';
+}
+
+/**
+ * Watches Gemini's chat surface and auto-injects the active project's system
+ * prompt whenever a fresh blank conversation becomes ready. Ongoing multi-turn
+ * conversations are never touched.
+ */
+function initProjectInstructionInjection(): void {
+  // A "New chat in project" action navigates to a fresh conversation via a full
+  // page load; restore the pending project so injection still fires afterwards.
+  try {
+    const pending = sessionStorage.getItem(PENDING_NEW_CHAT_KEY);
+    if (pending) pendingNewChatProjectId = pending;
+  } catch {
+    // sessionStorage unavailable — rely on the in-memory value only.
+  }
+
+  // A reload straight into an existing conversation (e.g. Gemini performed a
+  // full navigation when the first message was sent) cancels the pending
+  // new-chat assignment; it must not capture an unrelated conversation.
+  const currentConversationId = getConversationId(window.location.href);
+  if (currentConversationId && pendingNewChatProjectId) {
+    pendingNewChatProjectId = null;
+    try {
+      sessionStorage.removeItem(PENDING_NEW_CHAT_KEY);
+    } catch {
+      // sessionStorage unavailable — in-memory value already cleared.
+    }
+  }
+
+  composerObserver = initComposerObserver({
+    onNewChatReady: (composer) => {
+      void (async () => {
+        const projectId = pendingNewChatProjectId ?? activeProjectId;
+        if (!projectId) return;
+        // Only inject into genuinely new, blank conversations. A conversation
+        // that already carries an id (including a just-sent first message whose
+        // turn has not rendered yet) must never be touched.
+        const conversationId = getConversationId(window.location.href);
+        if (conversationId && !pendingNewChatProjectId) return;
+        const project = state.projects.find((item) => item.id === projectId);
+        const systemPrompt = await resolveProjectSystemPrompt(projectId);
+        if (!systemPrompt) return;
+        if (hasUserTurnsInChat()) return;
+        try {
+          injectProjectInstructions(composer, systemPrompt, project?.name || 'Project');
+        } catch (error) {
+          console.warn('[gemini-projects] instruction injection failed', error);
+        }
+      })();
+    },
+    onConversationChanged: (conversationId) => {
+      if (pendingNewChatProjectId && conversationId) {
+        const projectId = pendingNewChatProjectId;
+        pendingNewChatProjectId = null;
+        try {
+          sessionStorage.removeItem(PENDING_NEW_CHAT_KEY);
+        } catch {
+          // sessionStorage unavailable — in-memory value already cleared.
+        }
+        if (state.chatIndex.has(conversationId)) {
+          // The user opened an existing conversation instead of sending the new
+          // chat. Cancel the pending assignment rather than capturing it.
+          return;
+        }
+        handleMoveChat(conversationId, projectId).catch((error) =>
+          console.warn('[gemini-projects] auto-assign new chat failed', error)
+        );
+        panel?.showToast('New chat added to project');
+        return;
+      }
+      if (conversationId) {
+        const chat = state.chatIndex.get(conversationId);
+        if (chat?.projectId) {
+          activeProjectId = chat.projectId;
+          panel?.setActiveProject(chat.projectId);
+        }
+      }
+    }
+  });
 }
 
 async function loadInitialState() {
@@ -163,6 +276,36 @@ async function loadInitialState() {
   } catch (error) {
     console.warn('[gemini-projects] getState failed; starting with local empty state', error);
   }
+  await loadCollapsedFolders(getActiveAccountHash());
+}
+
+/* ------------------------------------------------------------------ *
+ * Persistent per-account folder collapse state
+ * ------------------------------------------------------------------ */
+
+async function loadCollapsedFolders(accountHash: string | null): Promise<void> {
+  if (!accountHash) {
+    state.collapsedProjectIds.clear();
+    return;
+  }
+  const key = `${COLLAPSED_FOLDERS_KEY_PREFIX}${accountHash}`;
+  try {
+    const result = await storageLocalGet<Record<string, unknown>>([key]);
+    const raw = result[key];
+    state.collapsedProjectIds = new Set(
+      Array.isArray(raw) ? raw.filter((entry): entry is string => typeof entry === 'string') : []
+    );
+  } catch (error) {
+    console.warn('[gemini-projects] collapsed-folder load failed', error);
+    state.collapsedProjectIds.clear();
+  }
+}
+
+function persistCollapsedFolders(accountHash: string | null): void {
+  if (!accountHash) return;
+  storageLocalSet({ [`${COLLAPSED_FOLDERS_KEY_PREFIX}${accountHash}`]: Array.from(state.collapsedProjectIds) }).catch(
+    (error) => console.warn('[gemini-projects] collapsed-folder persist failed', error)
+  );
 }
 
 function observeDocumentForSidebar() {
@@ -180,7 +323,9 @@ function handleAccountChanged(event: Event): void {
     '->',
     detail?.newHash
   );
-  state.expandedProjectIds.clear();
+  state.collapsedProjectIds.clear();
+  pendingNewChatProjectId = null;
+  sessionStorage.removeItem(PENDING_NEW_CHAT_KEY);
   state.ui = {
     createModalOpen: false,
     contextMenuOpen: false,
@@ -291,7 +436,7 @@ function ensurePanel() {
       onRemoveChatFromProject: (conversationId) => handleMoveChat(conversationId, null),
       onMoveChatToProject: (conversationId, projectId) => handleMoveChat(conversationId, projectId),
       onAddSubfolder: (parentId) => {
-        state.expandedProjectIds.add(parentId);
+        state.collapsedProjectIds.delete(parentId);
         renderPanelIfChanged(true);
         panel?.openCreateModal(parentId);
       },
@@ -300,6 +445,25 @@ function ensurePanel() {
         handleAddCurrentChat(projectId).catch((error) =>
           console.warn('[gemini-projects] add current chat failed', error)
         );
+      },
+      onMoveProject: (projectId, targetParentId) => {
+        handleMoveProject(projectId, targetParentId).catch((error) =>
+          console.warn('[gemini-projects] move project failed', error)
+        );
+      },
+      onNewChat: (projectId) => handleNewChatInProject(projectId),
+      onNavigateToChat: (conversationId, projectId) => {
+        if (projectId) {
+          activeProjectId = projectId;
+          panel?.setActiveProject(projectId);
+        }
+        if (conversationId) {
+          const chat = state.chatIndex.get(conversationId);
+          if (chat?.projectId) {
+            activeProjectId = chat.projectId;
+            panel?.setActiveProject(chat.projectId);
+          }
+        }
       },
       onChatMenuOpen: (conversationId, anchorRect) => {
         handlePanelChatMenu(conversationId, anchorRect).catch((error) =>
@@ -569,8 +733,9 @@ async function handleSaveProject(project: Project) {
   const response = await sendMessage({ type: 'upsertProject', project });
   if (!response.ok || !response.state) return;
   state.projects = response.state.projects;
-  if (project.parentId) state.expandedProjectIds.add(project.parentId);
-  if (project.kind === 'folder') state.expandedProjectIds.add(project.id);
+  if (project.parentId) state.collapsedProjectIds.delete(project.parentId);
+  if (project.kind === 'folder') state.collapsedProjectIds.delete(project.id);
+  persistCollapsedFolders(getActiveAccountHash());
   renderPanelIfChanged(true);
 }
 
@@ -580,18 +745,69 @@ async function handleAddCurrentChat(projectId: string) {
     panel?.showToast('Open a chat first, then use "Add current chat".');
     return;
   }
-  state.expandedProjectIds.add(projectId);
+  state.collapsedProjectIds.delete(projectId);
+  persistCollapsedFolders(getActiveAccountHash());
   await handleMoveChat(conversationId, projectId);
   panel?.showToast('Chat added to project');
 }
 
 function handleToggleProjectExpand(projectId: string) {
-  if (state.expandedProjectIds.has(projectId)) {
-    state.expandedProjectIds.delete(projectId);
+  if (state.collapsedProjectIds.has(projectId)) {
+    state.collapsedProjectIds.delete(projectId);
   } else {
-    state.expandedProjectIds.add(projectId);
+    state.collapsedProjectIds.add(projectId);
   }
+  persistCollapsedFolders(getActiveAccountHash());
   renderPanelIfChanged(true);
+}
+
+async function handleMoveProject(projectId: string, targetParentId: string | null) {
+  const project = state.projects.find((item) => item.id === projectId);
+  if (!project) return;
+  if ((project.parentId ?? null) === targetParentId) return;
+
+  if (targetParentId) {
+    state.collapsedProjectIds.delete(targetParentId);
+  }
+  const siblings = state.projects.filter((item) => (item.parentId ?? null) === targetParentId);
+  const order = siblings.reduce((max, item) => Math.max(max, item.order), -1) + 1;
+
+  const next: Project = {
+    ...project,
+    parentId: targetParentId,
+    order,
+    sortIndex: order,
+    updatedAt: Date.now()
+  };
+  const response = await sendMessage({ type: 'upsertProject', project: next });
+  if (!response.ok || !response.state) return;
+  state.projects = response.state.projects;
+  persistCollapsedFolders(getActiveAccountHash());
+  renderPanelIfChanged(true);
+  panel?.showToast('Project moved');
+}
+
+/** Creates a brand-new chat inside a project; the conversation is auto-assigned. */
+function handleNewChatInProject(projectId: string): void {
+  pendingNewChatProjectId = projectId;
+  try {
+    sessionStorage.setItem(PENDING_NEW_CHAT_KEY, projectId);
+  } catch {
+    // sessionStorage may be unavailable in restricted contexts; injection still
+    // works via the in-memory fallback when no full navigation occurs.
+  }
+  state.collapsedProjectIds.delete(projectId);
+  persistCollapsedFolders(getActiveAccountHash());
+  renderPanelIfChanged(true);
+  navigateToNewChat();
+  panel?.showToast('Opening new chat in project…');
+}
+
+function navigateToNewChat(): void {
+  const url = new URL('/app', window.location.origin);
+  if (window.location.href !== url.href) {
+    window.location.assign(url.href);
+  }
 }
 
 async function handleToggleProjectPin(projectId: string, isPinned: boolean) {
@@ -618,7 +834,8 @@ async function handleDeleteProject(projectId: string) {
   if (!response.ok || !response.state) return;
   state.projects = response.state.projects;
   state.chatIndex = new Map(Object.entries(response.state.chatIndex));
-  state.expandedProjectIds.delete(projectId);
+  state.collapsedProjectIds.delete(projectId);
+  persistCollapsedFolders(getActiveAccountHash());
   applyNativeChatVisibility();
   renderPanelIfChanged(true);
 }
@@ -629,7 +846,10 @@ async function handleMoveChat(conversationId: string, projectId: string | null) 
   if (!response.ok || !response.state) return;
   state.projects = response.state.projects ?? state.projects;
   state.chatIndex = new Map(Object.entries(response.state.chatIndex));
-  if (projectId) state.expandedProjectIds.add(projectId);
+  if (projectId) {
+    state.collapsedProjectIds.delete(projectId);
+    persistCollapsedFolders(getActiveAccountHash());
+  }
   applyNativeChatVisibility();
   renderPanelIfChanged(true);
 }
@@ -769,7 +989,7 @@ function getRenderKey(): string {
     })
     .sort()
     .join('|');
-  return `${state.uiPrefs.projectsCollapsed}|${state.uiPrefs.foldersCollapsed}|${Array.from(state.expandedProjectIds).sort().join(',')}|${projects}|${chats}`;
+  return `${state.uiPrefs.projectsCollapsed}|${state.uiPrefs.foldersCollapsed}|${Array.from(state.collapsedProjectIds).sort().join(',')}|${projects}|${chats}`;
 }
 
 function withTimeout<T>(promise: Promise<T>, timeoutMs: number): Promise<T> {
