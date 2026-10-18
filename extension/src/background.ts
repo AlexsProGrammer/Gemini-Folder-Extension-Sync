@@ -45,9 +45,21 @@ function renameProject(state: StoredState, projectId: string, name: string): Sto
 }
 
 function deleteProject(state: StoredState, projectId: string): StoredState {
-  state.projects = state.projects.filter((item) => item.id !== projectId);
+  const doomed = new Set<string>([projectId]);
+  let grew = true;
+  while (grew) {
+    grew = false;
+    state.projects.forEach((item) => {
+      if (item.parentId && doomed.has(item.parentId) && !doomed.has(item.id)) {
+        doomed.add(item.id);
+        grew = true;
+      }
+    });
+  }
+
+  state.projects = state.projects.filter((item) => !doomed.has(item.id));
   Object.values(state.chatIndex).forEach((chat) => {
-    if (chat.projectId === projectId) {
+    if (chat.projectId && doomed.has(chat.projectId)) {
       chat.projectId = null;
     }
   });

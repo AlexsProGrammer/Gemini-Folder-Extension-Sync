@@ -1,15 +1,58 @@
 type AnyFn = (...args: any[]) => any;
 
-const globalApi = globalThis as typeof globalThis & {
-  browser?: any;
-  chrome?: any;
+type WebextApi = {
+  storage: {
+    local: {
+      get: AnyFn;
+      set: AnyFn;
+    };
+    onChanged: { addListener: AnyFn };
+  };
+  runtime: {
+    sendMessage: AnyFn;
+    onMessage: { addListener: AnyFn };
+    lastError?: { message?: string } | null;
+  };
+  tabs?: unknown;
 };
 
-export const webext = globalApi.chrome ?? globalApi.browser;
+const globalApi = globalThis as typeof globalThis & {
+  browser?: WebextApi;
+  chrome?: WebextApi;
+};
 
-if (!webext) {
-  throw new Error('WebExtension API is not available in this environment.');
+let polyfillPromise: Promise<WebextApi | null> | null = null;
+
+export function ensureWebextApi(): Promise<WebextApi | null> {
+  const existing = globalApi.browser ?? globalApi.chrome;
+  if (existing) {
+    return Promise.resolve(existing);
+  }
+  if (!polyfillPromise) {
+    polyfillPromise = import('webextension-polyfill')
+      .then((module) => {
+        const candidate = (module as { default?: WebextApi; browser?: WebextApi }).default
+          ?? (module as { browser?: WebextApi }).browser
+          ?? globalApi.browser
+          ?? globalApi.chrome;
+        return candidate ?? null;
+      })
+      .catch(() => null);
+  }
+  return polyfillPromise;
 }
+
+export const webext: WebextApi = new Proxy({} as WebextApi, {
+  get(_target, prop: string | symbol) {
+    const api = globalApi.browser ?? globalApi.chrome;
+    if (!api) return undefined;
+    return Reflect.get(api as object, prop, api as object);
+  },
+  has(_target, prop: string | symbol) {
+    const api = globalApi.browser ?? globalApi.chrome;
+    return Boolean(api && Reflect.has(api as object, prop));
+  }
+});
 
 function invokeCompat<T>(fn: AnyFn, args: unknown[]): Promise<T> {
   try {
@@ -33,21 +76,32 @@ function invokeCompat<T>(fn: AnyFn, args: unknown[]): Promise<T> {
   });
 }
 
-export function storageLocalGet<T = Record<string, unknown>>(
-  keys?: string | string[] | Record<string, unknown>
+async function resolveApi(): Promise<WebextApi> {
+  const api = globalApi.browser ?? globalApi.chrome ?? (await ensureWebextApi());
+  if (!api) {
+    throw new Error('WebExtension API is not available in this environment.');
+  }
+  return api;
+}
+
+export async function storageLocalGet<T = Record<string, unknown>>(
+  keys?: string | string[] | Record<string, unknown> | null
 ): Promise<T> {
-  return invokeCompat<T>(webext.storage.local.get.bind(webext.storage.local), [keys]);
+  const api = await resolveApi();
+  return invokeCompat<T>(api.storage.local.get.bind(api.storage.local), [keys]);
 }
 
-export function storageLocalSet(items: Record<string, unknown>): Promise<void> {
-  return invokeCompat<void>(webext.storage.local.set.bind(webext.storage.local), [items]);
+export async function storageLocalSet(items: Record<string, unknown>): Promise<void> {
+  const api = await resolveApi();
+  return invokeCompat<void>(api.storage.local.set.bind(api.storage.local), [items]);
 }
 
-export function runtimeSendMessage<TResponse = unknown>(message: unknown): Promise<TResponse> {
-  return invokeCompat<TResponse>(webext.runtime.sendMessage.bind(webext.runtime), [message]);
+export async function runtimeSendMessage<TResponse = unknown>(message: unknown): Promise<TResponse> {
+  const api = await resolveApi();
+  return invokeCompat<TResponse>(api.runtime.sendMessage.bind(api.runtime), [message]);
 }
 
 export function runtimeLastErrorMessage(): string | null {
-  const error = globalApi.chrome?.runtime?.lastError ?? webext.runtime?.lastError;
+  const error = globalApi.chrome?.runtime?.lastError ?? globalApi.browser?.runtime?.lastError;
   return error?.message || null;
 }

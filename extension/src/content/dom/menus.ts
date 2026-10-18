@@ -153,6 +153,12 @@ function isRowInChatsList(row: HTMLElement | null): boolean {
   return chatsList.contains(row);
 }
 
+function isRowInSidebar(row: HTMLElement | null): boolean {
+  if (!row) return false;
+  const sidebarRoot = findSidebarRoot();
+  return Boolean(sidebarRoot && sidebarRoot.contains(row));
+}
+
 function clearActiveRow() {
   const prev = document.querySelector<HTMLElement>(`[${ACTIVE_ROW_ATTR}="true"]`);
   if (prev) {
@@ -252,6 +258,20 @@ export function attachChatMenuEnhancer(options: ChatMenuEnhancerOptions) {
     }
   });
 
+  // Right-click fallback: open the move menu directly on any sidebar chat row,
+  // independent of Gemini's native kebab menu rendering.
+  document.addEventListener('contextmenu', (event) => {
+    const target = event.target as HTMLElement | null;
+    if (!target || !openMoveMenuHandler) return;
+    const row = findChatRowFromTarget(target);
+    if (!row || !isRowInSidebar(row)) return;
+    const conversationId = getConversationIdFromActiveRow(target) || getConversationIdFromChatRow(row);
+    if (!conversationId) return;
+    event.preventDefault();
+    cleanupMenuArtifacts('context menu');
+    openMoveMenuHandler(row.getBoundingClientRect(), conversationId, row);
+  }, true);
+
   return () => {
     listenersAttached = false;
     openMoveMenuHandler = null;
@@ -262,11 +282,15 @@ export function isChatKebabButton(el: HTMLElement): boolean {
   const button = el.closest('button,[role="button"],div,[aria-label]') as HTMLElement | null;
   if (!button) return false;
   const row = findChatRowFromTarget(button);
+  const rowHasConversation = Boolean(getConversationIdFromChatRow(row));
   if (!isRowInChatsList(row)) {
-    return false;
+    // Fallback for newer sidebar layouts where the chats list container cannot
+    // be resolved: accept any row inside the sidebar that carries a chat id.
+    if (!rowHasConversation || !isRowInSidebar(row)) {
+      return false;
+    }
   }
-  const conversationId = getConversationIdFromChatRow(row);
-  if (!conversationId) {
+  if (!rowHasConversation) {
     return false;
   }
   const labelRaw = button.getAttribute('aria-label') || button.getAttribute('title') || '';

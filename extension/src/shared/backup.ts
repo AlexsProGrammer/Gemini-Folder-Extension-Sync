@@ -1,15 +1,26 @@
-// 鎵╁睍鏈湴鏁版嵁鐨勫浠?鎭㈠宸ュ叿銆?// 杩欓噷涓嶄緷璧?shared/storage.ts锛岄伩鍏嶈鎵撹繘鍏变韩 chunk锛?// 浠庤€岃Е鍙?content script 鍙樻垚 ESM 瀵艰嚧鍦?Chrome 涓け鏁堛€?
+import { WorkspacePayloadSchema } from './schemas';
+import {
+  getWorkspaceKey,
+  LEGACY_PROMPTS_KEY,
+  LEGACY_GENERIC_PROMPTS_KEY,
+  LEGACY_GENERIC_PROJECTS_KEY,
+  STORAGE_KEY,
+  WORKSPACE_SCHEMA_VERSION
+} from './storage';
+import { WorkspacePayload } from './types';
 import { storageLocalGet, storageLocalSet } from './webext';
 
-const PROJECTS_KEY = 'gemini_projects_v1';
-const PROMPTS_KEY = 'gp_prompts_store';
-const BACKUP_VERSION = 1;
+const BACKUP_VERSION = 2;
+const WORKSPACE_KEY_PREFIX = 'workspace_';
 
 export interface BackupData {
   version: number;
   exportedAt: string;
-  projects: unknown;
-  prompts: unknown;
+  /** Account-partitioned workspaces keyed by SHA-256 account hash. */
+  accounts?: Record<string, WorkspacePayload>;
+  /** Legacy schema v1 snapshot kept for downgrade compatibility. */
+  projects?: unknown;
+  prompts?: unknown;
 }
 
 function buildFilename(): string {
@@ -17,16 +28,31 @@ function buildFilename(): string {
   const yyyy = date.getFullYear();
   const mm = String(date.getMonth() + 1).padStart(2, '0');
   const dd = String(date.getDate()).padStart(2, '0');
-  return `gemini-projects-backup-${yyyy}-${mm}-${dd}.json`;
+  return `gemini-workspace-backup-${yyyy}-${mm}-${dd}.json`;
 }
 
 export async function exportAllData(): Promise<void> {
-  const result = await storageLocalGet<Record<string, unknown>>([PROJECTS_KEY, PROMPTS_KEY]);
+  const everything = await storageLocalGet<Record<string, unknown>>(null);
+
+  const accounts: Record<string, WorkspacePayload> = {};
+  Object.entries(everything).forEach(([key, value]) => {
+    if (!key.startsWith(WORKSPACE_KEY_PREFIX)) return;
+    const accountHash = key.slice(WORKSPACE_KEY_PREFIX.length);
+    if (!accountHash) return;
+    try {
+      accounts[accountHash] = WorkspacePayloadSchema.parse(value) as WorkspacePayload;
+    } catch {
+      // Export raw so no user data is silently dropped; import re-validates.
+      accounts[accountHash] = value as WorkspacePayload;
+    }
+  });
+
   const payload: BackupData = {
     version: BACKUP_VERSION,
     exportedAt: new Date().toISOString(),
-    projects: result[PROJECTS_KEY] ?? null,
-    prompts: result[PROMPTS_KEY] ?? null
+    accounts,
+    projects: everything[STORAGE_KEY] ?? everything[LEGACY_GENERIC_PROJECTS_KEY] ?? null,
+    prompts: everything[LEGACY_PROMPTS_KEY] ?? everything[LEGACY_GENERIC_PROMPTS_KEY] ?? null
   };
 
   const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' });
@@ -57,11 +83,26 @@ export async function importData(file: File): Promise<{ success: boolean; messag
     }
 
     const updates: Record<string, unknown> = {};
+    let importedAccounts = 0;
+    let skippedAccounts = 0;
+
+    if (data.accounts && typeof data.accounts === 'object' && data.version >= WORKSPACE_SCHEMA_VERSION) {
+      Object.entries(data.accounts).forEach(([accountHash, workspace]) => {
+        try {
+          const validated = WorkspacePayloadSchema.parse(workspace) as WorkspacePayload;
+          updates[getWorkspaceKey(accountHash)] = validated;
+          importedAccounts += 1;
+        } catch {
+          skippedAccounts += 1;
+        }
+      });
+    }
+
     if (data.projects !== null && data.projects !== void 0) {
-      updates[PROJECTS_KEY] = data.projects;
+      updates[STORAGE_KEY] = data.projects;
     }
     if (data.prompts !== null && data.prompts !== void 0) {
-      updates[PROMPTS_KEY] = data.prompts;
+      updates[LEGACY_PROMPTS_KEY] = data.prompts;
     }
 
     if (!Object.keys(updates).length) {
@@ -69,14 +110,29 @@ export async function importData(file: File): Promise<{ success: boolean; messag
     }
 
     await storageLocalSet(updates);
+
+    const parts: string[] = [];
+    if (importedAccounts > 0) {
+      parts.push(`${importedAccounts} account workspace${importedAccounts === 1 ? '' : 's'}`);
+    }
+    if (skippedAccounts > 0) {
+      parts.push(`${skippedAccounts} skipped (invalid)`);
+    }
+    if (data.projects !== null && data.projects !== void 0) {
+      parts.push('legacy projects');
+    }
+    if (data.prompts !== null && data.prompts !== void 0) {
+      parts.push('legacy prompts');
+    }
+
+    const summary = parts.length > 0 ? ` Restored: ${parts.join(', ')}.` : '';
     return {
       success: true,
       message: data.exportedAt
-        ? `Restore completed. Backup timestamp: ${data.exportedAt}`
-        : 'Restore completed.'
+        ? `Restore completed. Backup timestamp: ${data.exportedAt}.${summary}`
+        : `Restore completed.${summary}`
     };
   } catch (error) {
-    // eslint-disable-next-line no-console
     console.error('[Backup] import failed', error);
     return { success: false, message: 'Failed to read or parse the backup file.' };
   }
@@ -96,4 +152,3 @@ export function triggerImport(
   };
   input.click();
 }
-

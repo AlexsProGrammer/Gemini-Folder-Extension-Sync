@@ -14,7 +14,12 @@ interface ProjectsPanelOptions {
   onToggleCollapse: (collapsed: boolean) => void;
   onRemoveChatFromProject: (conversationId: string) => void;
   onMoveChatToProject: (conversationId: string, projectId: string) => void;
+  onAddSubfolder: (parentId: string) => void;
+  onEditDetails: (project: Project) => void;
+  onAddCurrentChat: (projectId: string) => void;
 }
+
+export const CHAT_DRAG_MIME = 'application/x-gp-chat-id';
 
 type ModalMode = 'create' | 'edit';
 const PANEL_COLLAPSE_ANIMATION_MS = 190;
@@ -23,8 +28,15 @@ const PROJECT_ACTION_PATHS = {
   pin: '<path d="M9 3h6v5l3 4v3H6v-3l3-4V3Z"/><path d="M12 15v6"/>',
   unpin: '<path d="m3 3 18 18M9 3h6v5l3 4v3h-3M9 9l-3 3v3h5M12 15v6"/>',
   edit: '<path d="m16 4 4 4M4 20l4-1L20 7a2.8 2.8 0 0 0-4-4L4 15l-1 6Z"/>',
-  delete: '<path d="M3 6h18M9 6V3h6v3M5 6l1 14h12l1-14M10 10v6M14 10v6"/>'
+  delete: '<path d="M3 6h18M9 6V3h6v3M5 6l1 14h12l1-14M10 10v6M14 10v6"/>',
+  addChat: '<circle cx="9" cy="7" r="3.2"/><path d="M3.5 20a5.5 5.5 0 0 1 11 0"/><path d="M18 8v6"/><path d="M15 11h6"/>',
+  subfolder: '<path d="M4 20h16a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.93a2 2 0 0 1-1.66-.9l-.82-1.2A2 2 0 0 0 7.93 2H4a2 2 0 0 0-2 2v13c0 1.1.9 2 2 2Z"/><path d="M12 11v5"/><path d="M9.5 13.5h5"/>',
+  details: '<path d="M8 3h8a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2Z"/><path d="M9.5 8h5"/><path d="M9.5 12h5"/><path d="M9.5 16h3"/>'
 };
+
+const FOLDER_ROW_ICON = '<svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 20h16a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.93a2 2 0 0 1-1.66-.9l-.82-1.2A2 2 0 0 0 7.93 2H4a2 2 0 0 0-2 2v13c0 1.1.9 2 2 2Z"/></svg>';
+
+const DETAILS_BADGE_ICON = '<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 20h9"/><path d="M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4Z"/></svg>';
 
 function renderProjectActionIcon(action: keyof typeof PROJECT_ACTION_PATHS): string {
   return `<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${PROJECT_ACTION_PATHS[action]}</svg>`;
@@ -36,6 +48,10 @@ export function createProjectsPanel(options: ProjectsPanelOptions) {
   const modal = createModal(overlayLayer);
   const projectMenu = createProjectMenu(overlayLayer);
   const toast = createToast(overlayLayer);
+  const detailsModal = createDetailsModal(overlayLayer, (project, systemPrompt, notes) => {
+    options.onSaveProject({ ...project, systemPrompt, notes, updatedAt: Date.now() });
+    showToast(systemPrompt || notes ? 'Project details saved' : 'Project details cleared');
+  });
 
   // Initialize theme observer
   attachThemeObserver(panelRoot, overlayLayer);
@@ -48,6 +64,8 @@ export function createProjectsPanel(options: ProjectsPanelOptions) {
   let modalMode: ModalMode = 'create';
   let modalProjectId: string | null = null;
   let modalProject: Project | null = null;
+  let modalParentId: string | null = null;
+  let modalCreateKind: 'project' | 'folder' = 'project';
   let modalSelectedIcon: ProjectIcon = 'default';
   let modalSelectedColor: string = '#1f1f1f'; // Default black
   let inputDirty = false;
@@ -139,6 +157,15 @@ export function createProjectsPanel(options: ProjectsPanelOptions) {
         return;
       }
 
+      const newFolderRow = target.closest<HTMLElement>('[data-gp-action="new-folder"]');
+      if (newFolderRow) {
+        event.preventDefault();
+        event.stopPropagation();
+        event.stopImmediatePropagation();
+        openCreateModal(null, true);
+        return;
+      }
+
       const header = target.closest<HTMLElement>('[data-gp-action="toggle-section"]');
       if (header) {
         event.preventDefault();
@@ -162,6 +189,38 @@ export function createProjectsPanel(options: ProjectsPanelOptions) {
         }
       }
     }, { capture: true, signal: panelEventsController.signal });
+
+    panelRoot.addEventListener('dragover', (event) => {
+      const types = event.dataTransfer?.types;
+      if (!types || !Array.from(types).includes(CHAT_DRAG_MIME)) return;
+      const dropRow = (event.target as HTMLElement | null)?.closest?.('[data-gp-droppable]') as HTMLElement | null;
+      if (!dropRow) return;
+      event.preventDefault();
+      if (event.dataTransfer) event.dataTransfer.dropEffect = 'move';
+      panelRoot.querySelectorAll<HTMLElement>('.gp-drag-over').forEach((row) => {
+        if (row !== dropRow) row.classList.remove('gp-drag-over');
+      });
+      dropRow.classList.add('gp-drag-over');
+    }, { signal: panelEventsController.signal });
+
+    panelRoot.addEventListener('dragleave', (event) => {
+      const dropRow = (event.target as HTMLElement | null)?.closest?.('[data-gp-droppable]') as HTMLElement | null;
+      if (dropRow) dropRow.classList.remove('gp-drag-over');
+    }, { signal: panelEventsController.signal });
+
+    panelRoot.addEventListener('drop', (event) => {
+      panelRoot.querySelectorAll<HTMLElement>('.gp-drag-over').forEach((row) => row.classList.remove('gp-drag-over'));
+      const dropRow = (event.target as HTMLElement | null)?.closest?.('[data-gp-droppable]') as HTMLElement | null;
+      if (!dropRow) return;
+      const conversationId = event.dataTransfer?.getData(CHAT_DRAG_MIME) || event.dataTransfer?.getData('text/plain');
+      if (!conversationId) return;
+      event.preventDefault();
+      event.stopPropagation();
+      const projectId = dropRow.dataset.gpProjectId;
+      if (projectId) {
+        options.onMoveChatToProject(conversationId, projectId);
+      }
+    }, { signal: panelEventsController.signal });
 
     return;
 
@@ -242,16 +301,22 @@ export function createProjectsPanel(options: ProjectsPanelOptions) {
     });
   }
 
-  function openCreateModal() {
+  function openCreateModal(parentProjectId?: string | null, forceFolder = false) {
     modalMode = 'create';
     modalProjectId = null;
+    modalProject = null;
+    modalParentId = parentProjectId ?? null;
+    modalCreateKind = forceFolder || modalParentId ? 'folder' : 'project';
     modalSelectedIcon = 'default';
     modalSelectedColor = '#1f1f1f';
+    const isFolder = modalCreateKind === 'folder';
     showModal({
-      title: 'Create Project',
+      title: isFolder ? (modalParentId ? 'New subfolder' : 'New folder') : 'Create Project',
       confirmLabel: 'Done',
       name: '',
-      showIcons: true
+      showIcons: !isFolder,
+      showColors: !isFolder,
+      folderMode: isFolder
     });
   }
 
@@ -259,14 +324,23 @@ export function createProjectsPanel(options: ProjectsPanelOptions) {
     modalMode = 'edit';
     modalProjectId = project.id;
     modalProject = project;
+    modalParentId = null;
+    modalCreateKind = project.kind;
     modalSelectedIcon = project.icon;
     modalSelectedColor = project.color || '#1f1f1f';
+    const isFolder = project.kind === 'folder';
     showModal({
-      title: 'Edit project',
+      title: isFolder ? 'Edit folder' : 'Edit project',
       confirmLabel: 'Save',
       name: project.name,
-      showIcons: true
+      showIcons: !isFolder,
+      showColors: !isFolder,
+      folderMode: isFolder
     });
+  }
+
+  function openDetailsModal(project: Project) {
+    detailsModal.open(project);
   }
 
   function updateIconButton() {
@@ -318,23 +392,36 @@ export function createProjectsPanel(options: ProjectsPanelOptions) {
     }
   }
 
-  function showModal(config: { title: string; confirmLabel: string; name: string; showIcons: boolean }) {
+  function showModal(config: {
+    title: string;
+    confirmLabel: string;
+    name: string;
+    showIcons: boolean;
+    showColors?: boolean;
+    folderMode?: boolean;
+  }) {
     modal.open(config);
     inputDirty = false;
     const input = modal.element.querySelector<HTMLInputElement>('[data-gp-name-input]');
     const confirm = modal.element.querySelector<HTMLButtonElement>('[data-gp-action="confirm"]');
     const iconRow = modal.element.querySelector<HTMLElement>('[data-gp-template-row]');
+    const colorRow = modal.element.querySelector<HTMLElement>('[data-gp-color-row]');
     const backupButton = modal.element.querySelector<HTMLButtonElement>('[data-gp-action="backup"]');
     const restoreButton = modal.element.querySelector<HTMLButtonElement>('[data-gp-action="restore"]');
     iconButton = modal.element.querySelector<HTMLButtonElement>('[data-gp-current-icon]');
 
     if (input) {
       input.value = config.name;
+      input.placeholder = config.folderMode ? 'Folder name' : 'Project name';
       input.focus();
     }
 
     if (iconRow) {
       iconRow.style.display = config.showIcons ? 'flex' : 'none';
+    }
+
+    if (colorRow) {
+      colorRow.style.display = config.showColors === false ? 'none' : 'flex';
     }
 
     confirm!.textContent = config.confirmLabel;
@@ -357,15 +444,19 @@ export function createProjectsPanel(options: ProjectsPanelOptions) {
       }
 
       const now = Date.now();
+      const isEdit = modalMode === 'edit';
       const projectData: Project = {
-        id: modalMode === 'create' ? crypto.randomUUID() : (modalProjectId!),
+        id: isEdit ? (modalProjectId!) : crypto.randomUUID(),
         name,
+        kind: isEdit ? (modalProject?.kind ?? 'project') : modalCreateKind,
+        parentId: isEdit ? (modalProject?.parentId ?? null) : modalParentId,
         icon: modalSelectedIcon,
         color: modalSelectedColor,
-        isPinned: modalMode === 'edit' ? modalProject?.isPinned === true : false,
-        createdAt: modalMode === 'create' ? now : (modalProject?.createdAt || now),
+        isPinned: isEdit ? modalProject?.isPinned === true : false,
+        createdAt: isEdit ? (modalProject?.createdAt || now) : now,
         updatedAt: now,
-        sortIndex: modalMode === 'create' ? now : (modalProject?.sortIndex || now)
+        sortIndex: isEdit ? (modalProject?.sortIndex || now) : now,
+        order: isEdit ? (modalProject?.order ?? modalProject?.sortIndex ?? now) : now
       };
 
       options.onSaveProject(projectData);
@@ -389,7 +480,6 @@ export function createProjectsPanel(options: ProjectsPanelOptions) {
     });
 
     // Color picker click handlers
-    const colorRow = modal.element.querySelector<HTMLElement>('[data-gp-color-row]');
     colorRow?.querySelectorAll<HTMLButtonElement>('[data-gp-color]').forEach((dot) => {
       dot.onclick = () => {
         const color = dot.dataset.gpColor;
@@ -413,6 +503,9 @@ export function createProjectsPanel(options: ProjectsPanelOptions) {
         console.warn('[Gemini Projects] Pin update failed', error);
         showToast('Could not update project pin. Please try again.');
       },
+      onAddCurrentChat: () => options.onAddCurrentChat(project.id),
+      onAddSubfolder: () => options.onAddSubfolder(project.id),
+      onEditDetails: () => options.onEditDetails(project),
       onEdit: () => openEditModal(project),
       onDelete: () => options.onDeleteProject(project.id)
     });
@@ -462,7 +555,8 @@ export function createProjectsPanel(options: ProjectsPanelOptions) {
     render,
     closeAllOverlays,
     showToast,
-    openCreateModal
+    openCreateModal,
+    openDetailsModal
   };
 }
 
@@ -473,23 +567,20 @@ export function renderProjectsSection(
   nativeConversationIds: Set<string> = new Set(),
   nativeChatsReady = false
 ): string {
-  const sorted = [...projects].sort((a, b) =>
-    Number(b.isPinned === true) - Number(a.isPinned === true) || a.sortIndex - b.sortIndex
-  );
-  if (!sorted.length) {
-    return ''; // No placeholder when empty, cleaner look
-  }
+  const childrenOf = (parentId: string | null): Project[] =>
+    projects
+      .filter((project) => (project.parentId ?? null) === parentId)
+      .sort((a, b) =>
+        Number(b.isPinned === true) - Number(a.isPinned === true) || a.sortIndex - b.sortIndex
+      );
 
-  return sorted
-    .map((project) => {
-      const isExpanded = expandedProjectIds.has(project.id);
-      const chats = Array.from(chatIndex.values())
-        .filter((chat) => chat.projectId === project.id)
-        .sort((a, b) => b.updatedAt - a.updatedAt);
-      const accentColor = getProjectAccentColor(project);
+  const renderChatRows = (project: Project, accentColor: string, isExpanded: boolean): string => {
+    if (!isExpanded) return '';
+    const chats = Array.from(chatIndex.values())
+      .filter((chat) => chat.projectId === project.id)
+      .sort((a, b) => b.updatedAt - a.updatedAt);
 
-      const chatRows = isExpanded
-        ? `
+    return `
           <div class="gp-project-chats" style="--gp-project-color: ${escapeAttr(accentColor)};">
             ${chats.length
           ? chats
@@ -512,22 +603,46 @@ export function renderProjectsSection(
           : '<div class="gp-chat-empty">No chats yet</div>'
         }
           </div>
-        `
-        : '';
+        `;
+  };
 
-      return `
+  const renderNode = (project: Project, depth: number): string => {
+    const isExpanded = expandedProjectIds.has(project.id);
+    const accentColor = getProjectAccentColor(project);
+    const isFolder = project.kind === 'folder';
+    const hasDetails = Boolean(project.systemPrompt || project.notes);
+    const children = childrenOf(project.id);
+
+    const chatRows = renderChatRows(project, accentColor, isExpanded);
+    const childRows = isExpanded && children.length
+      ? `<div class="gp-project-children">${children.map((child) => renderNode(child, depth + 1)).join('')}</div>`
+      : '';
+
+    const iconMarkup = isFolder
+      ? `<span class="gp-icon gp-folder-icon" style="color: ${escapeAttr(accentColor)};">${FOLDER_ROW_ICON}</span>`
+      : `<span class="gp-icon">${renderIconSvg(project.icon, project.color)}</span>`;
+
+    return `
         <div class="gp-project" data-gp-project-id="${project.id}">
-          <div class="gp-row gp-project-row ${isExpanded ? 'active' : ''}" data-gp-action="toggle-project">
-            <span class="gp-icon">${renderIconSvg(project.icon, project.color)}</span>
+          <div class="gp-row gp-project-row ${isExpanded ? 'active' : ''}" data-gp-action="toggle-project" data-gp-droppable="true">
+            ${iconMarkup}
             <span class="gp-label">${escapeHtml(project.name)}</span>
+            ${hasDetails ? `<span class="gp-details-badge" role="img" aria-label="Has system prompt or notes" title="Has system prompt or notes">${DETAILS_BADGE_ICON}</span>` : ''}
             ${project.isPinned ? `<span class="gp-project-pin" role="img" aria-label="Pinned project" title="Pinned project">${renderProjectActionIcon('pin')}</span>` : ''}
             <button class="gp-kebab" data-gp-action="project-menu" aria-label="Project menu"><svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="5" r="1"/><circle cx="12" cy="12" r="1"/><circle cx="12" cy="19" r="1"/></svg></button>
           </div>
           ${chatRows}
+          ${childRows}
         </div>
       `;
-    })
-    .join('');
+  };
+
+  const roots = childrenOf(null);
+  if (!roots.length) {
+    return ''; // No placeholder when empty, cleaner look
+  }
+
+  return roots.map((project) => renderNode(project, 0)).join('');
 }
 
 function ensurePanelRoot(shadow: ShadowRoot): HTMLElement {
@@ -907,6 +1022,30 @@ function ensurePanelRoot(shadow: ShadowRoot): HTMLElement {
         color: var(--gp-section);
         font-style: italic;
       }
+
+      .gp-project-children {
+        margin-left: 20px;
+        padding-left: 4px;
+        border-left: 1px solid var(--gp-bg-active);
+      }
+
+      .gp-row.gp-drag-over {
+        background: var(--gp-bg-active);
+        outline: 1.5px dashed var(--gp-fg-muted);
+        outline-offset: -2px;
+      }
+
+      .gp-details-badge {
+        display: flex;
+        align-items: center;
+        flex-shrink: 0;
+        color: var(--gp-fg-muted);
+      }
+
+      .gp-details-badge svg {
+        width: 14px;
+        height: 14px;
+      }
     `;
     shadow.appendChild(style);
   }
@@ -935,6 +1074,10 @@ function buildPanelMarkup(state: RuntimeState): string {
           <div class="gp-row gp-new" data-gp-action="new-project">
             <span class="gp-icon"><svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 5v14"/><path d="M5 12h14"/></svg></span>
             <span class="gp-label">New Project</span>
+          </div>
+          <div class="gp-row gp-new" data-gp-action="new-folder">
+            <span class="gp-icon"><svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 11v5"/><path d="M9.5 13.5h5"/><path d="M4 20h16a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.93a2 2 0 0 1-1.66-.9l-.82-1.2A2 2 0 0 0 7.93 2H4a2 2 0 0 0-2 2v13c0 1.1.9 2 2 2Z"/></svg></span>
+            <span class="gp-label">New Folder</span>
           </div>
           ${renderProjectsSection(
     state.projects,
@@ -1526,6 +1669,65 @@ function ensureOverlayLayer(shadow: ShadowRoot): HTMLElement {
         box-shadow: 0 12px 30px rgba(0, 0, 0, 0.25);
         font-family: var(--gp-font);
       }
+
+      .gp-menu-divider {
+        height: 1px;
+        background: var(--gp-border);
+        margin: 4px 8px;
+      }
+
+      .gp-details-modal {
+        --gp-content-width: 480px;
+        gap: 10px;
+      }
+
+      .gp-details-field {
+        display: flex;
+        flex-direction: column;
+        gap: 6px;
+        width: 100%;
+      }
+
+      .gp-details-label {
+        font-size: 11px;
+        font-weight: 700;
+        letter-spacing: 0.06em;
+        text-transform: uppercase;
+        color: var(--gp-muted);
+        font-family: var(--gp-font);
+      }
+
+      .gp-details-textarea {
+        width: 100%;
+        min-height: 72px;
+        resize: vertical;
+        border: 1px solid var(--gp-border);
+        border-radius: var(--gp-radius-sm);
+        background: var(--gp-input-bg);
+        color: var(--gp-fg);
+        font-family: var(--gp-font);
+        font-size: 14px;
+        line-height: 1.45;
+        padding: 10px 12px;
+        outline: none;
+        box-sizing: border-box;
+        transition: border-color var(--gp-transition);
+      }
+
+      .gp-details-textarea:focus {
+        border-color: var(--gp-fg);
+      }
+
+      .gp-details-actions {
+        display: flex;
+        justify-content: flex-end;
+        width: 100%;
+      }
+
+      .gp-details-actions .gp-primary {
+        width: auto;
+        min-width: 96px;
+      }
     `;
     shadow.appendChild(style);
   }
@@ -1589,15 +1791,27 @@ function createModal(layer: HTMLElement) {
   `;
   layer.appendChild(backdrop);
 
-  function open(config: { title: string; confirmLabel: string; name: string; showIcons: boolean }) {
+  function open(config: {
+    title: string;
+    confirmLabel: string;
+    name: string;
+    showIcons: boolean;
+    showColors?: boolean;
+    folderMode?: boolean;
+  }) {
     const title = backdrop.querySelector<HTMLElement>('[data-gp-modal-title]');
     const confirm = backdrop.querySelector<HTMLButtonElement>('[data-gp-action="confirm"]');
     const input = backdrop.querySelector<HTMLInputElement>('[data-gp-name-input]');
     const templateRow = backdrop.querySelector<HTMLElement>('[data-gp-template-row]');
+    const colorRow = backdrop.querySelector<HTMLElement>('[data-gp-color-row]');
     if (title) title.textContent = config.title;
     if (confirm) confirm.textContent = config.confirmLabel;
-    if (input) input.value = config.name;
+    if (input) {
+      input.value = config.name;
+      input.placeholder = config.folderMode ? 'Folder name' : 'Project name';
+    }
     if (templateRow) templateRow.style.display = config.showIcons ? 'flex' : 'none';
+    if (colorRow) colorRow.style.display = config.showColors === false ? 'none' : 'flex';
     backdrop.style.display = 'flex';
   }
 
@@ -1617,6 +1831,72 @@ function createModal(layer: HTMLElement) {
   return { element: backdrop, open, close };
 }
 
+function createDetailsModal(
+  layer: HTMLElement,
+  onSave: (project: Project, systemPrompt: string, notes: string) => void
+) {
+  const backdrop = document.createElement('div');
+  backdrop.className = 'gp-modal-backdrop';
+  backdrop.innerHTML = `
+    <div class="gp-modal gp-details-modal" role="dialog" aria-modal="true">
+      <div class="gp-modal-header">
+        <span data-gp-modal-title>System prompt &amp; notes</span>
+        <button class="gp-modal-close" data-gp-action="close" aria-label="Close">
+          <svg viewBox="0 0 24 24" aria-hidden="true">
+            <path d="M6 6l12 12M18 6L6 18" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/>
+          </svg>
+        </button>
+      </div>
+      <div class="gp-details-field">
+        <label class="gp-details-label" for="gp-details-prompt">System prompt</label>
+        <textarea class="gp-details-textarea" id="gp-details-prompt" data-gp-details-prompt rows="4" placeholder="Custom instructions applied to chats in this project (like ChatGPT project instructions)"></textarea>
+      </div>
+      <div class="gp-details-field">
+        <label class="gp-details-label" for="gp-details-notes">Notes</label>
+        <textarea class="gp-details-textarea" id="gp-details-notes" data-gp-details-notes rows="6" placeholder="Freeform markdown notes for this workspace"></textarea>
+      </div>
+      <div class="gp-details-actions">
+        <button class="gp-primary" data-gp-action="details-save">Save</button>
+      </div>
+    </div>
+  `;
+  layer.appendChild(backdrop);
+
+  const promptInput = backdrop.querySelector<HTMLTextAreaElement>('[data-gp-details-prompt]');
+  const notesInput = backdrop.querySelector<HTMLTextAreaElement>('[data-gp-details-notes]');
+  let currentProject: Project | null = null;
+
+  function open(project: Project) {
+    currentProject = project;
+    if (promptInput) promptInput.value = project.systemPrompt || '';
+    if (notesInput) notesInput.value = project.notes || '';
+    backdrop.style.display = 'flex';
+    promptInput?.focus();
+  }
+
+  function close() {
+    backdrop.style.display = 'none';
+  }
+
+  backdrop.addEventListener('click', (event) => {
+    if (event.target === backdrop) {
+      close();
+    }
+  });
+
+  const closeButton = backdrop.querySelector<HTMLButtonElement>('[data-gp-action="close"]');
+  closeButton?.addEventListener('click', () => close());
+
+  const saveButton = backdrop.querySelector<HTMLButtonElement>('[data-gp-action="details-save"]');
+  saveButton?.addEventListener('click', () => {
+    if (!currentProject) return;
+    onSave(currentProject, promptInput?.value ?? '', notesInput?.value ?? '');
+    close();
+  });
+
+  return { open, close };
+}
+
 function createProjectMenu(layer: HTMLElement) {
   const menu = document.createElement('div');
   menu.className = 'gp-menu gp-project-menu';
@@ -1627,6 +1907,9 @@ function createProjectMenu(layer: HTMLElement) {
   type ProjectMenuCallbacks = {
     onTogglePin: () => Promise<void>;
     onPinError: (error: unknown) => void;
+    onAddCurrentChat: () => void;
+    onAddSubfolder: () => void;
+    onEditDetails: () => void;
     onEdit: () => void;
     onDelete: () => void;
   };
@@ -1638,8 +1921,12 @@ function createProjectMenu(layer: HTMLElement) {
     if (pinPending) return;
     callbacks = nextCallbacks;
     menu.innerHTML = `
+      <button type="button" role="menuitem" class="gp-menu-item" data-gp-menu="add-chat">${renderProjectActionIcon('addChat')}<span>Add current chat</span></button>
+      <button type="button" role="menuitem" class="gp-menu-item" data-gp-menu="subfolder">${renderProjectActionIcon('subfolder')}<span>New subfolder</span></button>
+      <button type="button" role="menuitem" class="gp-menu-item" data-gp-menu="details">${renderProjectActionIcon('details')}<span>System prompt &amp; notes</span></button>
+      <div class="gp-menu-divider" role="separator"></div>
       <button type="button" role="menuitem" class="gp-menu-item" data-gp-menu="pin">${renderProjectActionIcon(project.isPinned ? 'unpin' : 'pin')}<span>${project.isPinned ? 'Unpin' : 'Pin'}</span></button>
-      <button type="button" role="menuitem" class="gp-menu-item" data-gp-menu="edit">${renderProjectActionIcon('edit')}<span>Edit</span></button>
+      <button type="button" role="menuitem" class="gp-menu-item" data-gp-menu="edit">${renderProjectActionIcon('edit')}<span>Rename</span></button>
       <button type="button" role="menuitem" class="gp-menu-item danger" data-gp-menu="delete">${renderProjectActionIcon('delete')}<span>Delete</span></button>
     `;
     menu.style.display = 'block';
@@ -1687,6 +1974,9 @@ function createProjectMenu(layer: HTMLElement) {
       }
       return;
     }
+    if (action === 'add-chat') callbacks.onAddCurrentChat();
+    if (action === 'subfolder') callbacks.onAddSubfolder();
+    if (action === 'details') callbacks.onEditDetails();
     if (action === 'edit') callbacks.onEdit();
     if (action === 'delete') callbacks.onDelete();
     close();

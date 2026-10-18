@@ -4,7 +4,8 @@
     "version": "2.0.6",
     "description": "Group Gemini chats into local Projects.",
     "permissions": [
-        "storage"
+        "storage",
+        "tabs"
     ],
     "host_permissions": [
         "https://gemini.google.com/*"
@@ -44,6 +45,17 @@
                 "content.js"
             ],
             "run_at": "document_idle"
+        }
+    ],
+    "web_accessible_resources": [
+        {
+            "resources": [
+                "pageBridge.js",
+                "icons/*"
+            ],
+            "matches": [
+                "https://gemini.google.com/*"
+            ]
         }
     ],
     "action": {

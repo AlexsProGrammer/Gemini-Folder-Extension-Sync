@@ -1,5 +1,6 @@
 import { BackgroundRequest, BackgroundResponse, ChatRef, Project, RuntimeState } from '../shared/types';
 import { runtimeSendMessage } from '../shared/webext';
+import { ACCOUNT_CHANGED_EVENT, AccountChangeDetail, initAccountWatcher } from './accountWatcher';
 import {
   findChatRowElement,
   findChatsListContainer,
@@ -14,7 +15,7 @@ import { attachChatMenuEnhancer } from './dom/menus';
 import { initGeminiResponseFolding } from './gemini/responseFolding';
 import * as prompts from './prompts';
 import { installSidebarInspector } from './sidebarInspector';
-import { createProjectsPanel } from './ui/projectsPanel';
+import { CHAT_DRAG_MIME, createProjectsPanel } from './ui/projectsPanel';
 import { initChatGPT } from './chatgpt';
 
 const BUILD_MARKER = '2.0.6';
@@ -66,6 +67,9 @@ async function bootstrap() {
 
   installSidebarInspector();
   installNativeHideStyle();
+  installChatDragSources();
+  initAccountWatcher();
+  window.addEventListener(ACCOUNT_CHANGED_EVENT, handleAccountChanged);
   await loadInitialState();
   observeDocumentForSidebar();
   installLifecycleRescans();
@@ -90,6 +94,30 @@ function observeDocumentForSidebar() {
   rootObserver = new MutationObserver(() => scheduleRescan());
   rootObserver.observe(document.body, { childList: true, subtree: true, characterData: true });
   scheduleRescan(0);
+}
+
+function handleAccountChanged(event: Event): void {
+  const detail = (event as CustomEvent<AccountChangeDetail>).detail;
+  console.info(
+    '[gemini-projects] account changed',
+    detail?.previousHash ?? '(initial)',
+    '->',
+    detail?.newHash
+  );
+  state.expandedProjectIds.clear();
+  state.ui = {
+    createModalOpen: false,
+    contextMenuOpen: false,
+    pendingMoveConversationId: null
+  };
+  lastRenderKey = '';
+  loadInitialState()
+    .catch(() => undefined)
+    .then(() => {
+      applyNativeChatVisibility();
+      renderPanelIfChanged(true);
+      scheduleRescan(0);
+    });
 }
 
 function scheduleRescan(delay = RESCAN_DELAY_MS) {
@@ -150,6 +178,7 @@ function rescanSidebar() {
   }
   pendingPanelRetryCount = 0;
   ensureChatsList();
+  ensureNativeRowsDraggable();
   syncNativeChatsFromDom();
   applyNativeChatVisibility();
   renderPanelIfChanged();
@@ -183,7 +212,18 @@ function ensurePanel() {
       onDeleteProject: handleDeleteProject,
       onToggleCollapse: handleToggleCollapse,
       onRemoveChatFromProject: (conversationId) => handleMoveChat(conversationId, null),
-      onMoveChatToProject: (conversationId, projectId) => handleMoveChat(conversationId, projectId)
+      onMoveChatToProject: (conversationId, projectId) => handleMoveChat(conversationId, projectId),
+      onAddSubfolder: (parentId) => {
+        state.expandedProjectIds.add(parentId);
+        renderPanelIfChanged(true);
+        panel?.openCreateModal(parentId);
+      },
+      onEditDetails: (project) => panel?.openDetailsModal(project),
+      onAddCurrentChat: (projectId) => {
+        handleAddCurrentChat(projectId).catch((error) =>
+          console.warn('[gemini-projects] add current chat failed', error)
+        );
+      }
     });
     panelHost = host;
     // Gemini replaces the sidebar's internal scroll region when switching
@@ -306,6 +346,7 @@ function applyNativeChatVisibility() {
     if (!conversationId || !target) continue;
 
     touchedRows.add(target);
+    target.draggable = true;
     if (state.chatIndex.get(conversationId)?.projectId) {
       target.setAttribute(HIDDEN_ATTR, 'true');
     } else {
@@ -338,6 +379,33 @@ function collectNativeChatLinks(root: ParentNode): HTMLAnchorElement[] {
   });
 }
 
+function installChatDragSources() {
+  document.addEventListener('dragstart', (event) => {
+    const target = event.target as HTMLElement | null;
+    if (!target) return;
+    const conversationId =
+      getConversationId(target as Element) || getConversationIdFromChatRow(target);
+    if (!conversationId) return;
+    try {
+      event.dataTransfer?.setData(CHAT_DRAG_MIME, conversationId);
+      event.dataTransfer?.setData('text/plain', conversationId);
+      if (event.dataTransfer) event.dataTransfer.effectAllowed = 'copyMove';
+    } catch {
+      // Some engines restrict dataTransfer writes; the drop handler tolerates it.
+    }
+  }, true);
+}
+
+function ensureNativeRowsDraggable() {
+  if (!sidebarRoot) return;
+  for (const link of collectNativeChatLinks(sidebarRoot)) {
+    const row = (chatsList && findChatRowElement(link, chatsList)) || link;
+    if (row instanceof HTMLElement) {
+      row.draggable = true;
+    }
+  }
+}
+
 function getSafeNativeChatRow(
   row: HTMLElement,
   link: HTMLAnchorElement,
@@ -368,7 +436,20 @@ async function handleSaveProject(project: Project) {
   const response = await sendMessage({ type: 'upsertProject', project });
   if (!response.ok || !response.state) return;
   state.projects = response.state.projects;
+  if (project.parentId) state.expandedProjectIds.add(project.parentId);
+  if (project.kind === 'folder') state.expandedProjectIds.add(project.id);
   renderPanelIfChanged(true);
+}
+
+async function handleAddCurrentChat(projectId: string) {
+  const conversationId = getConversationId(window.location.href);
+  if (!conversationId) {
+    panel?.showToast('Open a chat first, then use "Add current chat".');
+    return;
+  }
+  state.expandedProjectIds.add(projectId);
+  await handleMoveChat(conversationId, projectId);
+  panel?.showToast('Chat added to project');
 }
 
 function handleToggleProjectExpand(projectId: string) {
@@ -419,7 +500,24 @@ async function ensureChatKnown(conversationId: string) {
   if (existing?.title && existing.lastUrl) return;
 
   const link = findNativeLinkByConversationId(conversationId);
-  if (!link) return;
+
+  if (!link) {
+    // The chat is not listed in the sidebar (e.g. it lives under another
+    // account context or the sidebar failed to render). Fall back to the
+    // current URL and the document title so the assignment still works.
+    const fallbackTitle = normalizeTitle(document.title.replace(/\s*[-–—|]\s*Gemini.*$/i, ''));
+    const chat: ChatRef = {
+      conversationId,
+      title: fallbackTitle || existing?.title || 'Untitled chat',
+      isPinned: existing?.isPinned ?? false,
+      projectId: existing?.projectId ?? null,
+      updatedAt: Date.now(),
+      lastUrl: existing?.lastUrl || window.location.pathname
+    };
+    state.chatIndex.set(conversationId, chat);
+    await sendMessage({ type: 'upsertChatRefs', chats: [chat] }).catch(() => undefined);
+    return;
+  }
 
   const row = chatsList ? findChatRowElement(link, chatsList) : link;
   const chat: ChatRef = {
@@ -509,7 +607,20 @@ function renderPanelIfChanged(force = false) {
 
 function getRenderKey(): string {
   const projects = state.projects
-    .map((project) => `${project.id}:${project.name}:${project.icon}:${project.color || ''}:${project.sortIndex}:${project.isPinned === true}`)
+    .map((project) =>
+      [
+        project.id,
+        project.name,
+        project.icon,
+        project.color || '',
+        project.sortIndex,
+        project.isPinned === true,
+        project.kind,
+        project.parentId ?? '',
+        project.systemPrompt ? 1 : 0,
+        project.notes ? 1 : 0
+      ].join(':')
+    )
     .join('|');
   const chats = Array.from(state.chatIndex.values())
     .filter((chat) => chat.projectId)
