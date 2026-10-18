@@ -9,7 +9,8 @@ import {
 import { getRawIdentifierForHash } from './account';
 import { isLocalVaultEnvelope, openWorkspaceEnvelope, type LocalVaultEnvelope } from './vault';
 import { WorkspacePayload } from './types';
-import { storageLocalGet, storageLocalSet } from './webext';
+import { errorMessage, errorName, storageLocalGet, storageLocalSet } from './webext';
+import { getWorkspace, saveWorkspace } from './storage';
 
 const BACKUP_VERSION = 3;
 const WORKSPACE_KEY_PREFIX = 'workspace_';
@@ -96,6 +97,38 @@ function parseBackupText(text: string): BackupData | null {
   return data;
 }
 
+/**
+ * Merges an imported workspace into an existing one without clobbering live
+ * data: projects, prompts, tag metadata and chat entries already present in
+ * the existing partition win; only missing entries are restored from the
+ * backup. This makes a restore work even when the account partition exists
+ * but its contents were deleted (the "delete all, then re-import" flow).
+ */
+function mergeWorkspaces(existing: WorkspacePayload, imported: WorkspacePayload): WorkspacePayload {
+  const projects = { ...existing.projects };
+  Object.entries(imported.projects).forEach(([id, project]) => {
+    if (!projects[id]) projects[id] = project;
+  });
+
+  const existingPromptIds = new Set(existing.prompts.map((prompt) => prompt.id));
+  const prompts = [
+    ...existing.prompts,
+    ...imported.prompts.filter((prompt) => !existingPromptIds.has(prompt.id))
+  ];
+
+  const tagMeta = { ...(existing.tagMeta ?? {}) };
+  Object.entries(imported.tagMeta ?? {}).forEach(([tag, meta]) => {
+    if (!tagMeta[tag]) tagMeta[tag] = meta;
+  });
+
+  const chats = { ...(existing.chats ?? {}) };
+  Object.entries(imported.chats ?? {}).forEach(([conversationId, chat]) => {
+    if (!chats[conversationId]) chats[conversationId] = chat;
+  });
+
+  return { ...existing, projects, prompts, tagMeta, chats };
+}
+
 export async function importData(file: File): Promise<{ success: boolean; message: string }> {
   try {
     const text = await file.text();
@@ -106,6 +139,7 @@ export async function importData(file: File): Promise<{ success: boolean; messag
 
     const updates: Record<string, unknown> = {};
     let importedAccounts = 0;
+    let mergedAccounts = 0;
     let skippedAccounts = 0;
     let restoredLocked = 0;
     let preservedExisting = 0;
@@ -117,22 +151,39 @@ export async function importData(file: File): Promise<{ success: boolean; messag
     );
 
     if (data.accounts && typeof data.accounts === 'object') {
-      Object.entries(data.accounts).forEach(([accountHash, workspace]) => {
+      for (const [accountHash, workspace] of Object.entries(data.accounts)) {
         try {
-          if (existingWorkspaces[getWorkspaceKey(accountHash)] !== undefined) {
-            preservedExisting += 1;
-            return;
+          if (existingWorkspaces[getWorkspaceKey(accountHash)] === undefined) {
+            const validated = parseWorkspace(workspace);
+            // Written in legacy plaintext form on purpose: the partition is
+            // sealed into its vault envelope on the account's next save, when
+            // its identity is available in this browser.
+            updates[getWorkspaceKey(accountHash)] = validated;
+            importedAccounts += 1;
+            continue;
           }
-          const validated = parseWorkspace(workspace);
-          // Written in legacy plaintext form on purpose: the partition is
-          // sealed into its vault envelope on the account's next save, when
-          // its identity is available in this browser.
-          updates[getWorkspaceKey(accountHash)] = validated;
-          importedAccounts += 1;
-        } catch {
-          skippedAccounts += 1;
+
+          // The partition already exists on disk. Restoring must never
+          // downgrade a sealed vault to plaintext or clobber newer entries,
+          // but it also must not silently skip the backup (that made the
+          // "delete all data, then re-import" flow a no-op). Merge instead:
+          // open the live partition and add every entry the backup has that
+          // the live workspace is missing.
+          const existing = await getWorkspace(accountHash);
+          const imported = parseWorkspace(workspace);
+          await saveWorkspace(accountHash, mergeWorkspaces(existing, imported));
+          mergedAccounts += 1;
+        } catch (error) {
+          if (errorName(error) === 'VaultLockedError') {
+            // The partition cannot be opened in this context (identity
+            // unavailable); leave it untouched rather than skip-or-clobber.
+            preservedExisting += 1;
+          } else {
+            console.warn('[Backup] merge into existing partition failed', errorMessage(error));
+            skippedAccounts += 1;
+          }
         }
-      });
+      }
     }
 
     if (data.lockedAccounts && typeof data.lockedAccounts === 'object') {
@@ -155,7 +206,7 @@ export async function importData(file: File): Promise<{ success: boolean; messag
       updates[LEGACY_PROMPTS_KEY] = data.prompts;
     }
 
-    if (!Object.keys(updates).length) {
+    if (!Object.keys(updates).length && importedAccounts === 0 && mergedAccounts === 0 && restoredLocked === 0) {
       return { success: false, message: 'No restorable data found in backup file.' };
     }
 
@@ -164,6 +215,9 @@ export async function importData(file: File): Promise<{ success: boolean; messag
     const parts: string[] = [];
     if (importedAccounts > 0) {
       parts.push(`${importedAccounts} account workspace${importedAccounts === 1 ? '' : 's'}`);
+    }
+    if (mergedAccounts > 0) {
+      parts.push(`${mergedAccounts} account workspace${mergedAccounts === 1 ? '' : 's'} merged into existing data`);
     }
     if (restoredLocked > 0) {
       parts.push(`${restoredLocked} locked envelope${restoredLocked === 1 ? '' : 's'}`);
