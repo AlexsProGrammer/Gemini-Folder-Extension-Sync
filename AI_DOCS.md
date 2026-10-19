@@ -1,6 +1,6 @@
 # AI_DOCS.md — Machine contract
 
-Version: 2.0.8
+Version: 2.1.0
 
 ## Local storage keys (webext.storage.local)
 
@@ -32,6 +32,15 @@ Version: 2.0.8
 - `createProjectsPanel` returns `setActiveProject(projectId|null)` and `getActiveProjectId()` in addition to previous methods.
 - `src/content/ui/workspaceDrawer.ts` exports `createWorkspaceDrawer(options)` with `open(project)`, `close()`, `isOpen()`.
 - `createTargetPickerModal` additionally returns `openReparent(projectId, projects, onPick)`.
+
+## Feature settings (2.1.0)
+
+| Key | Shape | Owned by | Notes |
+| --- | --- | --- | --- |
+| `gp_feature_settings` | `{ autoApplyProjectInstructions: boolean, showInstructionsButton: boolean, debugLogging: boolean }` | shared (`src/shared/storage.ts`) read/written by the settings modal | Defaults: auto `true`, button `false`, debug `false`. Changes dispatch `gemini-projects:feature-settings-changed` (`CustomEvent` with the normalized settings as `detail`). |
+
+- `autoApplyProjectInstructions` — auto-prepend the project's system prompt & notes into the composer.
+- `showInstructionsButton` — show the manual "Add instructions" header button in project chats (`configureInstructionsButton` / `setInstructionsButtonVisible`).
 
 ## Mobile environment detection (2.0.8)
 

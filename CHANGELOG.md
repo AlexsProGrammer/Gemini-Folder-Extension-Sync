@@ -1,5 +1,17 @@
 # Changelog
 
+## 2.1.0 — System Prompt Modes, Multi API Keys, Sync-Now Button & Import/Export
+
+- **System prompt injection modes** (Settings → Features): *Automatically add project instructions* prepends the project's system prompt & notes into the composer for new chats in the project (existing behavior, now toggleable), and a new *Show an "Add instructions" button* toggle adds a manual inject button next to the prompt library button in the chat window.
+- **Sync now button** — new refresh badge in the panel header triggers an immediate push/pull cycle with the backend, independent of the debounced auto-sync.
+- **Multi API keys (backend)** — the backend now supports per-person `API_KEY_<NAME>` keys, each bound to a fixed set of account hashes (or `*` for all). Keys are validated in constant time via SHA-256 digest lookup; a key without an `_ACCOUNTS` binding fails startup (fail-closed). Generate secrets with `openssl rand -base64 32`.
+- **Export / Import data** — the Settings modal gained dedicated Export/Import actions for the full multi-account schema (projects, folders, prompts, sync settings). Importing never overwrites account data that already exists on the device.
+- **Drag and drop fixed** — dragging chats into folders/projects works again.
+- **Prompt Library redesign** — refreshed picker and edit-prompt modal styling with the shared neutral light/dark surfaces and typography.
+- **Debug logging toggle** — optional verbose sync logging in settings for diagnosing backend connectivity.
+- **Sync fixes** — adding a second device no longer duplicates prompts; sync failures with the backend resolved.
+- **Backend & Docker** — fixed SQLite issues on container start, added the production nginx reverse-proxy config (TLS, edge API-key gate, rate limiting, privacy-safe logging), and the `data/` volume is now created with `chown -R 1000:1000` so the container's `node` user can open the database.
+
 ## 2.0.8 — Mobile Support (Firefox for Android & Chromium mobile forks)
 
 - New touch-first mobile detection (`src/shared/env.ts`): UA + coarse-pointer + touch + viewport signals; desktop (even with a touchscreen or a narrow window) is never misclassified.
