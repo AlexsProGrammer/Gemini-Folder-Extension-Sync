@@ -1,22 +1,16 @@
-
 import { Prompt, promptStore } from './store';
 import { PANEL_TITLE_FONT_STACK, PANEL_TITLE_TYPOGRAPHY } from '../ui/typography';
+import { isMobileEnvironment } from '../../shared/env';
 
 const PICKER_ID = 'gp-prompt-picker-root';
 
-// Icons
+// Icons share the stroke weight and geometry of the project modal / sidebar
+// actions so the library reads as part of the same UI family.
 const ICONS = {
-  search: `<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg>`,
-  plus: `<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5v14"/><path d="M5 12h14"/></svg>`,
-  close: `<svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 6 6 18"/><path d="m6 6 12 12"/></svg>`,
-  edit: `<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4Z"/></svg>`,
-  trash: `<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18"/><path d="M8 6V4h8v2"/><path d="m19 6-1 14H6L5 6"/><path d="M10 11v5"/><path d="M14 11v5"/></svg>`,
-  tag: `<svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20.6 13.4 13.4 20.6a2 2 0 0 1-2.8 0L3 13V3h10l7.6 7.6a2 2 0 0 1 0 2.8Z"/><circle cx="7.5" cy="7.5" r="1"/></svg>`,
-  back: `<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M19 12H5"/><path d="m12 19-7-7 7-7"/></svg>`,
-  library: `<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 4h12v16H8a2 2 0 0 1-2-2Z"/><path d="M8 4v14"/><path d="M10 8h5"/></svg>`,
-  filter: `<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 5h16"/><path d="M7 12h10"/><path d="M10 19h4"/></svg>`,
-  check: `<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="m5 12 4 4L19 6"/></svg>`,
-  settings: `<svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.38a2 2 0 0 0-.73-2.73l-.15-.1a2 2 0 0 1-1-1.72v-.51a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z"/><circle cx="12" cy="12" r="3"/></svg>`
+  search: `<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="m21 21-4.3-4.3"/></svg>`,
+  plus: `<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 5v14"/><path d="M5 12h14"/></svg>`,
+  close: `<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"/></svg>`,
+  edit: `<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m16 4 4 4M4 20l4-1L20 7a2.8 2.8 0 0 0-4-4L4 15l-1 6Z"/></svg>`
 };
 
 export class PromptPicker {
@@ -29,8 +23,6 @@ export class PromptPicker {
   private selectedPromptId: string | null = null;
   private visiblePromptIds: string[] = [];
   private lastVisibleCount = 0;
-  private pendingDeletePromptId: string | null = null;
-  private inlineEditDraft: { id: string; title: string; content: string } | null = null;
   private themeObserver: MutationObserver | null = null;
   private modalDeleteConfirm = false;
   private modalDeleteTimer: number | null = null;
@@ -40,7 +32,7 @@ export class PromptPicker {
   private externalTriggers: Set<HTMLElement> = new Set();
   private lastExternalTrigger: HTMLElement | null = null;
 
-  // Modal 鐘舵€?
+  // Modal state
   private editingPrompt: Prompt | null = null;
 
   private constructor() {
@@ -55,18 +47,19 @@ export class PromptPicker {
     this.shadow = this.host.attachShadow({ mode: 'open' });
     this.render();
     this.syncTheme();
+    this.syncMobile();
     this.startThemeObserver();
 
     promptStore.subscribe(() => this.updateList());
 
-    // 鍏ㄥ眬鍏抽棴鐩戝惉
+    // Global close listener
     document.addEventListener('mousedown', (e) => {
       if (this.isOpen) {
         const path = e.composedPath();
         const inHost = path.includes(this.host);
         const inTrigger = Array.from(this.externalTriggers).some((el) => el.isConnected && path.includes(el));
         if (!inHost && !inTrigger && !(e.target as HTMLElement).closest('[data-gp-prompt-btn]')) {
-          // 濡傛灉 Modal 鎵撳紑锛屼笉鍏抽棴 Picker
+          // When the editor modal is open, keep the picker behind it alive.
           const modal = this.shadow.querySelector('.modal-overlay');
           if (modal && (modal as HTMLElement).style.display !== 'none') return;
           this.close();
@@ -86,12 +79,7 @@ export class PromptPicker {
           this.closeModal();
         } else {
           this.close();
-          const trigger = this.lastExternalTrigger;
-          if (trigger?.isConnected) {
-            trigger.focus();
-          } else {
-            document.querySelector<HTMLButtonElement>('[data-gp-prompt-btn]')?.focus();
-          }
+          this.refocusTrigger();
         }
         return;
       }
@@ -111,7 +99,7 @@ export class PromptPicker {
         return;
       }
       const target = e.composedPath()[0] as HTMLElement;
-      if (!target.closest('.search-input, .item-insert') || target.closest('.inline-editor')) return;
+      if (!target.closest('.search-input, .item-insert')) return;
 
       if (e.key === 'ArrowDown') {
         e.preventDefault();
@@ -136,6 +124,7 @@ export class PromptPicker {
 
     window.addEventListener('resize', () => {
       if (this.isOpen) {
+        this.syncMobile();
         this.updatePosition();
         this.applyDynamicHeight(this.lastVisibleCount);
       }
@@ -171,12 +160,11 @@ export class PromptPicker {
 
   public open(rect: DOMRect) {
     this.syncTheme();
+    this.syncMobile();
     this.isOpen = true;
     this.triggerRect = rect;
     this.selectedPromptId = null;
-    this.pendingDeletePromptId = null;
     this.visiblePromptIds = [];
-    this.inlineEditDraft = null;
     this.searchQuery = '';
 
     this.host.style.display = 'block';
@@ -201,8 +189,6 @@ export class PromptPicker {
 
   public close() {
     this.isOpen = false;
-    this.pendingDeletePromptId = null;
-    this.inlineEditDraft = null;
 
     const picker = this.shadow.querySelector('.picker');
     if (picker) picker.classList.remove('open');
@@ -216,13 +202,28 @@ export class PromptPicker {
     }, 200);
   }
 
+  /** Closes the library and hands focus back to the badge that opened it. */
+  private dismissAndRefocus() {
+    this.close();
+    this.refocusTrigger();
+  }
+
+  private refocusTrigger() {
+    const trigger = this.lastExternalTrigger;
+    if (trigger?.isConnected) {
+      trigger.focus();
+    } else {
+      document.querySelector<HTMLButtonElement>('[data-gp-prompt-btn]')?.focus();
+    }
+  }
+
   private updatePosition() {
     if (!this.triggerRect) return;
     const margin = 12;
     const gap = 12;
     const viewportWidth = window.innerWidth;
     const viewportHeight = window.innerHeight;
-    const mobile = viewportWidth <= 720;
+    const mobile = isMobileEnvironment();
     const picker = this.shadow.querySelector('.picker') as HTMLElement | null;
 
     const width = Math.min(400, viewportWidth - margin * 2);
@@ -295,10 +296,10 @@ export class PromptPicker {
 
     const header = picker.querySelector('.header') as HTMLElement | null;
     const footer = picker.querySelector('.footer-action') as HTMLElement | null;
-    const headerHeight = header?.offsetHeight || 74;
-    const footerHeight = footer?.offsetHeight || 56;
+    const headerHeight = header?.offsetHeight || 130;
+    const footerHeight = footer?.offsetHeight || 62;
     const visibleItems = Array.from(list.querySelectorAll<HTMLElement>('.item')).slice(0, 4);
-    const listTarget = itemCount <= 0 ? 120 : visibleItems.reduce((height, item) => height + item.offsetHeight + 4, 8);
+    const listTarget = itemCount <= 0 ? 120 : visibleItems.reduce((height, item) => height + item.offsetHeight + 2, 8);
     const viewportMax = Math.max(0, Math.min(window.innerHeight - 24, 580));
     const target = Math.min(headerHeight + footerHeight + listTarget, viewportMax);
     picker.style.height = `${Math.round(target)}px`;
@@ -325,6 +326,11 @@ export class PromptPicker {
     this.host.dataset.gpTheme = this.resolveTheme();
   }
 
+  /** Mirrors the panel/overlay hosts: `.gp-mobile` switches touch-first styles. */
+  private syncMobile() {
+    this.host.classList.toggle('gp-mobile', isMobileEnvironment());
+  }
+
   private resolveTheme(): 'light' | 'dark' {
     const html = document.documentElement;
     const body = document.body;
@@ -348,131 +354,229 @@ export class PromptPicker {
   private getStyles(): string {
     return `
       :host {
+        --gp-font: ${PANEL_TITLE_FONT_STACK};
         --gp-font-title: ${PANEL_TITLE_FONT_STACK};
-        --gp-font-sans: "Google Sans Flex", "Google Sans", "Helvetica Neue", "Segoe UI", Roboto, Arial, sans-serif;
+        --gp-fg: #1f1f1f;
+        --gp-fg-muted: #5f6368;
+        --gp-muted: #747775;
+        --gp-border: rgba(60, 64, 67, 0.12);
+        --gp-hover: #f1f3f4;
+        --gp-selected: rgba(60, 64, 67, 0.06);
+        --gp-selected-border: rgba(60, 64, 67, 0.22);
         --gp-surface: #ffffff;
-        --gp-surface-elevated: #faf9f5;
-        --gp-fg: #141413;
-        --gp-fg-secondary: #3d3d3a;
-        --gp-fg-tertiary: #73726c;
-        --gp-border: rgb(31 30 29 / .15);
-        --gp-control-border: rgb(31 30 29 / .3);
-        --gp-button-border: rgb(31 30 29 / .4);
-        --gp-bg-hover: #f5f4ed;
-        --gp-bg-active: #f5f4ed;
-        --gp-accent: #141413;
-        --gp-accent-fg: #faf9f5;
-        --gp-focus: rgb(20 20 19 / .7);
-        --gp-danger: #9d4435;
-        --gp-radius-lg: 28px;
-        --gp-radius-md: 16px;
+        --gp-surface-2: #f8fafd;
+        --gp-shadow: 0 16px 40px rgba(60, 64, 67, 0.18), 0 1px 3px rgba(60, 64, 67, 0.16);
+        --gp-accent: #1a73e8;
+        --gp-on-accent: #ffffff;
+        --gp-accent-hover: #1967d2;
+        --gp-focus: #1a73e8;
+        --gp-focus-ring: rgba(26, 115, 232, 0.16);
+        --gp-input-bg: #f8fafd;
+        --gp-danger: #b3261e;
+        --gp-danger-weak: rgba(179, 38, 30, 0.06);
+        --gp-on-danger: #ffffff;
+        --gp-scrim: rgba(32, 33, 36, 0.42);
         --gp-radius-sm: 8px;
-        --gp-radius-control: 12px;
+        --gp-radius: 12px;
+        --gp-radius-lg: 22px;
+        --gp-radius-xl: 28px;
         --gp-radius-pill: 999px;
-        --gp-transition: .18s ease;
-        font-family: var(--gp-font-sans);
+        --gp-transition: .15s ease;
+        font-family: var(--gp-font);
         color: var(--gp-fg);
         color-scheme: light;
       }
       :host([data-gp-theme="dark"]) {
-        --gp-surface: #30302e;
-        --gp-surface-elevated: #262624;
-        --gp-fg: #faf9f5;
-        --gp-fg-secondary: #c2c0b6;
-        --gp-fg-tertiary: #9c9a92;
-        --gp-border: rgb(222 220 209 / .15);
-        --gp-control-border: rgb(222 220 209 / .3);
-        --gp-button-border: rgb(222 220 209 / .4);
-        --gp-bg-hover: #3d3d3a;
-        --gp-bg-active: #3d3d3a;
-        --gp-accent: #faf9f5;
-        --gp-accent-fg: #141413;
-        --gp-focus: rgb(250 249 245 / .7);
-        --gp-danger: #e0a28b;
+        --gp-fg: #e8eaed;
+        --gp-fg-muted: #bdc1c6;
+        --gp-muted: #9aa0a6;
+        --gp-border: rgba(232, 234, 237, 0.16);
+        --gp-hover: rgba(255, 255, 255, 0.08);
+        --gp-selected: rgba(255, 255, 255, 0.08);
+        --gp-selected-border: rgba(232, 234, 237, 0.28);
+        --gp-surface: #202124;
+        --gp-surface-2: #292a2d;
+        --gp-shadow: 0 24px 52px rgba(0, 0, 0, 0.45), 0 1px 3px rgba(0, 0, 0, 0.36);
+        --gp-accent: #8ab4f8;
+        --gp-on-accent: #202124;
+        --gp-accent-hover: #aecbfa;
+        --gp-focus: #8ab4f8;
+        --gp-focus-ring: rgba(138, 180, 248, 0.22);
+        --gp-input-bg: rgba(41, 42, 45, 0.92);
+        --gp-danger: #f2b8b5;
+        --gp-danger-weak: rgba(242, 184, 181, 0.07);
+        --gp-on-danger: #202124;
         color-scheme: dark;
       }
       * { box-sizing: border-box; }
       button, input, textarea { font: inherit; color: inherit; }
       button { cursor: pointer; }
       button:disabled { cursor: default; opacity: .5; }
-      button:focus-visible, input:focus-visible, textarea:focus-visible {
-        outline: 2px solid var(--gp-focus); outline-offset: 2px;
-      }
+      button:focus-visible { outline: 2px solid var(--gp-focus); outline-offset: 2px; }
+
+      /* ---------- Library panel (anchored popover) ---------- */
       .picker {
         width: 400px; max-height: calc(100dvh - 24px); position: relative;
         display: flex; flex-direction: column; overflow: hidden;
         background: var(--gp-surface); color: var(--gp-fg);
-        border: .5px solid var(--gp-border); border-radius: var(--gp-radius-lg);
-        box-shadow: 0 16px 48px #00000026, 0 4px 12px #00000012;
-        font-family: var(--gp-font-sans); font-size: 14px;
+        border: 1px solid var(--gp-border); border-radius: var(--gp-radius-xl);
+        box-shadow: var(--gp-shadow);
+        font-family: var(--gp-font); font-size: 14px;
         opacity: 0; transform: translateY(6px); pointer-events: none;
         transition: opacity var(--gp-transition), transform var(--gp-transition);
       }
       .picker.open { opacity: 1; transform: translateY(0); pointer-events: auto; }
-      .header { padding: 20px 16px 16px; flex-shrink: 0; }
-      .library-heading { display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px; gap: 8px; }
+
+      .header { flex-shrink: 0; display: flex; flex-direction: column; gap: 12px; padding: 18px 16px 14px; }
+      .header-top { display: flex; flex-direction: column; gap: 3px; }
+      .library-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 8px; }
       .library-title, .modal-title { margin: 0; ${PANEL_TITLE_TYPOGRAPHY} }
-      .library-count { font-size: 12px; color: var(--gp-fg-secondary); }
-      .search-row { border: 1px solid var(--gp-control-border); border-radius: var(--gp-radius-control); background: var(--gp-surface); }
-      .search-row:focus-within { border-color: var(--gp-focus); box-shadow: 0 0 0 1px var(--gp-focus); }
-      .search-box { display: flex; align-items: center; height: 38px; padding: 0 12px; gap: 8px; }
-      .search-icon { display: flex; color: var(--gp-fg-secondary); }
-      .search-input { min-width: 0; width: 100%; flex: 1; border: 0; background: transparent; padding: 0; outline: none; font-size: 14px; }
+      .library-count { font-size: 13px; line-height: 18px; color: var(--gp-muted); }
+      .panel-close, .modal-close {
+        flex: 0 0 auto; display: inline-flex; align-items: center; justify-content: center;
+        width: 28px; height: 28px; padding: 0; margin: 1px -4px 0 0;
+        border: none; border-radius: 50%; background: transparent;
+        color: var(--gp-muted); transition: background var(--gp-transition), color var(--gp-transition);
+      }
+      .panel-close:hover, .modal-close:hover { background: var(--gp-hover); color: var(--gp-fg); }
+      .panel-close svg, .modal-close svg { width: 18px; height: 18px; }
+
+      .search-row {
+        display: flex; align-items: center; gap: 10px; height: 44px; padding: 0 14px;
+        border: 1px solid var(--gp-border); border-radius: var(--gp-radius-pill);
+        background: var(--gp-input-bg); color: var(--gp-muted);
+        transition: border-color var(--gp-transition), box-shadow var(--gp-transition), color var(--gp-transition);
+      }
+      .search-row:focus-within {
+        border-color: var(--gp-accent); box-shadow: 0 0 0 3px var(--gp-focus-ring); color: var(--gp-fg);
+      }
+      .search-icon { display: flex; flex: 0 0 auto; }
+      .search-input { min-width: 0; flex: 1; border: 0; background: transparent; padding: 0; outline: none; font-size: 14px; font-family: var(--gp-font); color: var(--gp-fg); }
       .search-input:focus-visible { outline: none; }
-      .search-input::placeholder { color: var(--gp-fg-tertiary); }
-      .list { flex: 1; min-height: 0; overflow-y: auto; overscroll-behavior: contain; padding: 0 12px 8px; scrollbar-width: thin; scrollbar-color: var(--gp-border) transparent; }
-      .empty-box { min-height: 100px; display: grid; place-content: center; padding: 16px; text-align: center; color: var(--gp-fg-secondary); font-size: 14px; }
-      .item { position: relative; border-radius: var(--gp-radius-md); margin-bottom: 4px; border: .5px solid transparent; transition: background var(--gp-transition); }
-      .item:hover, .item.selected, .item:focus-within { background: var(--gp-bg-active); }
+      .search-input::placeholder { color: var(--gp-muted); }
+
+      .list {
+        flex: 1; min-height: 0; overflow-y: auto; overscroll-behavior: contain;
+        padding: 2px 8px 8px; scrollbar-width: thin; scrollbar-color: var(--gp-selected-border) transparent;
+      }
+      .empty-box { min-height: 110px; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 4px; padding: 20px 16px; text-align: center; }
+      .empty-title { margin: 0; font-size: 14px; font-weight: 600; color: var(--gp-fg); }
+      .empty-hint { margin: 0; font-size: 12.5px; line-height: 17px; color: var(--gp-muted); }
+
+      .item { position: relative; border-radius: var(--gp-radius); margin-bottom: 2px; transition: background var(--gp-transition); }
+      .item:hover, .item:focus-within { background: var(--gp-hover); }
+      .item.selected { background: var(--gp-selected); }
       .list:has(.item:hover) .item.selected:not(:hover):not(:focus-within) { background: transparent; }
       .list:has(.item:hover) .item.selected:not(:hover):not(:focus-within) .item-actions { opacity: 0; pointer-events: none; }
-      .item-insert { display: block; width: 100%; border: 0; background: transparent; text-align: left; padding: 12px; border-radius: var(--gp-radius-md); }
+      .item-insert { display: block; width: 100%; border: 0; background: transparent; text-align: left; padding: 10px 12px; border-radius: var(--gp-radius); color: inherit; }
+      .item-insert:focus-visible { outline: 2px solid var(--gp-focus); outline-offset: -2px; }
       .item-content { min-width: 0; }
-      .item-head { display: flex; align-items: center; min-height: 24px; padding-right: 40px; margin-bottom: 4px; }
-      .item-title { font-size: 14px; line-height: 19.6px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-      .item-preview { font-size: 14px; line-height: 19.6px; color: var(--gp-fg-secondary); display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; overflow-wrap: anywhere; }
-      .item-actions { position: absolute; top: 8px; right: 8px; display: flex; opacity: 0; pointer-events: none; transition: opacity var(--gp-transition); }
+      .item-head { display: flex; align-items: center; min-height: 18px; padding-right: 40px; margin-bottom: 3px; }
+      .item-title { font-size: 13.5px; line-height: 18px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+      .item-preview { font-size: 12.5px; line-height: 17px; color: var(--gp-fg-muted); display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; overflow-wrap: anywhere; }
+      .item-actions { position: absolute; top: 7px; right: 7px; display: flex; gap: 2px; opacity: 0; pointer-events: none; transition: opacity var(--gp-transition); }
       .item:hover .item-actions, .item.selected .item-actions, .item:focus-within .item-actions { opacity: 1; pointer-events: auto; }
-      .item-action-btn { width: 32px; height: 32px; display: grid; place-items: center; padding: 0; border: .5px solid var(--gp-border); border-radius: calc(var(--gp-radius-md) - 8px); background: var(--gp-surface-elevated); color: var(--gp-fg-secondary); box-shadow: 0 1px 2px #0000000a; transition: background var(--gp-transition), color var(--gp-transition), box-shadow var(--gp-transition); }
-      .item-action-btn:hover { background: var(--gp-surface); color: var(--gp-fg); box-shadow: 0 2px 5px #00000014; }
-      .item-action-btn svg { width: 16px; height: 16px; stroke-width: 1.75; }
-      .footer-action { flex-shrink: 0; padding: 16px; border-top: .5px solid var(--gp-border); }
-      .footer-buttons { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
-      .footer-hint { font-size: 12px; line-height: 16.8px; color: var(--gp-fg-secondary); }
-      .btn-orb { display: inline-flex; align-items: center; justify-content: center; gap: 8px; height: 36px; padding: 0 16px; border: .5px solid var(--gp-accent); border-radius: var(--gp-radius-control); background: var(--gp-accent); color: var(--gp-accent-fg); font-size: 14px; font-weight: 600; transition: opacity var(--gp-transition); }
-      .btn-orb:hover { opacity: .85; }
-      .btn-orb svg { width: 16px; height: 16px; }
-      .modal-overlay { position: fixed; inset: 0; z-index: 2147483647; display: flex; align-items: center; justify-content: center; padding: 16px; background: #14141366; }
-      .modal { width: min(560px, 100%); max-height: calc(100dvh - 32px); display: flex; flex-direction: column; background: var(--gp-surface); border: .5px solid var(--gp-border); border-radius: var(--gp-radius-lg); box-shadow: 0 16px 48px #00000033; font: 14px var(--gp-font-sans); color: var(--gp-fg); animation: modalFadeIn .18s ease; }
+      .item-action-btn {
+        width: 32px; height: 32px; display: grid; place-items: center; padding: 0;
+        border: none; border-radius: 50%; background: transparent; color: var(--gp-muted);
+        transition: background var(--gp-transition), color var(--gp-transition);
+      }
+      .item-action-btn:hover { background: var(--gp-hover); color: var(--gp-fg); }
+      .item-action-btn svg { width: 18px; height: 18px; }
+
+      .footer-action { flex-shrink: 0; display: flex; justify-content: flex-end; padding: 12px 16px; border-top: 1px solid var(--gp-border); }
+      .btn-new {
+        display: inline-flex; align-items: center; justify-content: center; gap: 8px; min-width: 96px;
+        height: 38px; padding: 0 18px; border: 1px solid var(--gp-accent); border-radius: var(--gp-radius-pill);
+        background: var(--gp-accent); color: var(--gp-on-accent);
+        font-family: var(--gp-font); font-size: 13.5px; font-weight: 700;
+        transition: background var(--gp-transition), border-color var(--gp-transition);
+      }
+      .btn-new:hover { background: var(--gp-accent-hover); border-color: var(--gp-accent-hover); }
+      .btn-new svg { width: 16px; height: 16px; }
+
+      /* ---------- Prompt editor dialog ---------- */
+      .modal-overlay {
+        position: fixed; inset: 0; z-index: 2147483647; display: flex; align-items: center; justify-content: center;
+        padding: 16px; background: var(--gp-scrim); backdrop-filter: blur(3px);
+      }
+      .modal {
+        width: min(480px, 100%); max-height: calc(100dvh - 32px);
+        display: flex; flex-direction: column;
+        background: var(--gp-surface); border: 1px solid var(--gp-border); border-radius: var(--gp-radius-lg);
+        box-shadow: var(--gp-shadow); font: 14px var(--gp-font); color: var(--gp-fg);
+        animation: modalFadeIn .18s ease;
+      }
       @keyframes modalFadeIn { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: translateY(0); } }
-      .modal-header { display: flex; align-items: center; justify-content: space-between; padding: 16px; border-bottom: .5px solid var(--gp-border); }
-      .modal-close { display: grid; place-items: center; width: 32px; height: 32px; padding: 0; border: 0; border-radius: var(--gp-radius-sm); background: transparent; color: var(--gp-fg-secondary); }
-      .modal-close:hover { background: var(--gp-bg-hover); }
-      .modal-body { min-height: 0; overflow-y: auto; padding: 16px; display: flex; flex-direction: column; gap: 16px; }
-      .form-group { display: flex; flex-direction: column; gap: 8px; }
-      .form-label { font-size: 14px; line-height: 19.6px; font-weight: 600; }
-      .form-input, .form-textarea, .inline-editor-input, .inline-editor-textarea { width: 100%; border: .5px solid var(--gp-control-border); border-radius: var(--gp-radius-control); background: var(--gp-surface); color: var(--gp-fg); padding: 10px 12px; font-size: 14px; line-height: 19.6px; }
-      .form-input { height: 40px; border-width: 1px; }
-      .form-input::placeholder, .form-textarea::placeholder { color: var(--gp-fg-tertiary); }
+      .modal-header { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; padding: 20px 24px 0; }
+      .modal-title-wrap { min-width: 0; }
+      .modal-title { font-family: var(--gp-font); font-size: 19px; line-height: 26px; font-weight: 800; letter-spacing: .01em; }
+      .modal-subtitle { margin: 2px 0 0; font-size: 13px; line-height: 18px; color: var(--gp-muted); }
+      .modal-close { margin: 1px -4px 0 0; }
+      .modal-body { min-height: 0; overflow-y: auto; padding: 18px 24px; display: flex; flex-direction: column; gap: 16px; }
+      .form-group { display: flex; flex-direction: column; gap: 6px; }
+      .form-label { font-size: 13px; line-height: 18px; font-weight: 600; }
+      .form-input, .form-textarea {
+        width: 100%; border: 1px solid var(--gp-border); border-radius: var(--gp-radius);
+        background: var(--gp-input-bg); color: var(--gp-fg);
+        font-family: var(--gp-font); font-size: 14px; outline: none;
+        transition: border-color var(--gp-transition), box-shadow var(--gp-transition), background var(--gp-transition);
+      }
+      .form-input { height: 42px; padding: 0 12px; }
+      .form-input::placeholder, .form-textarea::placeholder { color: var(--gp-muted); }
+      .form-input:focus, .form-textarea:focus {
+        border-color: var(--gp-accent); box-shadow: 0 0 0 3px var(--gp-focus-ring); background: var(--gp-surface);
+      }
       .textarea-shell { position: relative; }
-      .form-textarea { display: block; height: clamp(120px, 28vh, 260px); resize: vertical; padding: 16px 16px 40px; }
-      .textarea-token { position: absolute; right: 16px; bottom: 16px; font: 12px "JetBrains Mono", ui-monospace, monospace; color: var(--gp-fg-secondary); pointer-events: none; }
-      .modal-footer { padding: 16px; border-top: .5px solid var(--gp-border); display: flex; justify-content: space-between; align-items: center; gap: 8px; }
-      .modal-footer-left, .modal-footer-right { display: flex; align-items: center; gap: 8px; }
-      .modal-footer-right { margin-left: auto; }
-      .btn, .inline-editor-btn { height: 36px; padding: 0 16px; border-radius: var(--gp-radius-control); border: .5px solid var(--gp-button-border); font-size: 14px; font-weight: 600; background: transparent; }
-      .btn:hover { background: var(--gp-bg-hover); }
-      .btn-save, .inline-editor-btn.primary { border-color: var(--gp-accent); background: var(--gp-accent); color: var(--gp-accent-fg); }
-      .btn-save:hover { background: var(--gp-accent); opacity: .85; }
-      .btn-delete { color: var(--gp-danger); border-color: transparent; }
-      .btn-delete.confirming { border-color: var(--gp-danger); }
-      .form-status { margin: 0; padding: 0 16px 12px; font-size: 12px; color: var(--gp-danger); }
+      .form-textarea { display: block; height: clamp(140px, 26vh, 240px); resize: vertical; padding: 12px 14px 34px; line-height: 1.5; }
+      .textarea-token { position: absolute; right: 14px; bottom: 10px; font-size: 11px; line-height: 14px; color: var(--gp-muted); pointer-events: none; }
+      .modal-footer { display: flex; align-items: center; flex-wrap: wrap; gap: 10px; padding: 0 24px 20px; }
+      .modal-footer-start { display: flex; align-items: center; gap: 10px; flex: 1 1 auto; min-width: 0; }
+      .modal-footer-end { display: flex; align-items: center; gap: 10px; }
+      .form-status { flex: 1 1 auto; min-width: 0; min-height: 16px; font-size: 12.5px; line-height: 16px; color: var(--gp-danger); }
       .form-status:empty { display: none; }
-      .inline-editor { display: flex; flex-direction: column; gap: 12px; padding: 12px; }
-      .inline-editor-row { display: flex; flex-direction: column; gap: 8px; }
-      .inline-editor-label { font-size: 12px; }
-      .inline-editor-textarea { min-height: 100px; }
-      .inline-editor-actions { display: flex; justify-content: flex-end; gap: 8px; }
+      .btn {
+        min-width: 88px; height: 38px; padding: 0 16px; border: 1px solid var(--gp-border); border-radius: var(--gp-radius-pill);
+        background: transparent; color: var(--gp-fg);
+        font-family: var(--gp-font); font-size: 13.5px; font-weight: 600;
+        transition: background var(--gp-transition), border-color var(--gp-transition), color var(--gp-transition);
+      }
+      .btn:hover { background: var(--gp-hover); }
+      .btn-save {
+        min-width: 96px; padding: 0 20px; border-color: var(--gp-accent); background: var(--gp-accent); color: var(--gp-on-accent); font-weight: 700;
+      }
+      .btn-save:hover { background: var(--gp-accent-hover); border-color: var(--gp-accent-hover); }
+      .btn-delete { min-width: 88px; border-color: transparent; color: var(--gp-danger); }
+      .btn-delete:hover { background: var(--gp-danger-weak); }
+      .btn-delete.confirming { background: var(--gp-danger); border-color: var(--gp-danger); color: var(--gp-on-danger); }
+
+      /* ---------- Mobile (touch-first) ---------- */
+      :host(.gp-mobile) .picker { border-radius: var(--gp-radius-lg); }
+      :host(.gp-mobile) .header { padding: 16px 16px 12px; }
+      :host(.gp-mobile) .library-count { font-size: 13.5px; }
+      :host(.gp-mobile) .search-input { font-size: 16px; }
+      :host(.gp-mobile) .search-row { height: 46px; }
+      :host(.gp-mobile) .item-title { font-size: 14.5px; line-height: 19px; }
+      :host(.gp-mobile) .item-preview { font-size: 13px; line-height: 17.5px; }
+      :host(.gp-mobile) .item-action-btn { width: 38px; height: 38px; }
+      :host(.gp-mobile) .item-head { padding-right: 46px; }
+      :host(.gp-mobile) .footer-action { padding: 12px 16px calc(12px + env(safe-area-inset-bottom, 0px)); }
+      :host(.gp-mobile) .btn-new { height: 44px; flex: 1 1 auto; }
+      :host(.gp-mobile) .panel-close { width: 36px; height: 36px; margin-right: -8px; }
+      :host(.gp-mobile) .modal-overlay { padding: 10px 0; }
+      :host(.gp-mobile) .modal { width: 100%; max-height: calc(100dvh - 20px); padding-bottom: env(safe-area-inset-bottom, 0px); }
+      :host(.gp-mobile) .modal-header { padding: 16px 16px 0; }
+      :host(.gp-mobile) .modal-close { width: 36px; height: 36px; }
+      :host(.gp-mobile) .modal-body { padding: 14px 16px; }
+      :host(.gp-mobile) .form-input { height: 46px; font-size: 16px; }
+      :host(.gp-mobile) .form-textarea { font-size: 16px; height: clamp(140px, 30vh, 260px); }
+      :host(.gp-mobile) .textarea-token { right: 14px; bottom: 10px; }
+      :host(.gp-mobile) .modal-footer { flex-wrap: wrap; padding: 0 16px calc(16px); }
+      :host(.gp-mobile) .modal-footer-start { order: 2; flex: 1 1 100%; }
+      :host(.gp-mobile) .modal-footer-end { order: 1; margin-left: auto; flex: 1 1 auto; justify-content: flex-end; }
+      :host(.gp-mobile) .btn { height: 44px; }
+      :host(.gp-mobile) .btn-save { flex: 1 1 auto; }
+
       @media (hover: none) { .item-actions { opacity: 1; pointer-events: auto; } }
       @media (prefers-reduced-motion: reduce) { *, *::before, *::after { animation: none !important; transition: none !important; } }
     `;
@@ -483,45 +587,42 @@ export class PromptPicker {
       <style>${this.getStyles()}</style>
       <div class="picker" role="dialog" aria-label="Prompt Library">
         <div class="header">
-          <div class="library-heading"><h2 class="library-title">Prompt Library</h2><span class="library-count" id="library-count"></span></div>
-          <div class="search-row">
-            <div class="search-box">
-              <span class="search-icon">${ICONS.search}</span>
-              <input class="search-input" type="text" placeholder="Search prompts..." aria-label="Search prompts" />
+          <div class="header-top">
+            <div class="library-heading">
+              <h2 class="library-title">Prompt Library</h2>
+              <button class="panel-close" id="panel-close" type="button" title="Close" aria-label="Close Prompt Library">${ICONS.close}</button>
             </div>
+            <span class="library-count" id="library-count"></span>
+          </div>
+          <div class="search-row">
+            <span class="search-icon" aria-hidden="true">${ICONS.search}</span>
+            <input class="search-input" type="text" placeholder="Search prompts…" spellcheck="false" aria-label="Search prompts" />
           </div>
         </div>
         <div class="list" id="list-container"></div>
         <div class="footer-action">
-          <div class="footer-buttons">
-            <span class="footer-hint">Select to insert</span>
-            <div class="primary-cluster">
-              <button class="btn-orb btn-new" id="btn-primary-action" title="New Prompt">
-                ${ICONS.plus} <span>New Prompt</span>
-              </button>
-            </div>
-          </div>
+          <button class="btn-new" id="btn-primary-action" type="button" title="New Prompt">
+            ${ICONS.plus} <span>New Prompt</span>
+          </button>
         </div>
       </div>
       <div class="modal-overlay" id="modal-overlay" style="display:none;"></div>
     `;
 
-    // 鎼滅储缁戝畾
     const input = this.shadow.querySelector('.search-input') as HTMLInputElement;
     input?.addEventListener('input', (e) => {
       this.searchQuery = (e.target as HTMLInputElement).value.toLowerCase();
       this.updateList();
     });
-    // 闃绘鍐呴儴鐐瑰嚮鍏抽棴 Picker
+    // Clicks inside the panel must not bubble to the document close listener.
     const header = this.shadow.querySelector('.header');
     header?.addEventListener('mousedown', (e) => e.stopPropagation());
 
+    this.shadow.getElementById('panel-close')?.addEventListener('click', () => this.dismissAndRefocus());
     this.shadow.getElementById('btn-primary-action')?.addEventListener('click', () => {
-      this.inlineEditDraft = null;
       this.showModal();
       this.updateList();
     });
-    this.refreshPickerControls();
   }
 
   // ===================== Modal Methods =====================
@@ -539,42 +640,49 @@ export class PromptPicker {
     overlay.style.display = 'flex';
     this.shadow.querySelector('.picker')?.setAttribute('inert', '');
     overlay.innerHTML = `
-      <div class="modal" role="dialog" aria-modal="true" aria-labelledby="prompt-editor-title" aria-label="${prompt ? 'Edit Prompt' : 'New Prompt'}">
+      <div class="modal" role="dialog" aria-modal="true" aria-labelledby="prompt-editor-title">
         <div class="modal-header">
-          <h2 class="modal-title" id="prompt-editor-title">${prompt ? 'Edit Prompt' : 'New Prompt'}</h2>
-          <button class="modal-close" id="modal-close" aria-label="Close editor">${ICONS.close}</button>
+          <div class="modal-title-wrap">
+            <h2 class="modal-title" id="prompt-editor-title">${prompt ? 'Edit Prompt' : 'New Prompt'}</h2>
+            <p class="modal-subtitle">${prompt ? 'Update this prompt. Changes apply wherever it is inserted.' : 'Reusable text you can insert into any chat input.'}</p>
+          </div>
+          <button class="modal-close" id="modal-close" type="button" title="Close" aria-label="Close prompt editor">${ICONS.close}</button>
         </div>
         <div class="modal-body">
           <div class="form-group">
             <label class="form-label" for="prompt-title">Name</label>
-            <input class="form-input" id="prompt-title" aria-label="Name" type="text" placeholder="e.g. Code Review" value="${safeTitle}" />
+            <input class="form-input" id="prompt-title" type="text" placeholder="e.g. Code Review" value="${safeTitle}" spellcheck="false" autocomplete="off" />
           </div>
-          <div class="form-group content-group">
+          <div class="form-group">
             <label class="form-label" for="prompt-content">Prompt Content</label>
             <div class="textarea-shell">
-              <textarea class="form-textarea" id="prompt-content" aria-label="Prompt Content" placeholder="Enter your prompt template...">${safeContent}</textarea>
+              <textarea class="form-textarea" id="prompt-content" placeholder="Write the prompt you want to reuse…" spellcheck="false">${safeContent}</textarea>
               <span class="textarea-token" id="content-token-estimate">~0 tokens</span>
             </div>
           </div>
         </div>
-        <p class="form-status" id="form-status" role="status"></p>
         <div class="modal-footer">
-          <div class="modal-footer-left">
-            ${prompt ? '<button class="btn btn-delete" id="modal-delete">Delete</button>' : ''}
+          <div class="modal-footer-start">
+            ${prompt ? '<button class="btn btn-delete" id="modal-delete" type="button">Delete</button>' : ''}
+            <span class="form-status" id="form-status" role="alert"></span>
           </div>
-          <div class="modal-footer-right">
-            <button class="btn btn-cancel" id="modal-cancel">Cancel</button>
-            <button class="btn btn-save" id="modal-save">Save</button>
+          <div class="modal-footer-end">
+            <button class="btn btn-cancel" id="modal-cancel" type="button">Cancel</button>
+            <button class="btn btn-save" id="modal-save" type="button">Save</button>
           </div>
         </div>
       </div>
     `;
 
-    // 缁戝畾浜嬩欢
+    // Bind events
     const titleInput = overlay.querySelector('#prompt-title') as HTMLInputElement | null;
     const contentInput = overlay.querySelector('#prompt-content') as HTMLTextAreaElement | null;
     const tokenEstimateEl = overlay.querySelector('#content-token-estimate') as HTMLElement | null;
     const saveBtn = overlay.querySelector('#modal-save') as HTMLButtonElement | null;
+    const statusEl = overlay.querySelector('#form-status') as HTMLElement | null;
+    const setStatus = (message: string) => {
+      if (statusEl) statusEl.textContent = message;
+    };
     const updateContentMeta = () => {
       const chars = (contentInput?.value || '').length;
       const tokenEstimate = Math.ceil(chars / 4);
@@ -589,9 +697,11 @@ export class PromptPicker {
     };
 
     titleInput?.addEventListener('input', () => {
+      setStatus('');
       updateSaveEnabled();
     });
     contentInput?.addEventListener('input', () => {
+      setStatus('');
       updateContentMeta();
       updateSaveEnabled();
     });
@@ -607,7 +717,7 @@ export class PromptPicker {
 
       if (!this.modalDeleteConfirm) {
         this.modalDeleteConfirm = true;
-        deleteBtn.textContent = 'Confirm Delete';
+        deleteBtn.textContent = 'Confirm delete';
         deleteBtn.classList.add('confirming');
         if (this.modalDeleteTimer) {
           window.clearTimeout(this.modalDeleteTimer);
@@ -631,12 +741,12 @@ export class PromptPicker {
       this.updateList();
     });
 
-    // 鐐瑰嚮 overlay 鑳屾櫙鍏抽棴
+    // Clicking the scrim closes the editor
     overlay.onclick = (e) => {
       if (e.target === overlay) this.closeModal();
     };
 
-    // 鑱氱劍 Title
+    // Focus Name
     setTimeout(() => {
       titleInput?.focus();
     }, 50);
@@ -668,9 +778,10 @@ export class PromptPicker {
   private async savePrompt() {
     const title = (this.shadow.getElementById('prompt-title') as HTMLInputElement)?.value.trim();
     const content = (this.shadow.getElementById('prompt-content') as HTMLTextAreaElement)?.value.trim();
+    const status = this.shadow.getElementById('form-status');
 
     if (!title || !content) {
-      alert('Please fill in Name and Prompt Content.');
+      if (status) status.textContent = 'Add a name and prompt content before saving.';
       return;
     }
 
@@ -688,7 +799,6 @@ export class PromptPicker {
     };
 
     const saveButton = this.shadow.getElementById('modal-save') as HTMLButtonElement | null;
-    const status = this.shadow.getElementById('form-status');
     if (saveButton) { saveButton.disabled = true; saveButton.textContent = 'Saving…'; }
     if (status) status.textContent = '';
     try {
@@ -700,64 +810,6 @@ export class PromptPicker {
       if (status) status.textContent = 'Could not save this prompt. Your draft is still here; please try again.';
     } finally {
       if (saveButton) { saveButton.disabled = false; saveButton.textContent = 'Save'; }
-    }
-  }
-
-  private startInlineEdit(prompt: Prompt) {
-    this.inlineEditDraft = {
-      id: prompt.id,
-      title: prompt.title,
-      content: prompt.content
-    };
-    this.selectedPromptId = prompt.id;
-    this.updateList();
-  }
-
-  private cancelInlineEdit() {
-    this.inlineEditDraft = null;
-    this.updateList();
-  }
-
-  private async saveInlineEdit() {
-    const draft = this.inlineEditDraft;
-    if (!draft) return;
-    const title = draft.title.trim();
-    const content = draft.content.trim();
-    if (!title || !content) {
-      alert('Please fill in both title and content');
-      return;
-    }
-
-    const existing = promptStore.get(draft.id);
-    if (!existing) {
-      this.inlineEditDraft = null;
-      this.updateList();
-      return;
-    }
-
-    await promptStore.save({
-      ...existing,
-      id: existing.id,
-      title,
-      content,
-      tags: []
-    });
-    this.inlineEditDraft = null;
-    this.updateList();
-  }
-
-  private refreshPickerControls() {
-    const primaryAction = this.shadow.getElementById('btn-primary-action') as HTMLButtonElement | null;
-    const footerHint = this.shadow.getElementById('footer-hint') as HTMLElement | null;
-    const searchInput = this.shadow.querySelector('.search-input') as HTMLInputElement | null;
-
-    if (primaryAction) {
-      primaryAction.innerHTML = `${ICONS.plus}<span>New Prompt</span>`;
-      primaryAction.title = 'New Prompt';
-    }
-    if (footerHint) footerHint.style.display = 'none';
-    if (searchInput) {
-      searchInput.placeholder = 'Search prompts...';
     }
   }
 
@@ -794,7 +846,6 @@ export class PromptPicker {
   private updateList() {
     const list = this.shadow.getElementById('list-container');
     if (!list) return;
-    this.refreshPickerControls();
 
     const allPrompts = promptStore.getAll();
     const filtered = allPrompts.filter(p => {
@@ -803,21 +854,23 @@ export class PromptPicker {
       return matchesSearch;
     });
 
-    // List
     list.replaceChildren();
     const displayPrompts = filtered;
     this.visiblePromptIds = displayPrompts.map((prompt) => prompt.id);
     this.lastVisibleCount = displayPrompts.length;
     const count = this.shadow.getElementById('library-count');
     if (count) count.textContent = `${displayPrompts.length} ${displayPrompts.length === 1 ? 'prompt' : 'prompts'}`;
-    if (this.pendingDeletePromptId && !this.visiblePromptIds.includes(this.pendingDeletePromptId)) {
-      this.pendingDeletePromptId = null;
-    }
 
     if (displayPrompts.length === 0) {
       const empty = document.createElement('div');
       empty.className = 'empty-box';
-      empty.textContent = this.searchQuery ? 'No matching prompts' : 'Your library is empty. Add your first prompt.';
+      const emptyTitle = document.createElement('p');
+      emptyTitle.className = 'empty-title';
+      emptyTitle.textContent = this.searchQuery ? 'No prompts match your search' : 'No prompts yet';
+      const emptyHint = document.createElement('p');
+      emptyHint.className = 'empty-hint';
+      emptyHint.textContent = this.searchQuery ? 'Try a different keyword.' : 'Create your first prompt to reuse it in any chat.';
+      empty.append(emptyTitle, emptyHint);
       list.appendChild(empty);
       this.selectedPromptId = null;
       this.applyDynamicHeight(0);
@@ -831,79 +884,10 @@ export class PromptPicker {
     displayPrompts.forEach((prompt) => {
       const item = document.createElement('div');
       item.className = 'item';
-      item.classList.add('library');
       if (this.selectedPromptId === prompt.id) {
         item.classList.add('selected');
       }
       item.dataset.id = prompt.id;
-
-      const draft = this.inlineEditDraft;
-      if (draft && draft.id === prompt.id) {
-        item.classList.add('editing');
-        const editor = document.createElement('div');
-        editor.className = 'inline-editor';
-
-        const titleRow = document.createElement('div');
-        titleRow.className = 'inline-editor-row';
-        const titleLabel = document.createElement('label');
-        titleLabel.className = 'inline-editor-label';
-        titleLabel.textContent = 'Title';
-        const titleInput = document.createElement('input');
-        titleInput.className = 'inline-editor-input';
-        titleInput.type = 'text';
-        titleInput.value = draft.title;
-        titleInput.addEventListener('input', () => {
-          if (!this.inlineEditDraft) return;
-          this.inlineEditDraft.title = titleInput.value;
-        });
-        titleRow.appendChild(titleLabel);
-        titleRow.appendChild(titleInput);
-
-        const contentRow = document.createElement('div');
-        contentRow.className = 'inline-editor-row';
-        const contentLabel = document.createElement('label');
-        contentLabel.className = 'inline-editor-label';
-        contentLabel.textContent = 'Content';
-        const contentInput = document.createElement('textarea');
-        contentInput.className = 'inline-editor-textarea';
-        contentInput.value = draft.content;
-        contentInput.addEventListener('input', () => {
-          if (!this.inlineEditDraft) return;
-          this.inlineEditDraft.content = contentInput.value;
-        });
-        contentInput.addEventListener('keydown', (e) => {
-          if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') {
-            e.preventDefault();
-            this.saveInlineEdit();
-          }
-        });
-        contentRow.appendChild(contentLabel);
-        contentRow.appendChild(contentInput);
-
-        const actionRow = document.createElement('div');
-        actionRow.className = 'inline-editor-actions';
-        const cancelBtn = document.createElement('button');
-        cancelBtn.className = 'inline-editor-btn';
-        cancelBtn.type = 'button';
-        cancelBtn.textContent = 'Cancel';
-        cancelBtn.addEventListener('click', () => this.cancelInlineEdit());
-        const saveBtn = document.createElement('button');
-        saveBtn.className = 'inline-editor-btn primary';
-        saveBtn.type = 'button';
-        saveBtn.textContent = 'Save';
-        saveBtn.addEventListener('click', () => this.saveInlineEdit());
-        actionRow.appendChild(cancelBtn);
-        actionRow.appendChild(saveBtn);
-
-        editor.appendChild(titleRow);
-        editor.appendChild(contentRow);
-        editor.appendChild(actionRow);
-        item.appendChild(editor);
-        item.addEventListener('click', (e) => e.stopPropagation());
-        list.appendChild(item);
-        setTimeout(() => titleInput.focus(), 0);
-        return;
-      }
 
       const content = document.createElement('div');
       content.className = 'item-content';
@@ -933,13 +917,12 @@ export class PromptPicker {
       editBtn.className = 'item-action-btn';
       editBtn.dataset.action = 'edit';
       editBtn.dataset.id = prompt.id;
-      editBtn.title = 'Edit';
+      editBtn.title = 'Edit prompt';
+      editBtn.setAttribute('aria-label', `Edit ${prompt.title}`);
       editBtn.type = 'button';
       editBtn.innerHTML = ICONS.edit;
       editBtn.addEventListener('click', (e) => {
         e.stopPropagation();
-        this.pendingDeletePromptId = null;
-        this.inlineEditDraft = null;
         this.showModal(prompt);
       });
 
@@ -948,7 +931,6 @@ export class PromptPicker {
       item.addEventListener('click', (e) => {
         const target = e.target as HTMLElement;
         if (target.closest('.item-actions')) return;
-        this.pendingDeletePromptId = null;
         this.selectedPromptId = prompt.id;
         this.onSelect(prompt, false);
       });
@@ -1012,7 +994,3 @@ export class PromptPicker {
     this.close();
   }
 }
-
-
-
-
