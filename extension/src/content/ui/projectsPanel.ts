@@ -1259,6 +1259,14 @@ function ensurePanelRoot(shadow: ShadowRoot): HTMLElement {
         align-items: center;
         flex-shrink: 0;
         color: var(--gp-fg-muted);
+        opacity: 0;
+        transition: opacity 0.15s ease;
+      }
+
+      .gp-row:hover .gp-details-badge,
+      .gp-row.gp-force-hover .gp-details-badge,
+      .gp-details-badge:focus {
+        opacity: 1;
       }
 
       .gp-details-badge svg {
