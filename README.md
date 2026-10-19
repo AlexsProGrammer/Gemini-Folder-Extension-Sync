@@ -13,6 +13,7 @@ A heavily upgraded fork of [linyushuo0818/gemini-folder-extension](https://githu
 - **Conflict resolution modal** — a 4-way resolver (Use Newest / Merge Both / Keep This Device / Keep Other Device) with a 10-second countdown that auto-resolves with "Use Newest" and pauses while you hover.
 - **Sync status badge** — live pill in the panel header: Synced / Syncing / Offline / Conflict / Error / Unconfigured.
 - **Cross-browser MV3** — one manifest source, dual builds for Chromium (`service_worker`) and Firefox/Zen (`background scripts` + `browser_specific_settings`).
+- **Mobile support** — touch-first adaptation for Firefox for Android and Chromium mobile forks (Kiwi/Lemur/Mises/Edge …): always-visible row actions, larger touch targets, full-width dialogs and sheets, safe-area toasts, and visibility-based sync resume. Desktop behavior is unchanged.
 - **Legacy migration** — existing flat projects and prompts from the original extension are auto-migrated into the new per-account hierarchical schema with zero data loss.
 
 ## Monorepo Layout
@@ -47,8 +48,17 @@ npm run build:all         # outputs dist/chrome and dist/firefox
 
 Then load it:
 
-- **Chrome/Brave/Edge:** `chrome://extensions` → Developer mode → *Load unpacked* → select `extension/dist/chrome`
-- **Firefox/Zen:** `about:debugging#/runtime/this-firefox` → *Load Temporary Add-on* → pick any file in `extension/dist/firefox`
+- **Chrome/Brave/Edge (desktop):** `chrome://extensions` → Developer mode → *Load unpacked* → select `extension/dist/chrome`
+- **Firefox/Zen (desktop):** `about:debugging#/runtime/this-firefox` → *Load Temporary Add-on* → pick any file in `extension/dist/firefox`
+
+### Mobile
+
+The same builds run on mobile browsers that support WebExtensions:
+
+- **Firefox for Android:** load `dist/firefox` via `web-ext run --target=firefox-android`, or install a signed build (self-distribution/collection). Requires Firefox 121+.
+- **Chromium forks (Kiwi, Lemur, Mises, Edge Canary, …):** install `dist/chrome` through the browser's own extension page/ZIP install. Plain Chrome for Android does not support extensions.
+
+On touch devices the extension automatically switches to a mobile-tuned UI (detected via touch/pointer/UA signals — never on desktop): project/chat action buttons are always visible instead of hover-revealed, rows and menus use larger touch targets, the create/settings/conflict dialogs become full-width sheets, the workspace drawer goes edge-to-edge, toasts respect safe-area insets, and pending sync pushes are flushed immediately when the tab is backgrounded.
 
 ### Connecting the Extension to the Backend
 

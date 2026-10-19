@@ -1,5 +1,6 @@
 ﻿import { ChatRef, Project, ProjectIcon, RuntimeState, SyncStatus, WorkspacePayload } from '../../shared/types';
 import { resolveAccountRawIdentifier } from '../../shared/account';
+import { isMobileEnvironment } from '../../shared/env';
 import { getActiveAccountHash } from '../accountWatcher';
 import { getWorkspace, saveWorkspace, getSyncConfig } from '../../shared/storage';
 import { SYNC_CONFLICT_EVENT, syncEngine } from '../../shared/syncEngine';
@@ -1471,6 +1472,89 @@ function ensurePanelRoot(shadow: ShadowRoot): HTMLElement {
           opacity: 0.35;
         }
       }
+
+      /* ---------- Mobile (touch-first) adjustments ---------- */
+
+      :host(.gp-mobile) .gp-title {
+        height: 40px;
+        font-size: 14px;
+      }
+
+      :host(.gp-mobile) .gp-row {
+        height: 40px;
+      }
+
+      :host(.gp-mobile) .gp-label {
+        font-size: 14px;
+        line-height: 20px;
+      }
+
+      :host(.gp-mobile) .gp-chat-row {
+        height: 40px;
+        font-size: 14px;
+        line-height: 20px;
+      }
+
+      :host(.gp-mobile) .gp-chat-empty {
+        padding: 10px 16px 10px 26px;
+      }
+
+      :host(.gp-mobile) .gp-icon {
+        width: 28px;
+        height: 28px;
+      }
+
+      :host(.gp-mobile) .gp-icon svg {
+        width: 22px;
+        height: 22px;
+      }
+
+      /* No hover on touch devices: row actions must stay reachable. */
+      :host(.gp-mobile) .gp-kebab,
+      :host(.gp-mobile) .gp-workspace-btn,
+      :host(.gp-mobile) .gp-chat-kebab,
+      :host(.gp-mobile) .gp-details-badge {
+        opacity: 1;
+      }
+
+      :host(.gp-mobile) .gp-kebab {
+        width: 36px;
+        height: 36px;
+      }
+
+      :host(.gp-mobile) .gp-workspace-btn {
+        width: 36px;
+        height: 36px;
+      }
+
+      :host(.gp-mobile) .gp-chat-kebab {
+        width: 30px;
+        height: 36px;
+      }
+
+      :host(.gp-mobile) .gp-sync-header {
+        padding: 2px 12px 8px;
+      }
+
+      :host(.gp-mobile) .gp-sync-badge {
+        height: 32px;
+        font-size: 13px;
+      }
+
+      :host(.gp-mobile) .gp-settings-badge {
+        width: 32px;
+        height: 32px;
+      }
+
+      :host(.gp-mobile) .gp-settings-badge .gp-sync-icon svg {
+        width: 18px;
+        height: 18px;
+      }
+
+      :host(.gp-mobile) .gp-settings-badge .gp-status-dot {
+        top: 3px;
+        right: 3px;
+      }
     `;
     shadow.appendChild(style);
   }
@@ -2371,6 +2455,67 @@ function ensureOverlayLayer(shadow: ShadowRoot): HTMLElement {
       .gp-picker-children {
         display: block;
       }
+
+      /* ---------- Mobile (touch-first) adjustments ---------- */
+
+      /* Full-width scrollable dialogs: auto-margin centering keeps the dialog
+         reachable at both ends even when it is taller than the viewport. */
+      :host(.gp-mobile) .gp-modal-backdrop {
+        overflow-y: auto;
+        padding: 12px 0;
+        -webkit-overflow-scrolling: touch;
+      }
+
+      :host(.gp-mobile) .gp-modal {
+        margin: auto;
+        flex: 0 0 auto;
+        width: 100%;
+        max-width: 100vw;
+        max-height: calc(100dvh - 24px);
+        overflow-y: auto;
+        border-radius: 22px;
+      }
+
+      :host(.gp-mobile) .gp-template-row-group {
+        grid-template-columns: repeat(5, var(--gp-icon-size));
+        justify-content: center;
+      }
+
+      :host(.gp-mobile) .gp-color-row {
+        flex-wrap: wrap;
+        justify-content: center;
+        width: 100%;
+        margin-left: 0;
+      }
+
+      :host(.gp-mobile) .gp-menu {
+        max-height: calc(100dvh - 24px);
+        overflow-y: auto;
+      }
+
+      :host(.gp-mobile) .gp-menu-item {
+        font-size: 14px;
+        line-height: 20px;
+      }
+
+      :host(.gp-mobile) .gp-project-menu .gp-menu-item,
+      :host(.gp-mobile) .gp-chat-menu .gp-menu-item,
+      :host(.gp-mobile) .gp-submenu .gp-menu-item {
+        height: 44px;
+        min-height: 44px;
+        border-radius: 22px;
+      }
+
+      :host(.gp-mobile) .gp-toast {
+        bottom: calc(24px + env(safe-area-inset-bottom, 0px));
+        left: 50%;
+        right: auto;
+        transform: translateX(-50%);
+        max-width: calc(100vw - 32px);
+        text-align: center;
+        padding: 12px 18px;
+        font-size: 14px;
+      }
     `;
     shadow.appendChild(style);
   }
@@ -3139,7 +3284,7 @@ function attachThemeObserver(panelRoot: HTMLElement, overlayLayer: HTMLElement) 
   const panelHost = getHost(panelRoot);
   const overlayHost = getHost(overlayLayer);
 
-  const applyTheme = () => {
+  const applyEnvironment = () => {
     // Check for "dark" in class list (Gemini typically uses "dark-theme" or similar)
     // We strictly check for *presence* of likely dark classes
     const bodyClass = document.body.className.toLowerCase();
@@ -3147,9 +3292,18 @@ function attachThemeObserver(panelRoot: HTMLElement, overlayLayer: HTMLElement) 
 
     if (panelHost) panelHost.classList.toggle('dark', isDark);
     if (overlayHost) overlayHost.classList.toggle('dark', isDark);
+
+    // Touch-first mobile mode (Firefox Android, Chromium forks): both shadow
+    // hosts carry `.gp-mobile` so the panel, menus, modals and drawer switch
+    // to touch-friendly styling. Recomputed on resize/rotation.
+    const isMobile = isMobileEnvironment();
+    if (panelHost) panelHost.classList.toggle('gp-mobile', isMobile);
+    if (overlayHost) overlayHost.classList.toggle('gp-mobile', isMobile);
   };
 
-  const observer = new MutationObserver(applyTheme);
+  const observer = new MutationObserver(applyEnvironment);
   observer.observe(document.body, { attributes: true, attributeFilter: ['class'] });
-  applyTheme(); // Initial check
+  window.addEventListener('resize', applyEnvironment, { passive: true });
+  window.addEventListener('orientationchange', applyEnvironment, { passive: true });
+  applyEnvironment(); // Initial check
 }

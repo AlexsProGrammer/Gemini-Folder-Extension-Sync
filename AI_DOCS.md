@@ -1,6 +1,6 @@
 # AI_DOCS.md — Machine contract
 
-Version: 2.0.7
+Version: 2.0.8
 
 ## Local storage keys (webext.storage.local)
 
@@ -32,6 +32,12 @@ Version: 2.0.7
 - `createProjectsPanel` returns `setActiveProject(projectId|null)` and `getActiveProjectId()` in addition to previous methods.
 - `src/content/ui/workspaceDrawer.ts` exports `createWorkspaceDrawer(options)` with `open(project)`, `close()`, `isOpen()`.
 - `createTargetPickerModal` additionally returns `openReparent(projectId, projects, onPick)`.
+
+## Mobile environment detection (2.0.8)
+
+- `src/shared/env.ts` exports `isMobileEnvironment()` / `isMobileLayout()` / `hasTouchInput()`; true only for touch-first devices (UA mobile + coarse pointer, or coarse pointer + touch + ≤720px viewport).
+- The panel and overlay shadow hosts receive a `.gp-mobile` class (toggled in `projectsPanel.attachThemeObserver`, together with `.dark`); all mobile CSS in the panel/overlay/drawer is keyed on `:host(.gp-mobile)`. The page-level settings/conflict modals add a `gp-mobile` class on their root element instead.
+- `syncEngine.flushPendingPushes()` runs all pending debounced pushes immediately; called from the content script on `visibilitychange → hidden` and `pagehide`.
 
 ## External calls
 

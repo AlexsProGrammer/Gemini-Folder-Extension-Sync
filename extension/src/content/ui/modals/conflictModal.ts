@@ -1,4 +1,5 @@
 import type { SyncResolution, SyncConflictDetail, WorkspacePayload } from '../../../shared/types';
+import { isMobileEnvironment } from '../../../shared/env';
 
 const ROOT_ID = 'gp-sync-conflict-root';
 const COUNTDOWN_SECONDS = 10;
@@ -205,6 +206,29 @@ const STYLE = `
   color: color-mix(in srgb, var(--gp-on-accent) 78%, transparent);
 }
 .gp-sync-conflict-root .gp-sync-choice.primary:hover { filter: brightness(0.96); }
+
+/* Mobile (touch-first): single-column cards/choices and a full-width dialog. */
+.gp-sync-conflict-root.gp-mobile .gp-sync-backdrop {
+  padding: 10px 0;
+}
+.gp-sync-conflict-root.gp-mobile .gp-sync-dialog {
+  width: 100%;
+  max-width: 100vw;
+  max-height: calc(100dvh - 20px);
+  border-radius: 22px;
+  padding: 18px 16px calc(18px + env(safe-area-inset-bottom, 0px));
+}
+.gp-sync-conflict-root.gp-mobile .gp-sync-cards,
+.gp-sync-conflict-root.gp-mobile .gp-sync-choices {
+  grid-template-columns: 1fr;
+}
+.gp-sync-conflict-root.gp-mobile .gp-sync-choice {
+  padding: 14px 16px;
+}
+.gp-sync-conflict-root.gp-mobile .gp-sync-close {
+  width: 36px;
+  height: 36px;
+}
 `;
 
 function countProjects(payload: WorkspacePayload): number {
@@ -302,6 +326,7 @@ export function openConflictModal(
   const root = document.createElement('div');
   root.id = ROOT_ID;
   root.className = 'gp-sync-conflict-root';
+  if (isMobileEnvironment()) root.classList.add('gp-mobile');
   root.innerHTML = `<style>${STYLE}</style>${buildMarkup(newestIsRemote, localState, remoteState)}`;
   document.body.appendChild(root);
 
@@ -320,10 +345,12 @@ export function openConflictModal(
   let paused = false;
   let finished = false;
   let intervalId: number | null = null;
+  let touchResumeTimer: number | null = null;
 
   function cleanup(): void {
     document.removeEventListener('keydown', onKeyDown);
     window.removeEventListener('pagehide', cleanup);
+    if (touchResumeTimer !== null) window.clearTimeout(touchResumeTimer);
     themeObserver.disconnect();
     root.remove();
   }
@@ -370,6 +397,16 @@ export function openConflictModal(
   });
   dialog.addEventListener('mouseleave', () => {
     paused = false;
+  });
+  // Touch devices have no hover: a tap/hold anywhere in the dialog pauses the
+  // countdown briefly so the choices can be read while deciding.
+  dialog.addEventListener('pointerdown', () => {
+    paused = true;
+    if (touchResumeTimer !== null) window.clearTimeout(touchResumeTimer);
+    touchResumeTimer = window.setTimeout(() => {
+      touchResumeTimer = null;
+      paused = false;
+    }, 2500);
   });
 
   backdrop.addEventListener('click', (event) => {

@@ -55,7 +55,7 @@ import { installSidebarInspector } from './sidebarInspector';
 import { CHAT_DRAG_MIME, createProjectsPanel } from './ui/projectsPanel';
 import { initChatGPT } from './chatgpt';
 
-const BUILD_MARKER = '2.0.7-vault3-fix1';
+const BUILD_MARKER = '2.0.8-mobile1';
 const HIDDEN_ATTR = 'data-gp-native-hidden';
 const RESCAN_DELAY_MS = 350;
 const PANEL_READY_RETRY_MS = 120;
@@ -148,7 +148,7 @@ async function ensureSyncUnlocked(accountHash: string): Promise<void> {
 function initWorkspaceSync(): void {
   onWorkspaceSaved((accountHash) => syncEngine.schedulePush(accountHash));
 
-  window.addEventListener('focus', () => {
+  const resumeSync = () => {
     const accountHash = getActiveAccountHash();
     if (!accountHash) return;
     ensureSyncUnlocked(accountHash)
@@ -157,6 +157,24 @@ function initWorkspaceSync(): void {
       .catch((error) =>
         console.warn('[gemini-projects] focus pull failed', error)
       );
+  };
+
+  window.addEventListener('focus', resumeSync);
+
+  // Mobile browsers fire `focus` unreliably when switching between apps and
+  // Gemini tabs; document visibility is the dependable signal there.
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'visible') {
+      resumeSync();
+    } else {
+      // Backgrounding a mobile tab freezes timers: push any debounced edits
+      // right away instead of losing them to the suspension.
+      syncEngine.flushPendingPushes();
+    }
+  });
+
+  window.addEventListener('pagehide', () => {
+    syncEngine.flushPendingPushes();
   });
 
   window.addEventListener('online', () => {

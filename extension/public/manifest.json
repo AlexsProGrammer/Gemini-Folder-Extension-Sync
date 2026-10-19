@@ -1,7 +1,7 @@
 {
     "manifest_version": 3,
     "name": "Synced Projects for Gemini",
-    "version": "2.0.7",
+    "version": "2.0.8",
     "description": "Group Gemini chats into local Projects/Folders + Prompt Library + self-hosted backend to sync Devices.",
     "permissions": [
         "storage",

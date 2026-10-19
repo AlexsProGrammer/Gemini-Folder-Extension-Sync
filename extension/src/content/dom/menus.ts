@@ -6,6 +6,7 @@
   getConversationId,
   getConversationIdFromChatRow
 } from './anchors';
+import { isMobileEnvironment } from '../../shared/env';
 
 const DEBUG = false;
 const ACTIVE_ROW_ATTR = 'data-gp-active-row';
@@ -73,6 +74,14 @@ export interface ChatMenuHandle {
 }
 
 const ITEM_FONT_STACK = '"Google Sans Flex", "Google Sans", "Helvetica Neue", sans-serif';
+
+// Touch-first mobile devices get taller injected rows so they match Material
+// touch targets and the spacing of Gemini's mobile menu sheets. Desktop stays
+// at the compact 36px rows that mirror Gemini's desktop context menu.
+const MOBILE_TOUCH = isMobileEnvironment();
+const ITEM_HEIGHT = MOBILE_TOUCH ? '44px' : '36px';
+const ITEM_FONT_SIZE = MOBILE_TOUCH ? '14px' : '12px';
+const ITEM_LINE_HEIGHT = MOBILE_TOUCH ? '20px' : '16px';
 
 const ITEM_ICONS = {
   addToProject:
@@ -740,26 +749,27 @@ function createInjectedMenuItem(action: string, iconPaths: string, label: string
   item.setAttribute('role', 'menuitem');
   item.setAttribute(MENU_ITEM_ATTR, action);
 
-  // Match Gemini's native menu rows: 36px items, 0 12px padding, 16px icon,
-  // 12px "Google Sans Flex" at weight 300, pill radius (50% of item height).
+  // Match Gemini's native menu rows: compact 36px items on desktop, 44px
+  // touch targets on mobile, 0 12px padding, icon, "Google Sans Flex",
+  // pill radius (50% of item height).
   item.style.setProperty('display', 'flex', 'important');
   item.style.setProperty('align-items', 'center', 'important');
   item.style.setProperty('gap', '12px', 'important');
-  item.style.setProperty('height', '36px', 'important');
-  item.style.setProperty('min-height', '36px', 'important');
-  item.style.setProperty('max-height', '36px', 'important');
+  item.style.setProperty('height', ITEM_HEIGHT, 'important');
+  item.style.setProperty('min-height', ITEM_HEIGHT, 'important');
+  item.style.setProperty('max-height', ITEM_HEIGHT, 'important');
   item.style.setProperty('padding', '0 12px', 'important');
   item.style.setProperty('box-sizing', 'border-box', 'important');
   item.style.setProperty('cursor', 'pointer', 'important');
-  item.style.setProperty('border-radius', '18px', 'important');
+  item.style.setProperty('border-radius', MOBILE_TOUCH ? '22px' : '18px', 'important');
   item.style.setProperty('background', 'transparent', 'important');
   item.style.setProperty('color', 'inherit', 'important');
   item.style.setProperty('border', 'none', 'important');
   item.style.setProperty('outline', 'none', 'important');
   item.style.setProperty('font-family', `${ITEM_FONT_STACK}`, 'important');
-  item.style.setProperty('font-size', '12px', 'important');
+  item.style.setProperty('font-size', ITEM_FONT_SIZE, 'important');
   item.style.setProperty('font-weight', '300', 'important');
-  item.style.setProperty('line-height', '16px', 'important');
+  item.style.setProperty('line-height', ITEM_LINE_HEIGHT, 'important');
 
   const icon = document.createElement('span');
   icon.style.setProperty('width', '16px', 'important');

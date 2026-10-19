@@ -453,6 +453,22 @@ function ensureDrawerStyle(root: ShadowRoot | Document): void {
       color: var(--gp-fg-muted, #5f6368);
       min-height: 16px;
     }
+
+    /* Mobile (touch-first): full-width drawer with safe-area padding so the
+       editing surface is usable behind the on-screen keyboard. */
+    :host(.gp-mobile) .gp-workspace-drawer {
+      width: 100vw;
+      max-width: 100vw;
+      border-left: none;
+      padding-bottom: env(safe-area-inset-bottom, 0px);
+    }
+    :host(.gp-mobile) .gp-drawer-header {
+      padding: 14px 16px 12px;
+    }
+    :host(.gp-mobile) .gp-drawer-close {
+      width: 40px;
+      height: 40px;
+    }
   `;
   root.appendChild(style);
 }

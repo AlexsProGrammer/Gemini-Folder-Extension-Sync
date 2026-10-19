@@ -54,6 +54,22 @@ To use sync you need a backend; see the repository root README and `backend/READ
 - `npm run build:firefox` → `dist/firefox` (Firefox & Zen Browser)
 - `npm run build:all` → both
 
+## Mobile Support (New)
+
+The extension also runs on mobile browsers that support WebExtensions — **Firefox for Android** (121+, use `dist/firefox`) and **Chromium mobile forks with extension support** such as Kiwi, Lemur, Mises or Edge Canary (use `dist/chrome`; plain Chrome for Android does not support extensions).
+
+On touch-first devices the UI automatically adapts (detected via UA, touch and pointer signals; desktop behavior is never altered):
+
+- Project/folder/chat action buttons are **always visible** instead of hover-revealed.
+- Larger touch targets: 40px rows, 36px row actions, 44px menu items, 32px header badges.
+- Create/edit, project-details and picker dialogs render as **full-width scrollable sheets**; the icon grid wraps to 5 columns per row.
+- The **Sync settings** and **conflict resolution** dialogs become full-width bottom-sheet-like dialogs with 16px inputs (no focus zoom) and safe-area padding; conflict countdown also pauses on touch.
+- The **Project Workspace drawer** goes edge-to-edge with safe-area padding.
+- Toasts are bottom-centered and respect `env(safe-area-inset-bottom)`.
+- Sync is mobile-robust: pulls resume on `visibilitychange`/`pageshow` (not just window focus), and pending debounced pushes are flushed immediately when the tab is hidden or unloaded so app switching never loses edits.
+
+Everything else — encryption, per-account workspaces, hierarchy, prompt library and injection — behaves identically to desktop.
+
 ## Install (from source)
 
 1. Build: `npm install && npm run build:all`.
@@ -86,6 +102,7 @@ The Prompt Library uses the color roles, typography scale, and form structure fr
 
 ### Fork additions (this repository)
 
+- Mobile support for Firefox for Android and Chromium-based mobile browsers, with a touch-tuned UI (`src/shared/env.ts` detection; always-visible actions, full-width sheets, safe-area insets, visibility-driven sync).
 - Hierarchical projects & nested subfolders with persistent per-account collapse state and Move to… reparenting.
 - Project Workspace drawer with autosaving System Prompts (auto-injected into new chats, with in-composer Remove pill) and Project Notes.
 - Zero-knowledge AES-GCM-256 sync engine (PBKDF2 key derivation) with debounced local-first pushes, auto-pull on focus/reconnect, and a 4-way conflict modal with 10-second auto-resolution countdown.

@@ -201,6 +201,19 @@ export class SyncEngine {
     this.pushTimers.set(accountHash, timer);
   }
 
+  /**
+   * Executes every pending debounced push immediately. Mobile browsers freeze
+   * or discard page timers when the tab is backgrounded, so the pagehide /
+   * visibilitychange handlers flush here instead of losing the last edits.
+   */
+  flushPendingPushes(): void {
+    const pending = Array.from(this.pushTimers.keys());
+    this.pushTimers.clear();
+    pending.forEach((accountHash) => {
+      void this.executePush(accountHash);
+    });
+  }
+
   private async executePush(accountHash: string): Promise<void> {
     const inFlight = this.inFlightPushes.get(accountHash);
     if (inFlight) {

@@ -2,6 +2,7 @@ import { ensureServerHostPermission, requestRemotePull } from '../../../shared/s
 import { syncEngine } from '../../../shared/syncEngine';
 import { getFeatureSettings, getSyncSettings, saveFeatureSettings, saveSyncSettings } from '../../../shared/storage';
 import type { SyncSettings } from '../../../shared/types';
+import { isMobileEnvironment } from '../../../shared/env';
 import { exportAllData, triggerImport } from '../../../shared/backup';
 import { errorMessage, storageLocalClear } from '../../../shared/webext';
 
@@ -403,6 +404,58 @@ const STYLE = `
 }
 .gp-sync-modal-root .gp-sync-primary:disabled { opacity: 0.6; cursor: wait; }
 .gp-sync-modal-root .gp-sync-primary:not(:disabled):hover { filter: brightness(0.96); }
+
+/* Mobile (touch-first): bottom-sheet-like full-width dialog, 16px inputs to
+   prevent iOS/Android focus zoom, larger touch targets throughout. */
+.gp-sync-modal-root.gp-mobile .gp-sync-backdrop {
+  padding: 10px 0;
+}
+.gp-sync-modal-root.gp-mobile .gp-sync-dialog {
+  width: 100%;
+  max-width: 100vw;
+  max-height: calc(100dvh - 20px);
+  border-radius: 22px;
+  padding: 18px 16px calc(18px + env(safe-area-inset-bottom, 0px));
+}
+.gp-sync-modal-root.gp-mobile .gp-sync-input {
+  height: 46px;
+  font-size: 16px;
+}
+.gp-sync-modal-root.gp-mobile .gp-sync-password-wrap .gp-sync-input { padding-right: 48px; }
+.gp-sync-modal-root.gp-mobile .gp-sync-eye {
+  width: 40px;
+  height: 40px;
+}
+.gp-sync-modal-root.gp-mobile .gp-sync-close {
+  width: 36px;
+  height: 36px;
+}
+.gp-sync-modal-root.gp-mobile .gp-sync-tab {
+  height: 40px;
+  padding: 0 20px;
+  font-size: 14px;
+}
+.gp-sync-modal-root.gp-mobile .gp-sync-check-row input {
+  width: 20px;
+  height: 20px;
+  flex: 0 0 20px;
+}
+.gp-sync-modal-root.gp-mobile .gp-io-btn { min-height: 62px; }
+.gp-sync-modal-root.gp-mobile .gp-sync-ghost,
+.gp-sync-modal-root.gp-mobile .gp-sync-cancel {
+  min-width: 96px;
+  height: 42px;
+  font-size: 14px;
+}
+.gp-sync-modal-root.gp-mobile .gp-sync-primary {
+  height: 42px;
+  min-width: 96px;
+  font-size: 14px;
+}
+.gp-sync-modal-root.gp-mobile .gp-sync-danger-btn {
+  height: 42px;
+  font-size: 14px;
+}
 `;
 
 function isValidServerUrl(value: string): boolean {
@@ -425,6 +478,7 @@ export function openSettingsModal(activeAccountId: string, activeAccountLabel: s
   const root = document.createElement('div');
   root.id = ROOT_ID;
   root.className = 'gp-sync-modal-root';
+  if (isMobileEnvironment()) root.classList.add('gp-mobile');
   root.innerHTML = `<style>${STYLE}</style>${buildMarkup(activeAccountLabel)}`;
   document.body.appendChild(root);
 
