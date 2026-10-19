@@ -30,7 +30,7 @@ A heavily upgraded fork of [linyushuo0818/gemini-folder-extension](https://githu
 
 ```bash
 cd backend
-cp .env.example .env      # set a strong API_KEY
+cp .env.example .env      # set API keys (one per person, see backend/README.md)
 docker compose up --build -d
 # Listening on 127.0.0.1:3000 — put Nginx/Caddy with TLS in front for remote use
 ```
@@ -53,7 +53,7 @@ Then load it:
 ### Connecting the Extension to the Backend
 
 1. Open Gemini, click the sync badge (pill) in the projects panel header.
-2. Enter your server URL (e.g. `https://sync.example.com`) and the API key from `backend/.env`.
+2. Enter your server URL (e.g. `https://sync.example.com`) and **your personal API key** (`API_KEY_<NAME>` from `backend/.env`).
 3. Click **Test Connection** to verify reachability and authentication.
 4. Set a passphrase (global, or per-account) — this is your encryption key and is **never** sent anywhere. Losing it means losing access to synced data.
 5. Hit save; the workspace pushes immediately.

@@ -1,25 +1,23 @@
 import { CanActivate, ExecutionContext, Injectable, UnauthorizedException } from '@nestjs/common';
-import { createHash, timingSafeEqual } from 'node:crypto';
+import { ApiKeyRegistry, type ApiKeyIdentity } from './api-key.registry';
+
+export type RequestWithApiKey = { headers?: Record<string, string | undefined>; apiKeyIdentity?: ApiKeyIdentity };
 
 @Injectable()
 export class ApiKeyGuard implements CanActivate {
+  constructor(private readonly registry: ApiKeyRegistry) {}
+
   canActivate(context: ExecutionContext): boolean {
-    const request = context.switchToHttp().getRequest<{ headers?: Record<string, string | undefined> }>();
+    const request = context.switchToHttp().getRequest<RequestWithApiKey>();
     const header = request.headers?.authorization ?? '';
     const token = header.startsWith('Bearer ') ? header.slice('Bearer '.length).trim() : '';
-    const expected = process.env.API_KEY ?? '';
 
-    if (token.length === 0 || expected.length === 0 || !this.tokensMatch(token, expected)) {
+    const identity = this.registry.resolve(token);
+    if (!identity) {
       throw new UnauthorizedException('Invalid or missing API key.');
     }
 
+    request.apiKeyIdentity = identity;
     return true;
-  }
-
-  private tokensMatch(provided: string, expected: string): boolean {
-    const providedHash = createHash('sha256').update(provided).digest();
-    const expectedHash = createHash('sha256').update(expected).digest();
-
-    return timingSafeEqual(providedHash, expectedHash);
   }
 }

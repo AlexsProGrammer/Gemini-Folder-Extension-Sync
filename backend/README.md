@@ -7,7 +7,7 @@ A self-hosted, **zero-knowledge** sync backend for the Gemini Folders with Backe
 - The extension encrypts the entire workspace (projects, subfolders, system prompts, notes, prompt library) locally with **AES-GCM-256**, using a key derived from your passphrase via **PBKDF2 (310,000 iterations, SHA-256)**.
 - Only `{ ciphertext, iv, version, updatedAt }` ever leaves your browser.
 - The backend stores these blobs in **SQLite (WAL mode)** and enforces **optimistic concurrency**: pushes with a stale `version` are rejected with `409 Conflict` plus the server's current state, letting the client resolve conflicts (newest / merge / keep local / keep remote).
-- All requests authenticate with a `Bearer` API key compared in **constant time** (SHA-256 + `crypto.timingSafeEqual`).
+- All requests authenticate with a `Bearer` API key compared in **constant time** (SHA-256 digest lookup). Multiple per-person keys are supported, each bound to a fixed set of account hashes (or all accounts).
 
 ## Privacy / GDPR
 
@@ -34,11 +34,25 @@ Copy `.env.example` to `.env` and adjust:
 ```env
 PORT=3000
 DB_PATH=/app/data/sync.db
-API_KEY=change_me_to_a_long_random_secret
 LOG_LEVEL=info
+
+# Legacy single key (allowed on ALL accounts)
+API_KEY=change_me_to_a_long_random_secret
+
+# Per-person keys
+API_KEY_ALICE=another_long_random_secret
+API_KEY_ALICE_ACCOUNTS=0000000000000000000000000000000000000000000000000000000000000000
+API_KEY_BOB=yet_another_long_random_secret
+API_KEY_BOB_ACCOUNTS=*
 ```
 
-The `API_KEY` must match the one entered in the extension's Sync Settings modal.
+The backend scans the environment for `API_KEY_*` variables at startup:
+
+- `API_KEY_<NAME>=<secret>` — the bearer token this person uses. The `<NAME>` label is for your own bookkeeping only; it is never sent by clients.
+- `API_KEY_<NAME>_ACCOUNTS` — which `accountId` hash(es) the key may access: `*` for all accounts (server owner), or a comma-separated list of 64-char hex account hashes. Every named key **must** have this variable, otherwise startup fails (fail-closed).
+- The legacy `API_KEY` remains valid and is allowed on all accounts; remove it once everyone has a named key.
+
+Each person enters their own key in the extension's Sync Settings modal; the extension can then only read/write the account blobs its key is bound to. Generate secrets with `openssl rand -base64 32`.
 
 ## Run with Docker (recommended)
 
@@ -83,7 +97,7 @@ The table is also auto-created on boot if missing.
 npx vitest run
 ```
 
-Covers: 401 without/with bad API key, 404 on unknown account, successful push + round-trip GET, and 409 conflict on stale version.
+Covers: 401 without/with bad API key, 404 on unknown account, successful push + round-trip GET, 409 conflict on stale version, plus per-key account authorization (403 on unbound accounts, wildcard key access) and the API key registry itself.
 
 ## Project Layout
 
@@ -97,7 +111,8 @@ backend/
 └── src/
     ├── main.ts                 # Fastify bootstrap (10 MB body limit, helmet, CORS)
     ├── app.module.ts
-    ├── common/guards/api-key.guard.ts   # Constant-time Bearer validation
+    ├── common/guards/api-key.guard.ts            # Constant-time Bearer validation
+    ├── common/guards/api-key.registry.ts         # API_KEY_* env scan + per-key account bindings
     ├── database/               # Drizzle + better-sqlite3 (WAL, busy_timeout 5000)
     └── sync/                   # Controller, service, DTOs, e2e specs
 ```

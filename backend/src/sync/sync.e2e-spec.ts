@@ -10,6 +10,7 @@ import { AppModule } from '../app.module';
 
 const TEST_DB_PATH = './data/e2e-sync.db';
 const ACCOUNT_ID = 'a'.repeat(64);
+const ALICE_ACCOUNT_ID = 'b'.repeat(64);
 
 describe('Sync API (e2e)', () => {
   let app: NestFastifyApplication;
@@ -19,6 +20,8 @@ describe('Sync API (e2e)', () => {
 
   beforeAll(async () => {
     process.env.API_KEY = 'test_secret_key_1234567890';
+    process.env.API_KEY_ALICE = 'alice_test_key_1234567890';
+    process.env.API_KEY_ALICE_ACCOUNTS = ALICE_ACCOUNT_ID;
     process.env.DB_PATH = TEST_DB_PATH;
 
     for (const suffix of ['', '-wal', '-shm']) {
@@ -96,5 +99,35 @@ describe('Sync API (e2e)', () => {
       iv: 'iv-a',
       updatedAt: 1000
     });
+  });
+
+  it('rejects an API key that is not bound to the requested account', async () => {
+    const response = await request.get(`/api/v1/sync/${ACCOUNT_ID}`).set(auth('alice_test_key_1234567890')).expect(403);
+
+    expect(response.body.message).toBe('This API key is not authorized for this account.');
+    await request
+      .post(`/api/v1/sync/${ACCOUNT_ID}`)
+      .set(auth('alice_test_key_1234567890'))
+      .send({ version: 5, ciphertext: 'cipher-x', iv: 'iv-x', updatedAt: 5000 })
+      .expect(403);
+  });
+
+  it('allows an API key to access only its bound accounts', async () => {
+    const pushed = await request
+      .post(`/api/v1/sync/${ALICE_ACCOUNT_ID}`)
+      .set(auth('alice_test_key_1234567890'))
+      .send({ version: 1, ciphertext: 'cipher-alice', iv: 'iv-alice', updatedAt: 2000 })
+      .expect(201);
+
+    expect(pushed.body).toEqual({ status: 'success', version: 1, updatedAt: 2000 });
+
+    const fetched = await request.get(`/api/v1/sync/${ALICE_ACCOUNT_ID}`).set(auth('alice_test_key_1234567890')).expect(200);
+    expect(fetched.body.ciphertext).toBe('cipher-alice');
+  });
+
+  it('lets the legacy key (all accounts) access another key\'s account', async () => {
+    const response = await request.get(`/api/v1/sync/${ALICE_ACCOUNT_ID}`).set(auth('test_secret_key_1234567890')).expect(200);
+
+    expect(response.body.ciphertext).toBe('cipher-alice');
   });
 });

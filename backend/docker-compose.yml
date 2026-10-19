@@ -10,9 +10,13 @@ services:
       - "127.0.0.1:${PORT:-3000}:${PORT:-3000}"
     volumes:
       - ./data:/app/data
+    # Pass the whole .env file through so API_KEY / API_KEY_<NAME> /
+    # API_KEY_<NAME>_ACCOUNTS variables all reach the container (the backend
+    # validates them at startup; see src/common/guards/api-key.registry.ts).
+    env_file:
+      - .env
     environment:
       PORT: ${PORT:-3000}
       DB_PATH: /app/data/sync.db
-      API_KEY: ${API_KEY:?API_KEY must be set in backend/.env}
       LOG_LEVEL: ${LOG_LEVEL:-info}
     restart: unless-stopped
