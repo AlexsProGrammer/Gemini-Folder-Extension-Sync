@@ -8,7 +8,9 @@
         "tabs"
     ],
     "host_permissions": [
-        "https://gemini.google.com/*"
+        "https://gemini.google.com/*",
+        "https://*/*",
+        "http://*/*"
     ],
     "optional_host_permissions": [
         "https://*/*",

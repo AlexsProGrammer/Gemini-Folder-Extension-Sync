@@ -3,13 +3,16 @@ services:
     build:
       context: .
     container_name: gemini-sync-backend
+    # NOTE: the container runs as user "node" (uid/gid 1000). The host ./data
+    # directory is a bind mount, so it must be writable by uid 1000 — otherwise
+    # SQLite fails with "unable to open database file" (SQLITE_CANTOPEN).
     ports:
-      - "127.0.0.1:3000:3000"
+      - "127.0.0.1:${PORT:-3000}:${PORT:-3000}"
     volumes:
       - ./data:/app/data
     environment:
-      PORT: 3000
+      PORT: ${PORT:-3000}
       DB_PATH: /app/data/sync.db
-      API_KEY: ${API_KEY:-test_secret_key_1234567890}
+      API_KEY: ${API_KEY:?API_KEY must be set in backend/.env}
       LOG_LEVEL: ${LOG_LEVEL:-info}
     restart: unless-stopped

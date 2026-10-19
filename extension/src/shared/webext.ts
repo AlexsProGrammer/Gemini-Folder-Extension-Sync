@@ -14,6 +14,10 @@ type WebextApi = {
     onMessage: { addListener: AnyFn };
     lastError?: { message?: string } | null;
   };
+  permissions?: {
+    contains: AnyFn;
+    request: AnyFn;
+  };
   tabs?: unknown;
 };
 
@@ -194,4 +198,42 @@ export async function storageLocalClear(): Promise<void> {
 export function runtimeLastErrorMessage(): string | null {
   const error = globalApi.chrome?.runtime?.lastError ?? globalApi.browser?.runtime?.lastError;
   return error?.message || null;
+}
+
+/**
+ * Checks whether the extension already has host permission for the given
+ * origins (e.g. `["https://sync.example.com/*"]`).
+ *
+ * Returns `null` when the permissions API is not available in the current
+ * context (Firefox does not expose `browser.permissions` to content scripts).
+ * Callers should treat `null` as "cannot ask here" and rely on the
+ * statically-declared `host_permissions` instead.
+ */
+export async function permissionsContains(origins: string[]): Promise<boolean | null> {
+  const api = await resolveApi();
+  const permissions = api.permissions;
+  if (!permissions || typeof permissions.contains !== 'function') {
+    console.warn('[gemini-projects] permissions API unavailable; cannot check host permission.');
+    return null;
+  }
+  const granted = await invokeCompat<boolean>(permissions.contains.bind(permissions), [origins]);
+  return Boolean(granted);
+}
+
+/**
+ * Requests host permission for the given origins. Must be called from within
+ * a user gesture (e.g. a button click handler).
+ *
+ * Returns `true` when granted, `false` when denied, and `null` when the
+ * permissions API is not available in the current context.
+ */
+export async function permissionsRequest(origins: string[]): Promise<boolean | null> {
+  const api = await resolveApi();
+  const permissions = api.permissions;
+  if (!permissions || typeof permissions.request !== 'function') {
+    console.warn('[gemini-projects] permissions API unavailable; cannot request host permission.');
+    return null;
+  }
+  const granted = await invokeCompat<boolean>(permissions.request.bind(permissions), [origins]);
+  return Boolean(granted);
 }

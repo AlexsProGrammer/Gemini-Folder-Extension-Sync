@@ -1,4 +1,4 @@
-import { requestRemotePull } from '../../../shared/syncClient';
+import { ensureServerHostPermission, requestRemotePull } from '../../../shared/syncClient';
 import { syncEngine } from '../../../shared/syncEngine';
 import { getFeatureSettings, getSyncSettings, saveFeatureSettings, saveSyncSettings } from '../../../shared/storage';
 import type { SyncSettings } from '../../../shared/types';
@@ -607,6 +607,11 @@ export function openSettingsModal(activeAccountId: string, activeAccountLabel: s
     testButton.textContent = 'Testing…';
     showTestResult('', '');
     try {
+      const permission = await ensureServerHostPermission(serverUrl);
+      if (!permission.granted) {
+        showTestResult('Host access to the sync server was denied. Grant it to test the connection.', 'error');
+        return;
+      }
       const response = await requestRemotePull({ serverUrl, apiKey }, PROBE_ACCOUNT_ID);
       if (response.success) {
         showTestResult('Connection OK.', 'ok');
@@ -642,6 +647,12 @@ export function openSettingsModal(activeAccountId: string, activeAccountLabel: s
     }
     if (!passphrase) {
       setSyncError('Enter an encryption passphrase.');
+      return;
+    }
+
+    const permission = await ensureServerHostPermission(serverUrl);
+    if (!permission.granted) {
+      setSyncError('Host access to the sync server was denied. Grant it to enable sync.');
       return;
     }
 

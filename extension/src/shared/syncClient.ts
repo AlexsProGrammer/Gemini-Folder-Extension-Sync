@@ -8,7 +8,7 @@ import type {
   SyncPullMessage,
   SyncPushMessage
 } from './types';
-import { errorMessage, runtimeSendMessage } from './webext';
+import { errorMessage, permissionsContains, permissionsRequest, runtimeSendMessage } from './webext';
 
 /**
  * Client-side bridge to the background CORS proxy. Content scripts never
@@ -23,6 +23,47 @@ function transportFailure(error: unknown): SyncApiResponse<never> {
     error: 'network_error',
     message: errorMessage(error)
   };
+}
+
+export type HostPermissionResult =
+  | { granted: true; requested: false }
+  | { granted: true; requested: true }
+  | { granted: true; unavailable: true }
+  | { granted: false; requested: true };
+
+/**
+ * Ensures the extension holds host permission for the given server URL's
+ * origin. MV3 does not grant `optional_host_permissions` automatically, and a
+ * cross-origin fetch from the background script without that permission fails
+ * with a browser-level `NetworkError`. This must be called from a user gesture
+ * (button click). The permission, once granted, persists for the extension.
+ *
+ * Firefox does not expose the permissions API to content scripts; there the
+ * static `host_permissions` in the manifest already cover every server origin,
+ * so an unavailable API is treated as granted rather than denied.
+ */
+export async function ensureServerHostPermission(serverUrl: string): Promise<HostPermissionResult> {
+  let origin: string;
+  try {
+    origin = new URL(serverUrl.trim()).origin;
+  } catch {
+    return { granted: true, requested: false };
+  }
+  const origins = [`${origin}/*`];
+  const contains = await permissionsContains(origins);
+  if (contains === null) {
+    // Permissions API unavailable in this context (Firefox content script):
+    // the manifest's static host_permissions are authoritative, so proceed.
+    return { granted: true, unavailable: true };
+  }
+  if (contains) {
+    return { granted: true, requested: false };
+  }
+  const granted = await permissionsRequest(origins);
+  if (granted === null) {
+    return { granted: true, unavailable: true };
+  }
+  return { granted, requested: true };
 }
 
 export async function requestRemotePull(
