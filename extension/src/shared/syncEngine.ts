@@ -4,6 +4,8 @@ import {
   deriveWorkspaceKey
 } from './crypto';
 import {
+  debugLog,
+  debugWarn,
   getSyncConfig,
   getWorkspace,
   hasWorkspace,
@@ -195,32 +197,40 @@ export class SyncEngine {
   private async runPush(accountHash: string): Promise<void> {
     const key = this.keys.get(accountHash);
     if (!key) {
+      debugWarn('runPush: no key in memory; push aborted (status=idle). Passphrase not unlocked for', accountHash.slice(0, 8));
       this.setStatus(accountHash, 'idle', 'No passphrase available; push aborted.');
       return;
     }
     if (!this.online) {
+      debugWarn('runPush: offline; push aborted');
       this.setStatus(accountHash, 'offline');
       return;
     }
 
     const config = await getSyncConfig();
     if (!config) {
+      debugWarn('runPush: no sync config; push aborted');
       this.setStatus(accountHash, 'idle', 'Sync is not configured.');
       return;
     }
 
     this.setStatus(accountHash, 'syncing');
+    debugLog(
+      `runPush: starting push (account: ${accountHash.slice(0, 8)}…, endpoint: ${config.serverUrl}, apiKey len: ${config.apiKey.length}, apiKey…${config.apiKey.slice(-4)})`
+    );
 
     try {
       const localState = await getWorkspace(accountHash);
       const { ciphertext, iv } = await encryptWorkspace(localState, key);
 
+      debugLog(`runPush: sending payload (version: ${localState.version}, updatedAt: ${localState.updatedAt})`);
       const response = await requestRemotePush(config, accountHash, {
         version: localState.version,
         ciphertext,
         iv,
         updatedAt: localState.updatedAt
       });
+      debugLog('runPush: response received:', JSON.stringify(response));
 
       if (response.success) {
         this.setStatus(accountHash, 'synced');
@@ -228,6 +238,7 @@ export class SyncEngine {
       }
 
       if (response.error === 'conflict' && response.serverState) {
+        debugWarn('runPush: conflict detected; server state is newer');
         try {
           const remoteState = await decryptWorkspace(
             response.serverState.ciphertext,
@@ -242,9 +253,14 @@ export class SyncEngine {
         return;
       }
 
+      debugWarn('runPush: push failed with error:', response.error, response.message);
+      if (response.error === 'unauthorized') {
+        this.setStatus(accountHash, 'error', 'Invalid API key (401). Re-enter your key in sync settings.');
+        return;
+      }
       this.setStatus(accountHash, 'error', response.message ?? `Push failed (${response.error}).`);
     } catch (error) {
-      console.warn('[gemini-projects] push failed', error);
+      debugWarn('runPush: push failed (exception)', error);
       this.setStatus(
         accountHash,
         this.online ? 'error' : 'offline',
@@ -284,20 +300,31 @@ export class SyncEngine {
       this.setStatus(accountHash, 'idle', 'Sync is not configured.');
       return;
     }
+    debugLog(
+      `runPull: using config (account: ${accountHash.slice(0, 8)}…, endpoint: ${config.serverUrl}, apiKey len: ${config.apiKey.length}, apiKey…${config.apiKey.slice(-4)})`
+    );
 
     this.setStatus(accountHash, 'syncing');
 
     try {
       const response = await requestRemotePull(config, accountHash);
+      debugLog('runPull: response received:', JSON.stringify(response));
 
       if (!response.success) {
         if (response.error === 'not_found') {
           // Server has no state yet: seed it from the local workspace.
-          if (await hasWorkspace(accountHash)) {
+          const localExists = await hasWorkspace(accountHash);
+          debugLog(`runPull: 404 not_found; local workspace exists: ${localExists}. ${localExists ? 'Scheduling initial push (seed).' : 'Nothing to seed.'}`);
+          if (localExists) {
             this.schedulePush(accountHash);
           } else {
             this.setStatus(accountHash, 'synced');
           }
+          return;
+        }
+        debugWarn('runPull: pull failed:', response.error, response.message);
+        if (response.error === 'unauthorized') {
+          this.setStatus(accountHash, 'error', 'Invalid API key (401). Re-enter your key in sync settings.');
           return;
         }
         this.setStatus(accountHash, 'error', response.message ?? `Pull failed (${response.error}).`);
@@ -306,14 +333,17 @@ export class SyncEngine {
 
       const key = this.keys.get(accountHash);
       if (!key) {
+        debugWarn('runPull: no key in memory; pull aborted');
         this.setStatus(accountHash, 'idle', 'No passphrase available; pull aborted.');
         return;
       }
 
       const remoteState = await decryptWorkspace(response.data.ciphertext, response.data.iv, key);
       const localState = await getWorkspace(accountHash);
+      debugLog(`runPull: version comparison — remote: ${remoteState.version}, local: ${localState.version}`);
 
       if (remoteState.version > localState.version) {
+        debugLog('runPull: remote is newer; adopting remote state');
         await putWorkspace(accountHash, remoteState);
         dispatchWindowEvent(WORKSPACE_UPDATED_EVENT, { accountId: accountHash });
         this.setStatus(accountHash, 'synced');
@@ -321,13 +351,15 @@ export class SyncEngine {
       }
 
       if (localState.version > remoteState.version) {
+        debugLog('runPull: local is newer; scheduling push');
         this.schedulePush(accountHash);
         return;
       }
 
+      debugLog('runPull: versions in sync');
       this.setStatus(accountHash, 'synced');
     } catch (error) {
-      console.warn('[gemini-projects] pull failed', error);
+      debugWarn('runPull: pull failed (exception)', error);
       this.setStatus(
         accountHash,
         this.online ? 'error' : 'offline',

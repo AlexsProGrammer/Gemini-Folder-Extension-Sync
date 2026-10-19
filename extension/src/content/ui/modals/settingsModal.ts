@@ -6,7 +6,14 @@ import { exportAllData, triggerImport } from '../../../shared/backup';
 import { errorMessage, storageLocalClear } from '../../../shared/webext';
 
 const ROOT_ID = 'gp-settings-root';
-const PROBE_ACCOUNT_ID = 'probe';
+/**
+ * Probe account for the connection test. MUST be 64 lowercase hex chars so the
+ * request passes nginx's edge path filter (`^/api/v1/sync/[0-9a-f]{64}$`) —
+ * with a short placeholder the edge returns 404 regardless of the API key and
+ * the test could never detect an invalid key. This hash will never exist on
+ * the server, so a passing key yields 404 → "reachable, no data".
+ */
+const PROBE_ACCOUNT_ID = '0'.repeat(64);
 
 const CLOSE_ICON = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>';
 const EYE_ICON = '<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7-10-7-10-7Z"/><circle cx="12" cy="12" r="3"/></svg>';
@@ -446,6 +453,7 @@ export function openSettingsModal(activeAccountId: string, activeAccountLabel: s
 
   const autoInstructionsToggle = root.querySelector<HTMLInputElement>('[data-gp-feature-auto-instructions]')!;
   const instructionsButtonToggle = root.querySelector<HTMLInputElement>('[data-gp-feature-instructions-button]')!;
+  const debugLoggingToggle = root.querySelector<HTMLInputElement>('[data-gp-feature-debug-logging]')!;
 
   let currentSettings: SyncSettings = {
     serverUrl: '',
@@ -564,16 +572,19 @@ export function openSettingsModal(activeAccountId: string, activeAccountLabel: s
   const persistFeatureSettings = () => {
     saveFeatureSettings({
       autoApplyProjectInstructions: autoInstructionsToggle.checked,
-      showInstructionsButton: instructionsButtonToggle.checked
+      showInstructionsButton: instructionsButtonToggle.checked,
+      debugLogging: debugLoggingToggle.checked
     }).catch((error) => console.warn('[gemini-projects] feature settings save failed', error));
   };
   autoInstructionsToggle.addEventListener('change', persistFeatureSettings);
   instructionsButtonToggle.addEventListener('change', persistFeatureSettings);
+  debugLoggingToggle.addEventListener('change', persistFeatureSettings);
 
   void getFeatureSettings()
     .then((featureSettings) => {
       autoInstructionsToggle.checked = featureSettings.autoApplyProjectInstructions;
       instructionsButtonToggle.checked = featureSettings.showInstructionsButton;
+      debugLoggingToggle.checked = featureSettings.debugLogging;
     })
     .catch(() => undefined);
 
@@ -827,6 +838,18 @@ function buildMarkup(activeAccountLabel: string): string {
             <p class="gp-sync-hint">
               The button only appears in projects (and their subfolders) that have a system prompt or
               notes configured, and adds them to the chat input on demand.
+            </p>
+          </div>
+
+          <div class="gp-sync-section">
+            <div class="gp-sync-section-title">Diagnostics</div>
+            <label class="gp-sync-check-row">
+              <input type="checkbox" data-gp-feature-debug-logging />
+              <span>Enable debug logging (verbose [sync-debug] messages in the console)</span>
+            </label>
+            <p class="gp-sync-hint">
+              Prints detailed sync diagnostics (connection, encryption, version comparisons) to the
+              browser console. Leave off for normal use; useful only when troubleshooting sync issues.
             </p>
           </div>
 

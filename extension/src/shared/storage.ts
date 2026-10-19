@@ -386,17 +386,33 @@ export function onWorkspaceSaved(listener: WorkspaceSavedListener): () => void {
 export const SYNC_CONFIG_KEY = 'gemini_sync_config';
 
 export async function getSyncConfig(): Promise<SyncConfig | null> {
-  const result = await storageLocalGet<Record<string, unknown>>([SYNC_CONFIG_KEY, SYNC_SETTINGS_KEY]);
+  const result = await storageLocalGet<Record<string, unknown>>([SYNC_SETTINGS_KEY, SYNC_CONFIG_KEY]);
+  const fromSettings = normalizeSyncConfig(result[SYNC_SETTINGS_KEY]);
+  if (fromSettings) return fromSettings;
+
+  // Fall back to the legacy pre-settings config key — but migrate it forward
+  // immediately so a stale legacy entry can never shadow the user's newer
+  // settings again (this shadowing caused persistent 401s after re-saving).
   const legacy = normalizeSyncConfig(result[SYNC_CONFIG_KEY]);
-  if (legacy) return legacy;
-  return normalizeSyncConfig(result[SYNC_SETTINGS_KEY]);
+  if (!legacy) return null;
+
+  const settingsRaw = result[SYNC_SETTINGS_KEY];
+  if (settingsRaw && typeof settingsRaw === 'object') {
+    await saveSyncSettings({
+      ...(settingsRaw as Partial<SyncSettings>),
+      ...legacy
+    } as SyncSettings);
+  } else {
+    await saveSyncSettings({ ...createDefaultSyncSettings(), ...legacy });
+  }
+  return legacy;
 }
 
 function normalizeSyncConfig(raw: unknown): SyncConfig | null {
   if (!raw || typeof raw !== 'object') return null;
   const candidate = raw as Partial<SyncConfig>;
   const serverUrl = typeof candidate.serverUrl === 'string' ? candidate.serverUrl.trim().replace(/\/+$/, '') : '';
-  const apiKey = typeof candidate.apiKey === 'string' ? candidate.apiKey : '';
+  const apiKey = typeof candidate.apiKey === 'string' ? candidate.apiKey.trim() : '';
   if (!serverUrl || !apiKey) return null;
   return { serverUrl, apiKey };
 }
@@ -472,10 +488,12 @@ export interface FeatureSettings {
   autoApplyProjectInstructions: boolean;
   /** Show the manual "Add instructions" header button in project chats. */
   showInstructionsButton: boolean;
+  /** Print [sync-debug] diagnostics to the console (default: off). */
+  debugLogging: boolean;
 }
 
 export function createDefaultFeatureSettings(): FeatureSettings {
-  return { autoApplyProjectInstructions: true, showInstructionsButton: false };
+  return { autoApplyProjectInstructions: true, showInstructionsButton: false, debugLogging: false };
 }
 
 export async function getFeatureSettings(): Promise<FeatureSettings> {
@@ -485,19 +503,69 @@ export async function getFeatureSettings(): Promise<FeatureSettings> {
   const candidate = raw as Partial<FeatureSettings>;
   return {
     autoApplyProjectInstructions: candidate.autoApplyProjectInstructions !== false,
-    showInstructionsButton: candidate.showInstructionsButton === true
+    showInstructionsButton: candidate.showInstructionsButton === true,
+    debugLogging: candidate.debugLogging === true
   };
 }
 
 export async function saveFeatureSettings(settings: FeatureSettings): Promise<void> {
   const normalized: FeatureSettings = {
     autoApplyProjectInstructions: settings.autoApplyProjectInstructions === true,
-    showInstructionsButton: settings.showInstructionsButton === true
+    showInstructionsButton: settings.showInstructionsButton === true,
+    debugLogging: settings.debugLogging === true
   };
   await storageLocalSet({ [FEATURE_SETTINGS_KEY]: normalized });
+  setDebugLoggingEnabled(normalized.debugLogging);
   if (typeof window !== 'undefined') {
     window.dispatchEvent(new CustomEvent(FEATURE_SETTINGS_CHANGED_EVENT, { detail: normalized }));
   }
+}
+
+/* ------------------------------------------------------------------ *
+ * Debug logging gate: every [sync-debug] console statement in the
+ * extension runs through these helpers and stays silent unless the
+ * user enabled the debug checkbox in the settings dialog.
+ * ------------------------------------------------------------------ */
+
+let debugLoggingEnabled = false;
+
+export function setDebugLoggingEnabled(value: boolean): void {
+  debugLoggingEnabled = value;
+}
+
+export function isDebugLoggingEnabled(): boolean {
+  return debugLoggingEnabled;
+}
+
+/** Console.log behind the debug checkbox. */
+export function debugLog(...args: unknown[]): void {
+  if (debugLoggingEnabled) console.log('[sync-debug]', ...args);
+}
+
+/** Console.warn behind the debug checkbox. */
+export function debugWarn(...args: unknown[]): void {
+  if (debugLoggingEnabled) console.warn('[sync-debug]', ...args);
+}
+
+/**
+ * Loads the debug flag from persisted feature settings (and keeps it live on
+ * changes). Called once during content-script bootstrap so the gate reflects
+ * the checkbox state without waiting for the settings dialog to be opened.
+ */
+export async function initDebugLoggingFlag(): Promise<void> {
+  try {
+    const settings = await getFeatureSettings();
+    setDebugLoggingEnabled(settings.debugLogging);
+  } catch {
+    // Storage unavailable (e.g. during extension reload): keep current state.
+  }
+}
+
+if (typeof window !== 'undefined') {
+  window.addEventListener(FEATURE_SETTINGS_CHANGED_EVENT, (event) => {
+    const detail = (event as CustomEvent).detail as Partial<FeatureSettings> | undefined;
+    setDebugLoggingEnabled(detail?.debugLogging === true);
+  });
 }
 
 function nextSiblingOrder(workspace: WorkspacePayload, parentId: string | null): number {

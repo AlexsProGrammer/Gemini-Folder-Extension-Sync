@@ -1,5 +1,6 @@
 import { WorkspacePayload } from './types';
 import { parseWorkspace } from './schemas';
+import { debugLog } from './storage';
 
 /**
  * OWASP-aligned PBKDF2 budget: 310,000 SHA-256 iterations resist offline
@@ -54,6 +55,7 @@ function base64ToBytes(value: string): Uint8Array {
 export async function deriveWorkspaceKey(passphrase: string, saltHex: string): Promise<CryptoKey> {
   const subtle = getSubtle();
   const encoder = new TextEncoder();
+  debugLog(`deriveWorkspaceKey: attempt (salt length: ${saltHex?.length ?? 'invalid'}, passphrase present: ${passphrase?.length > 0})`);
 
   const baseKey = await subtle.importKey(
     'raw',
@@ -90,11 +92,17 @@ export async function encryptWorkspace(
   const iv = crypto.getRandomValues(new Uint8Array(IV_BYTE_LENGTH));
   const plaintext = new TextEncoder().encode(JSON.stringify(payload)) as unknown as BufferSource;
 
-  const buffer = await subtle.encrypt({ name: 'AES-GCM', iv: iv as unknown as BufferSource }, key, plaintext);
-  return {
-    ciphertext: bytesToBase64(new Uint8Array(buffer)),
-    iv: bytesToBase64(iv)
-  };
+  try {
+    const buffer = await subtle.encrypt({ name: 'AES-GCM', iv: iv as unknown as BufferSource }, key, plaintext);
+    debugLog(`encryptWorkspace: success (payload size: ${plaintext.byteLength} bytes, version: ${payload.version})`);
+    return {
+      ciphertext: bytesToBase64(new Uint8Array(buffer)),
+      iv: bytesToBase64(iv)
+    };
+  } catch (error) {
+    console.error('[gemini-projects] encryptWorkspace failed', error);
+    throw error;
+  }
 }
 
 /**
@@ -109,15 +117,21 @@ export async function decryptWorkspace(
   key: CryptoKey
 ): Promise<WorkspacePayload> {
   const subtle = getSubtle();
-  const buffer = await subtle.decrypt(
-    { name: 'AES-GCM', iv: base64ToBytes(ivB64) as unknown as BufferSource },
-    key,
-    base64ToBytes(ciphertextB64) as unknown as BufferSource
-  );
+  try {
+    const buffer = await subtle.decrypt(
+      { name: 'AES-GCM', iv: base64ToBytes(ivB64) as unknown as BufferSource },
+      key,
+      base64ToBytes(ciphertextB64) as unknown as BufferSource
+    );
 
-  const json = new TextDecoder().decode(buffer);
-  const raw = JSON.parse(json) as unknown;
-  return parseWorkspace(raw);
+    const json = new TextDecoder().decode(buffer);
+    const raw = JSON.parse(json) as unknown;
+    debugLog('decryptWorkspace: success (payload decrypted and validated)');
+    return parseWorkspace(raw);
+  } catch (error) {
+    console.error('[gemini-projects] decryptWorkspace failed (wrong passphrase, corrupted payload, or schema mismatch)', error);
+    throw error;
+  }
 }
 
 /**

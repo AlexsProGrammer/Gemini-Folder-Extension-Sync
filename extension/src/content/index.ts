@@ -6,6 +6,7 @@ import {
   FEATURE_SETTINGS_CHANGED_EVENT,
   getFeatureSettings,
   getWorkspace,
+  initDebugLoggingFlag,
   moveWorkspaceChat,
   onWorkspaceSaved,
   setWorkspaceChatPinned,
@@ -215,6 +216,9 @@ function refreshSyncStatusBadge(): void {
 async function bootstrap() {
   document.documentElement.setAttribute('data-gp-build', BUILD_MARKER);
   console.info('[gemini-projects] build', BUILD_MARKER);
+  // Load the debug-logging gate from persisted settings before any sync
+  // activity can run, so [sync-debug] output matches the checkbox state.
+  void initDebugLoggingFlag();
 
   if (window.location.hostname.includes('chatgpt.com') || window.location.hostname.includes('openai.com')) {
     initChatGPT();
