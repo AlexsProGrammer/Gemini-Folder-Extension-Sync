@@ -1,7 +1,7 @@
 ﻿import { ChatRef, Project, ProjectIcon, RuntimeState, SyncStatus, WorkspacePayload } from '../../shared/types';
 import { resolveAccountRawIdentifier } from '../../shared/account';
 import { getActiveAccountHash } from '../accountWatcher';
-import { getWorkspace, saveWorkspace } from '../../shared/storage';
+import { getWorkspace, saveWorkspace, getSyncConfig } from '../../shared/storage';
 import { SYNC_CONFLICT_EVENT, syncEngine } from '../../shared/syncEngine';
 import {
   ICON_OPTIONS,
@@ -14,7 +14,7 @@ import {
   renderIconSvg
 } from './icons';
 import { PANEL_TITLE_FONT_STACK, PANEL_TITLE_TYPOGRAPHY } from './typography';
-import { createPromptsBadge, createSettingsBadge } from './headerBadges';
+import { createPromptsBadge, createSettingsBadge, createSyncNowBadge, type SyncNowBadgeElement } from './headerBadges';
 import { openSettingsModal } from './modals/settingsModal';
 import { openConflictModal } from './modals/conflictModal';
 import { createWorkspaceDrawer, WorkspaceDrawerHandle } from './workspaceDrawer';
@@ -159,6 +159,26 @@ export function createProjectsPanel(options: ProjectsPanelOptions) {
     : 'unconfigured';
   const settingsBadge = createSettingsBadge(openSettings, lastSyncStatus === 'unconfigured' ? initialSyncStatus : lastSyncStatus);
 
+  // Manual sync badge: icon-only button beside settings that runs an immediate
+  // pull + push for the active account. Toasts on successful completion.
+  let manualSyncInFlight = false;
+  const syncNowBadge = createSyncNowBadge(() => {
+    const accountHash = getActiveAccountHash();
+    if (!accountHash) return;
+    manualSyncInFlight = true;
+    syncNowBadge.setSyncing(true);
+    void syncEngine.pull(accountHash).catch((error) => console.warn('[gemini-projects] manual pull failed', error));
+    syncEngine.schedulePush(accountHash);
+  }) as SyncNowBadgeElement;
+  syncNowBadge.classList.toggle('syncing', lastSyncStatus === 'syncing');
+  // Hide the sync-now button until a server URL and API key are configured.
+  syncNowBadge.style.display = 'none';
+  void getSyncConfig().then((config) => {
+    if (config && config.serverUrl && config.apiKey) {
+      syncNowBadge.style.display = '';
+    }
+  }).catch(() => undefined);
+
   // Prompt library badge: opens the shared prompt picker anchored to the
   // badge; the count chip tracks the active account's saved prompts.
   const promptsBadge = createPromptsBadge(() => {
@@ -171,6 +191,23 @@ export function createProjectsPanel(options: ProjectsPanelOptions) {
   function updateSyncStatus(status: SyncStatus): void {
     lastSyncStatus = status;
     settingsBadge.updateStatus(status);
+    if (status === 'syncing') {
+      syncNowBadge.setSyncing(true);
+    } else {
+      if (manualSyncInFlight && status === 'synced') {
+        manualSyncInFlight = false;
+        showToast('Workspace synced successfully');
+      } else if (status !== 'synced') {
+        // A failed/offline/conflict terminal state also ends the manual run.
+        manualSyncInFlight = false;
+      }
+      syncNowBadge.setSyncing(false);
+    }
+    // Any live sync activity implies a server URL + API key are configured;
+    // reveal the manual sync button if it was hidden for lack of config.
+    if (status !== 'idle' && status !== 'unconfigured') {
+      syncNowBadge.style.display = '';
+    }
   }
 
   if (!syncConflictListenerAttached) {
@@ -224,6 +261,7 @@ export function createProjectsPanel(options: ProjectsPanelOptions) {
     const syncHeader = panelRoot.querySelector<HTMLElement>('[data-gp-sync-header]');
     if (syncHeader && syncHeader !== settingsBadge.parentElement) {
       syncHeader.appendChild(promptsBadge);
+      syncHeader.appendChild(syncNowBadge);
       syncHeader.appendChild(settingsBadge);
     }
     attachPanelEvents(state);
@@ -1359,6 +1397,20 @@ function ensurePanelRoot(shadow: ShadowRoot): HTMLElement {
       .gp-settings-badge:hover {
         background: var(--gp-bg-hover);
         color: var(--gp-fg);
+      }
+
+      .gp-syncnow-badge .gp-sync-icon svg {
+        will-change: transform;
+      }
+
+      .gp-syncnow-badge.syncing .gp-sync-icon svg {
+        animation: gp-syncnow-spin 1s linear infinite;
+        transform-origin: 50% 50%;
+      }
+
+      @keyframes gp-syncnow-spin {
+        from { transform: rotate(0deg); }
+        to { transform: rotate(360deg); }
       }
 
       .gp-settings-badge .gp-sync-icon {

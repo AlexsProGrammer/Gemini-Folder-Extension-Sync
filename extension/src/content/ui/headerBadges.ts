@@ -1,5 +1,5 @@
 import { SyncStatus } from '../../shared/types';
-import { libraryIcon, settingsGearIcon } from './icons';
+import { libraryIcon, settingsGearIcon, refreshIcon } from './icons';
 
 export type PromptsBadgeElement = HTMLElement & {
   updateCount: (count: number) => void;
@@ -65,6 +65,46 @@ export function createSettingsBadge(
   apply(initialStatus);
 
   return Object.assign(badge, { updateStatus: apply });
+}
+
+export type SyncNowBadgeElement = HTMLElement & {
+  setSyncing: (syncing: boolean) => void;
+};
+
+/**
+ * Icon-only sync-now badge placed beside the settings badge. Triggers an
+ * immediate manual sync (pull + push) for the active account; the icon spins
+ * while a sync is in flight. The spin is driven by a CSS animation on a
+ * dedicated class so it restarts cleanly on each manual sync instead of
+ * fighting the transition on the base icon.
+ */
+export function createSyncNowBadge(onClick: () => void): SyncNowBadgeElement {
+  const badge = document.createElement('button');
+  badge.type = 'button';
+  badge.className = 'gp-settings-badge gp-syncnow-badge';
+  badge.title = 'Sync now';
+  badge.setAttribute('aria-label', 'Sync now');
+  badge.innerHTML = `
+    <span class="gp-sync-icon" aria-hidden="true">${refreshIcon(16)}</span>
+  `;
+  badge.addEventListener('click', (event) => {
+    event.preventDefault();
+    event.stopPropagation();
+    onClick();
+  });
+
+  function setSyncing(syncing: boolean): void {
+    if (syncing) {
+      // Force-restart the animation from 0deg each time a sync begins.
+      badge.classList.remove('syncing');
+      void badge.offsetWidth; // reflow to reset the CSS animation
+      badge.classList.add('syncing');
+    } else {
+      badge.classList.remove('syncing');
+    }
+  }
+
+  return Object.assign(badge, { setSyncing });
 }
 
 /** Header pill opening the prompt library (icon, label and a count chip). */
