@@ -9,6 +9,7 @@ import {
 import { getRawIdentifierForHash } from './account';
 import { isLocalVaultEnvelope, openWorkspaceEnvelope, type LocalVaultEnvelope } from './vault';
 import { WorkspacePayload } from './types';
+import { promptFingerprint } from './promptFingerprint';
 import { errorMessage, errorName, storageLocalGet, storageLocalSet } from './webext';
 import { getWorkspace, saveWorkspace } from './storage';
 
@@ -110,10 +111,18 @@ function mergeWorkspaces(existing: WorkspacePayload, imported: WorkspacePayload)
     if (!projects[id]) projects[id] = project;
   });
 
-  const existingPromptIds = new Set(existing.prompts.map((prompt) => prompt.id));
+  // Skip prompts the live workspace already has: matched by UUID or by
+  // fingerprint (title + content hash) so a copy created on another device
+  // with a different UUID does not duplicate the library on restore.
+  const existingPromptFingerprints = new Set(existing.prompts.map(promptFingerprint));
   const prompts = [
     ...existing.prompts,
-    ...imported.prompts.filter((prompt) => !existingPromptIds.has(prompt.id))
+    ...imported.prompts.filter((prompt) => {
+      const fingerprint = promptFingerprint(prompt);
+      if (existingPromptFingerprints.has(fingerprint)) return false;
+      existingPromptFingerprints.add(fingerprint);
+      return true;
+    })
   ];
 
   const tagMeta = { ...(existing.tagMeta ?? {}) };

@@ -13,6 +13,7 @@ import {
   WORKSPACE_SCHEMA_VERSION
 } from './storage';
 import { requestRemotePull, requestRemotePush } from './syncClient';
+import { promptFingerprint } from './promptFingerprint';
 import { errorMessage } from './webext';
 import type {
   ChatRef,
@@ -50,13 +51,37 @@ function mergePromptLibraries(
   localPrompts: PromptTemplate[],
   remotePrompts: PromptTemplate[]
 ): PromptTemplate[] {
-  const merged = new Map<string, PromptTemplate>();
-  remotePrompts.forEach((prompt) => merged.set(prompt.id, prompt));
+  // Phase 1: merge by id (same prompt synced between devices), newest wins.
+  const byId = new Map<string, PromptTemplate>();
+  remotePrompts.forEach((prompt) => byId.set(prompt.id, prompt));
   localPrompts.forEach((prompt) => {
-    const existing = merged.get(prompt.id);
-    merged.set(prompt.id, existing ? newerPrompt(prompt, existing) : prompt);
+    const existing = byId.get(prompt.id);
+    byId.set(prompt.id, existing ? newerPrompt(existing, prompt) : prompt);
   });
-  return Array.from(merged.values());
+
+  // Phase 2: collapse content duplicates. The same prompt created
+  // independently on two devices carries different UUIDs, so both survive the
+  // id merge. The fingerprint (title + content hash) identifies them; keep
+  // the newest revision and drop the loser's id from the result.
+  const kept = new Map<string, PromptTemplate>();
+  const fingerprints = new Map<string, string>();
+  byId.forEach((prompt) => {
+    const fingerprint = promptFingerprint(prompt);
+    const keptId = fingerprints.get(fingerprint);
+    if (keptId === undefined) {
+      kept.set(prompt.id, prompt);
+      fingerprints.set(fingerprint, prompt.id);
+      return;
+    }
+    const winner = newerPrompt(kept.get(keptId)!, prompt);
+    if (winner.id !== keptId) {
+      kept.delete(keptId);
+      kept.set(winner.id, winner);
+      fingerprints.set(fingerprint, winner.id);
+    }
+    // winner.id === keptId: the entry is already stored under its own id.
+  });
+  return Array.from(kept.values());
 }
 
 /** Newest revision wins per conversation; assignments travel with the chat. */
