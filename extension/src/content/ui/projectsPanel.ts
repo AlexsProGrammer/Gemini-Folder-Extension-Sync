@@ -2570,6 +2570,18 @@ function createModal(layer: HTMLElement) {
   `;
   layer.appendChild(backdrop);
 
+  backdrop.addEventListener('keydown', (event) => {
+    if (event.key !== 'Enter') return;
+    const target = event.target as HTMLElement | null;
+    if (target && target.closest('[data-gp-name-input]')) {
+      event.preventDefault();
+      const confirm = backdrop.querySelector<HTMLButtonElement>('[data-gp-action="confirm"]');
+      if (confirm && !confirm.disabled) {
+        confirm.click();
+      }
+    }
+  });
+
   function open(config: {
     title: string;
     confirmLabel: string;
