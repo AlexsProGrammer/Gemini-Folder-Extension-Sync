@@ -192,7 +192,19 @@ export interface SyncPushMessage {
   data: EncryptedSyncEnvelope;
 }
 
-export type SyncMessage = SyncPullMessage | SyncPushMessage;
+export type SyncMessage = SyncPullMessage | SyncPushMessage | SyncPermissionMessage;
+
+/** Ask the background worker (which owns the permissions API) to grant host access for a custom sync server origin. */
+export interface SyncPermissionMessage {
+  action: 'SYNC_ENSURE_PERMISSION';
+  origin: string;
+}
+
+export type SyncPermissionResult =
+  | { granted: true; requested: false }
+  | { granted: true; requested: true }
+  | { granted: false }
+  | { granted: false; error: string };
 
 export type SyncErrorKind = 'unauthorized' | 'not_found' | 'conflict' | 'network_error';
 

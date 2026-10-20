@@ -674,7 +674,9 @@ export function openSettingsModal(activeAccountId: string, activeAccountLabel: s
     try {
       const permission = await ensureServerHostPermission(serverUrl);
       if (!permission.granted) {
-        showTestResult('Host access to the sync server was denied. Grant it to test the connection.', 'error');
+        const detail = permission.error ? ` (${permission.error})` : '';
+        console.warn('[gemini-projects] sync host permission not granted.', detail, 'Fix: about:addons → "Synced Projects for Gemini" → Permissions → enable access for', serverUrl);
+        showTestResult(`Host access to the sync server was denied. Enable it under about:addons → this extension → Permissions.${detail}`, 'error');
         return;
       }
       const response = await requestRemotePull({ serverUrl, apiKey }, PROBE_ACCOUNT_ID);
@@ -717,7 +719,9 @@ export function openSettingsModal(activeAccountId: string, activeAccountLabel: s
 
     const permission = await ensureServerHostPermission(serverUrl);
     if (!permission.granted) {
-      setSyncError('Host access to the sync server was denied. Grant it to enable sync.');
+      const detail = permission.error ? ` (${permission.error})` : '';
+      console.warn('[gemini-projects] sync host permission not granted.', detail, 'Fix: about:addons → "Synced Projects for Gemini" → Permissions → enable access for', serverUrl);
+      setSyncError(`Host access to the sync server was denied. Enable it under about:addons → this extension → Permissions.${detail}`);
       return;
     }
 

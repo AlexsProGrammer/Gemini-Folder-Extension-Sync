@@ -3,6 +3,9 @@ import type {
   RemoteSyncBlob,
   SyncApiResponse,
   SyncMessage,
+  SyncPermissionMessage,
+  SyncPermissionResult,
+  SyncPullMessage,
   SyncPushMessage
 } from './shared/types';
 import { RemoteSyncBlobSchema, SyncConfirmationSchema } from './shared/schemas';
@@ -31,6 +34,11 @@ function isSyncMessage(message: unknown): message is SyncMessage {
   if (!message || typeof message !== 'object') return false;
   const action = (message as { action?: unknown }).action;
   return action === 'SYNC_PULL' || action === 'SYNC_PUSH';
+}
+
+function isPermissionMessage(message: unknown): message is SyncPermissionMessage {
+  if (!message || typeof message !== 'object') return false;
+  return (message as { action?: unknown }).action === 'SYNC_ENSURE_PERMISSION';
 }
 
 function normalizeServerUrl(serverUrl: string): string {
@@ -141,18 +149,61 @@ async function handleSyncPush(message: SyncPushMessage): Promise<SyncHandlerResp
   }
 }
 
-function handleSyncMessage(message: SyncMessage): Promise<SyncHandlerResponse> {
+function handleSyncMessage(message: SyncPullMessage | SyncPushMessage): Promise<SyncHandlerResponse> {
   if (message.action === 'SYNC_PULL') {
     return handleSyncPull(message.accountId, message.serverUrl, message.apiKey);
   }
   return handleSyncPush(message);
 }
 
+async function handleEnsurePermission(message: SyncPermissionMessage): Promise<SyncPermissionResult> {
+  let origin: string;
+  try {
+    origin = new URL(message.origin.trim()).origin;
+  } catch {
+    return { granted: false, error: 'Invalid server URL.' };
+  }
+  const origins = [`${origin}/*`];
+  const api = await webextPermissions();
+  if (!api) {
+    return { granted: false, error: 'Permissions API unavailable.' };
+  }
+  try {
+    if (await api.permissions.contains({ origins })) {
+      return { granted: true, requested: false };
+    }
+    const granted = await api.permissions.request({ origins });
+    if (!granted) console.warn('[gemini-projects] host permission request for', origins[0], 'was denied (no prompt shown or dismissed).');
+    return granted ? { granted: true, requested: true } : { granted: false };
+  } catch (error) {
+    console.warn('[gemini-projects] host permission request threw:', errorMessage(error), '— grant it via about:addons → extension → Permissions tab.');
+    return { granted: false, error: errorMessage(error) };
+  }
+}
+
+/** Resolves browser.permissions from the polyfill/global API, or null. */
+async function webextPermissions(): Promise<{ permissions: { contains: (p: unknown) => Promise<boolean>; request: (p: unknown) => Promise<boolean> } } | null> {
+  const api = (globalThis as { browser?: { permissions?: unknown }; chrome?: { permissions?: unknown } }).browser
+    ?? (globalThis as { chrome?: { permissions?: unknown } }).chrome;
+  const permissions = api?.permissions;
+  if (permissions && typeof (permissions as { contains?: unknown }).contains === 'function'
+    && typeof (permissions as { request?: unknown }).request === 'function') {
+    return { permissions: permissions as { contains: (p: unknown) => Promise<boolean>; request: (p: unknown) => Promise<boolean> } };
+  }
+  return null;
+}
+
 webext.runtime.onMessage.addListener((
   message: SyncMessage,
   _sender: chrome.runtime.MessageSender,
-  sendResponse: (response: SyncApiResponse<unknown>) => void
+  sendResponse: (response: SyncApiResponse<unknown> | SyncPermissionResult) => void
 ) => {
+  if (isPermissionMessage(message)) {
+    handleEnsurePermission(message)
+      .then((result) => sendResponse(result))
+      .catch((error: Error) => sendResponse({ granted: false, error: error.message }));
+    return true;
+  }
   if (!isSyncMessage(message)) return false;
 
   handleSyncMessage(message)

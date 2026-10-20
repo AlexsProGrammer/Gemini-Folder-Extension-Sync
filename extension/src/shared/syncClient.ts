@@ -5,6 +5,8 @@ import type {
   SyncApiResponse,
   SyncConfig,
   SyncMessage,
+  SyncPermissionMessage,
+  SyncPermissionResult,
   SyncPullMessage,
   SyncPushMessage
 } from './types';
@@ -29,18 +31,18 @@ export type HostPermissionResult =
   | { granted: true; requested: false }
   | { granted: true; requested: true }
   | { granted: true; unavailable: true }
-  | { granted: false; requested: true };
+  | { granted: false; requested: true; error?: string };
 
 /**
  * Ensures the extension holds host permission for the given server URL's
  * origin. MV3 does not grant `optional_host_permissions` automatically, and a
  * cross-origin fetch from the background script without that permission fails
  * with a browser-level `NetworkError`. This must be called from a user gesture
- * (button click). The permission, once granted, persists for the extension.
+ * (button click).
  *
- * Firefox does not expose the permissions API to content scripts; there the
- * static `host_permissions` in the manifest already cover every server origin,
- * so an unavailable API is treated as granted rather than denied.
+ * Firefox does not expose the permissions API to content scripts, so the
+ * check/request is proxied to the background worker via `SYNC_ENSURE_PERMISSION`
+ * whenever the API is unavailable locally (Firefox content-script context).
  */
 export async function ensureServerHostPermission(serverUrl: string): Promise<HostPermissionResult> {
   let origin: string;
@@ -53,8 +55,24 @@ export async function ensureServerHostPermission(serverUrl: string): Promise<Hos
   const contains = await permissionsContains(origins);
   if (contains === null) {
     // Permissions API unavailable in this context (Firefox content script):
-    // the manifest's static host_permissions are authoritative, so proceed.
-    return { granted: true, unavailable: true };
+    // ask the background worker, which owns the API, to check and request.
+    try {
+      const result = await runtimeSendMessage<SyncPermissionResult>({
+        action: 'SYNC_ENSURE_PERMISSION',
+        origin
+      });
+      if (result && typeof result === 'object' && 'granted' in result) {
+        if (result.granted) {
+          return { granted: true, requested: true };
+        }
+        const detail = 'error' in result && result.error ? result.error : undefined;
+        if (detail) console.warn('[gemini-projects] sync host permission request failed:', detail);
+        return { granted: false, requested: true, error: detail };
+      }
+      return { granted: true, unavailable: true };
+    } catch {
+      return { granted: true, unavailable: true };
+    }
   }
   if (contains) {
     return { granted: true, requested: false };
