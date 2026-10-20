@@ -1,4 +1,5 @@
 import { ChatRef, Project, RuntimeState, StoredState, SyncStatus } from '../shared/types';
+import { withActiveAccountScope } from '../shared/account';
 import { debugStep, errorMessage, errorName, errorStack, storageLocalGet, storageLocalSet } from '../shared/webext';
 import {
   createDefaultFeatureSettings,
@@ -55,7 +56,7 @@ import { installSidebarInspector } from './sidebarInspector';
 import { CHAT_DRAG_MIME, createProjectsPanel } from './ui/projectsPanel';
 import { initChatGPT } from './chatgpt';
 
-const BUILD_MARKER = '2.0.8-mobile1';
+const BUILD_MARKER = '2.1.1';
 const HIDDEN_ATTR = 'data-gp-native-hidden';
 const RESCAN_DELAY_MS = 350;
 const PANEL_READY_RETRY_MS = 120;
@@ -912,7 +913,7 @@ function syncNativeChatsFromDom() {
 
     const existing = state.chatIndex.get(conversationId);
     const title = normalizeTitle(link.textContent || row.textContent || existing?.title || '');
-    const lastUrl = link.href || existing?.lastUrl || `/app/${conversationId}`;
+    const lastUrl = link.href || existing?.lastUrl || withActiveAccountScope(`/app/${conversationId}`);
     if (!title && existing?.title) continue;
 
     updates.push({
@@ -1200,8 +1201,15 @@ function handleNewChatInProject(projectId: string): void {
 }
 
 function navigateToNewChat(): void {
-  const url = new URL('/app', window.location.origin);
-  if (window.location.href !== url.href) {
+  // A bare `/app` URL drops the `/u/<n>/` account prefix, so Google resolves
+  // it to the browser profile's default account: a full page reload that
+  // switches the active Google account. Gemini's native new-chat button gets
+  // away with href="/app" because it is handled by SPA routing; a hard
+  // navigation must re-apply the account scope of the current page.
+  const url = new URL(withActiveAccountScope('/app'), window.location.origin);
+  // Compare pathnames (not full hrefs) so unrelated query/hash differences do
+  // not trigger a pointless reload when a blank chat is already open.
+  if (window.location.pathname !== url.pathname) {
     window.location.assign(url.href);
   }
 }

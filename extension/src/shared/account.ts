@@ -125,6 +125,40 @@ export function getAccountIndex(): string {
   return match?.[1] ?? '0';
 }
 
+/**
+ * Re-applies the `/u/<index>/` account scope of the page that is currently
+ * rendering to an extension-generated navigation target.
+ *
+ * Gemini serves every signed-in Google account under a `/u/<index>/` URL
+ * prefix. A URL without the prefix is resolved by Google to the browser's
+ * *default* account, so hard-navigating to one (e.g. `window.location.assign`
+ * on a new-chat target) performs a full page reload and silently switches the
+ * active Google account. Gemini's own links avoid this via SPA navigation;
+ * any URL the extension assigns or renders as an href must carry the prefix
+ * of the account the user is currently working in.
+ */
+export function withActiveAccountScope(href: string): string {
+  if (typeof window === 'undefined' || !window.location) return href;
+  const prefix = window.location.pathname.match(ACCOUNT_INDEX_PATTERN)?.[0];
+  if (!prefix) return href;
+
+  if (/^https?:\/\//i.test(href)) {
+    // Absolute URL: only augment same-origin targets that lack a prefix.
+    try {
+      const url = new URL(href);
+      if (url.origin !== window.location.origin) return href;
+      if (ACCOUNT_INDEX_PATTERN.test(url.pathname)) return href;
+      url.pathname = `${prefix}${url.pathname}`;
+      return url.href;
+    } catch {
+      return href;
+    }
+  }
+
+  if (href.startsWith(prefix) || ACCOUNT_INDEX_PATTERN.test(href)) return href;
+  return `${prefix}${href.startsWith('/') ? '' : '/'}${href}`;
+}
+
 function extractEmailFromText(text: string): string | null {
   if (!text) return null;
   const match = text.match(EMAIL_PATTERN);

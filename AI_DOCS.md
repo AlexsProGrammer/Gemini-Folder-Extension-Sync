@@ -1,6 +1,6 @@
 # AI_DOCS.md — Machine contract
 
-Version: 2.1.0
+Version: 2.1.1
 
 ## Local storage keys (webext.storage.local)
 
@@ -41,6 +41,11 @@ Version: 2.1.0
 
 - `autoApplyProjectInstructions` — auto-prepend the project's system prompt & notes into the composer.
 - `showInstructionsButton` — show the manual "Add instructions" header button in project chats (`configureInstructionsButton` / `setInstructionsButtonVisible`).
+
+## Account-scoped URLs (2.1.1)
+
+- `src/shared/account.ts` exports `withActiveAccountScope(href)`: re-applies the active `/u/<index>/` account prefix (from `window.location.pathname`) to extension-generated navigation targets. Rules: same-origin absolute URLs and paths without a `/u/N/` segment get the current prefix; anything already scoped is returned unchanged; different-origin URLs are never touched.
+- Used by `navigateToNewChat()` (`src/content/index.ts`), the `lastUrl` fallback in `syncNativeChatsFromDom()`, and the panel chat-row href fallback + `navigateToProjectChat()` (`src/content/ui/projectsPanel.ts`). Rationale: a bare `/app` URL is resolved by Google to the profile's *default* Google account, so hard-navigating to one switches accounts.
 
 ## Mobile environment detection (2.0.8)
 

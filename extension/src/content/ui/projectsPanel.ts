@@ -1,5 +1,5 @@
 ﻿import { ChatRef, Project, ProjectIcon, RuntimeState, SyncStatus, WorkspacePayload } from '../../shared/types';
-import { resolveAccountRawIdentifier } from '../../shared/account';
+import { resolveAccountRawIdentifier, withActiveAccountScope } from '../../shared/account';
 import { isMobileEnvironment } from '../../shared/env';
 import { getActiveAccountHash } from '../accountWatcher';
 import { getWorkspace, saveWorkspace, getSyncConfig } from '../../shared/storage';
@@ -309,7 +309,7 @@ export function createProjectsPanel(options: ProjectsPanelOptions) {
         event.stopPropagation();
         event.stopImmediatePropagation();
         options.onNavigateToChat(chatId, chatRow.dataset.gpProjectId ?? null);
-        navigateToProjectChat(chatId, chatLink?.href || `/app/${chatId}`);
+        navigateToProjectChat(chatId, chatLink?.href || withActiveAccountScope(`/app/${chatId}`));
         return;
       }
 
@@ -763,7 +763,7 @@ export function renderProjectsSection(
                 const isMissing = nativeChatsReady && !nativeConversationIds.has(chat.conversationId);
                 return `
                         <div class="gp-chat-row ${isMissing ? 'missing' : ''}" draggable="true" data-gp-chat-id="${chat.conversationId}" data-gp-project-id="${project.id}">
-                          <a class="gp-chat-link" href="${escapeHtml(chat.lastUrl || `/app/${chat.conversationId}`)}">
+                          <a class="gp-chat-link" href="${escapeHtml(chat.lastUrl || withActiveAccountScope(`/app/${chat.conversationId}`))}">
                             <span class="gp-chat-color" aria-hidden="true"></span>
                             <span class="gp-chat-title">${escapeHtml(chat.title || 'Untitled chat')}</span>
                             ${isMissing ? '<span class="gp-chat-missing">Missing</span>' : ''}
@@ -3263,7 +3263,10 @@ function createToast(layer: HTMLElement) {
 
 function navigateToProjectChat(conversationId: string, fallbackHref: string) {
   const before = window.location.href;
-  const targetUrl = new URL(fallbackHref, window.location.origin).href;
+  // A stored href can predate the account-scope handling and point at the
+  // bare `/app/...` path; re-apply the current `/u/<n>/` prefix so opening a
+  // chat never reloads into the browser profile's default Google account.
+  const targetUrl = new URL(withActiveAccountScope(fallbackHref), window.location.origin).href;
   if (before === targetUrl) {
     return;
   }

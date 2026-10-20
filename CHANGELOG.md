@@ -1,5 +1,9 @@
 # Changelog
 
+## 2.1.1 — Account-Safe Navigation Fix
+
+- **Fixed: "New chat in project/folder" switched the Google account.** The context-menu action performed a hard navigation to the bare `/app` URL. Gemini resolves URLs without the `/u/<n>/` prefix to the browser profile's *default* Google account, so the page fully reloaded and landed on the other logged-in account (Gemini's own new-chat button avoids this via client-side routing). All extension navigation targets now re-apply the active `/u/<n>/` account scope — the new-chat action, panel chat links (including middle/ctrl-click), and stored fallback URLs — so navigating stays inside the account you are working in.
+
 ## 2.1.0 — System Prompt Modes, Multi API Keys, Sync-Now Button & Import/Export
 
 - **System prompt injection modes** (Settings → Features): *Automatically add project instructions* prepends the project's system prompt & notes into the composer for new chats in the project (existing behavior, now toggleable), and a new *Show an "Add instructions" button* toggle adds a manual inject button next to the prompt library button in the chat window.
