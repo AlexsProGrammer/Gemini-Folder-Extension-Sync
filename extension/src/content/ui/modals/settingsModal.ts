@@ -810,7 +810,17 @@ export function openSettingsModal(activeAccountId: string, activeAccountLabel: s
   });
 }
 
+function escapeHtml(value: string): string {
+  return value
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
 function buildMarkup(activeAccountLabel: string): string {
+  const accountLabel = escapeHtml(activeAccountLabel);
   return `
     <div class="gp-sync-backdrop" data-gp-settings-backdrop>
       <div class="gp-sync-dialog" role="dialog" aria-modal="true" aria-labelledby="gp-settings-title">
@@ -851,7 +861,7 @@ function buildMarkup(activeAccountLabel: string): string {
             <div class="gp-sync-section-title">Encryption</div>
             <div class="gp-sync-account-badge">
               <span class="gp-sync-account-dot" aria-hidden="true"></span>
-              <span class="gp-sync-account-label" data-gp-account-label>${activeAccountLabel}</span>
+              <span class="gp-sync-account-label" data-gp-account-label>${accountLabel}</span>
             </div>
             <label class="gp-sync-check-row">
               <input type="checkbox" data-gp-global-toggle />

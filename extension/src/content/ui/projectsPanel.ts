@@ -3068,7 +3068,7 @@ function createTargetPickerModal(layer: HTMLElement) {
       : '';
 
     return `
-      <div class="gp-picker-node" data-gp-picker-id="${entry.project.id}" role="option" aria-selected="${String(isCurrent)}" tabindex="0">
+      <div class="gp-picker-node" data-gp-picker-id="${escapeAttr(entry.project.id)}" role="option" aria-selected="${String(isCurrent)}" tabindex="0">
         <div class="gp-picker-row ${isCurrent ? 'current' : ''}" style="padding-left: ${10 + indent}px;">
           ${hasChildren
             ? `<span class="gp-picker-twist ${isExpanded ? 'open' : ''}" data-gp-picker-twist aria-label="Toggle">${TWIST_CHEVRON_ICON}</span>`

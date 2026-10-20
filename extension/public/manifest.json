@@ -2,15 +2,13 @@
     "manifest_version": 3,
     "name": "Synced Projects for Gemini",
     "version": "2.1.1",
-    "description": "Group Gemini chats into local Projects/Folders + Prompt Library + self-hosted backend to sync Devices.",
+    "description": "Projects, folders & a prompt library for Gemini with optional self-hosted encrypted sync to your own server.",
     "permissions": [
         "storage",
         "tabs"
     ],
     "host_permissions": [
-        "https://gemini.google.com/*",
-        "https://*/*",
-        "http://*/*"
+        "https://gemini.google.com/*"
     ],
     "optional_host_permissions": [
         "https://*/*",
@@ -18,8 +16,11 @@
     ],
     "browser_specific_settings": {
         "gecko": {
-            "id": "gemini-workspace-sync@local.dev",
-            "strict_min_version": "121.0"
+            "id": "gemini-folder-sync@pro-grammer.de",
+            "strict_min_version": "128.0",
+            "data_collection_permissions": {
+                "required": ["none"]
+            }
         }
     },
     "background": {
