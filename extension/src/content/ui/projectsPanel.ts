@@ -762,7 +762,7 @@ export function renderProjectsSection(
               (chat) => {
                 const isMissing = nativeChatsReady && !nativeConversationIds.has(chat.conversationId);
                 return `
-                        <div class="gp-chat-row ${isMissing ? 'missing' : ''}" data-gp-chat-id="${chat.conversationId}" data-gp-project-id="${project.id}">
+                        <div class="gp-chat-row ${isMissing ? 'missing' : ''}" draggable="true" data-gp-chat-id="${chat.conversationId}" data-gp-project-id="${project.id}">
                           <a class="gp-chat-link" href="${escapeHtml(chat.lastUrl || `/app/${chat.conversationId}`)}">
                             <span class="gp-chat-color" aria-hidden="true"></span>
                             <span class="gp-chat-title">${escapeHtml(chat.title || 'Untitled chat')}</span>

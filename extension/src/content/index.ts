@@ -1069,6 +1069,23 @@ function collectNativeChatLinks(root: ParentNode): HTMLAnchorElement[] {
 
 function installChatDragSources() {
   document.addEventListener('dragstart', (event) => {
+    const path = typeof event.composedPath === 'function' ? event.composedPath() : [];
+    const panelRow = path.find(
+      (node) => node instanceof HTMLElement && node.dataset?.gpChatId
+    ) as HTMLElement | undefined;
+    if (panelRow) {
+      const id = panelRow.dataset.gpChatId;
+      if (id) {
+        try {
+          event.dataTransfer?.setData(CHAT_DRAG_MIME, id);
+          event.dataTransfer?.setData('text/plain', id);
+          if (event.dataTransfer) event.dataTransfer.effectAllowed = 'copyMove';
+        } catch {
+          // Some engines restrict dataTransfer writes; the drop handler tolerates it.
+        }
+        return;
+      }
+    }
     const target = event.target as HTMLElement | null;
     if (!target) return;
     const conversationId =
