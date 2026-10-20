@@ -243,6 +243,15 @@ const STYLE = `
   overflow: hidden;
   text-overflow: ellipsis;
 }
+
+.gp-sync-modal-root .gp-sync-account-hash {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 10.5px;
+  letter-spacing: 0.03em;
+  color: var(--gp-muted);
+  margin: 3px 0 0 2px;
+  user-select: all;
+}
 .gp-sync-modal-root .gp-sync-account-dot {
   width: 8px;
   height: 8px;
@@ -479,7 +488,7 @@ export function openSettingsModal(activeAccountId: string, activeAccountLabel: s
   root.id = ROOT_ID;
   root.className = 'gp-sync-modal-root';
   if (isMobileEnvironment()) root.classList.add('gp-mobile');
-  root.innerHTML = `<style>${STYLE}</style>${buildMarkup(activeAccountLabel)}`;
+  root.innerHTML = `<style>${STYLE}</style>${buildMarkup(activeAccountLabel, activeAccountId)}`;
   document.body.appendChild(root);
 
   const backdrop = root.querySelector<HTMLElement>('[data-gp-settings-backdrop]')!;
@@ -679,13 +688,20 @@ export function openSettingsModal(activeAccountId: string, activeAccountLabel: s
         showTestResult(`Host access to the sync server was denied. Enable it under about:addons → this extension → Permissions.${detail}`, 'error');
         return;
       }
-      const response = await requestRemotePull({ serverUrl, apiKey }, PROBE_ACCOUNT_ID);
+      // Probe the ACTIVE account so the result reflects this account's real
+      // server state. The all-zeros fallback only applies when the account
+      // hash is not yet resolved; it can never hold a blob, so a 404 there
+      // merely proves reachability + key validity.
+      const probeAccountId = activeAccountId || PROBE_ACCOUNT_ID;
+      const response = await requestRemotePull({ serverUrl, apiKey }, probeAccountId);
       if (response.success) {
-        showTestResult('Connection OK.', 'ok');
+        showTestResult('Connection OK — the server has data for this account.', 'ok');
       } else if (response.error === 'not_found') {
         showTestResult('Server reachable — no data for this account yet.', 'ok');
       } else if (response.error === 'unauthorized') {
         showTestResult('Invalid API Key (401).', 'error');
+      } else if (response.error === 'forbidden') {
+        showTestResult('API key is not authorized for this account (403).', 'error');
       } else {
         showTestResult(`Server unreachable${response.message ? ` (${response.message})` : '.'}`, 'error');
       }
@@ -823,8 +839,10 @@ function escapeHtml(value: string): string {
     .replace(/'/g, '&#39;');
 }
 
-function buildMarkup(activeAccountLabel: string): string {
+function buildMarkup(activeAccountLabel: string, activeAccountId: string): string {
   const accountLabel = escapeHtml(activeAccountLabel);
+  const accountHashFull = escapeHtml(activeAccountId);
+  const accountHashShort = escapeHtml(activeAccountId.slice(0, 16));
   return `
     <div class="gp-sync-backdrop" data-gp-settings-backdrop>
       <div class="gp-sync-dialog" role="dialog" aria-modal="true" aria-labelledby="gp-settings-title">
@@ -867,6 +885,7 @@ function buildMarkup(activeAccountLabel: string): string {
               <span class="gp-sync-account-dot" aria-hidden="true"></span>
               <span class="gp-sync-account-label" data-gp-account-label>${accountLabel}</span>
             </div>
+            <div class="gp-sync-account-hash" title="Workspace partition hash for this account. It must match on every device/window for sync to share data. Full hash: ${accountHashFull}">Partition: ${accountHashShort}…</div>
             <label class="gp-sync-check-row">
               <input type="checkbox" data-gp-global-toggle />
               <span>Use same encryption passphrase for all Google accounts</span>

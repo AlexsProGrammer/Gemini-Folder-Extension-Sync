@@ -206,7 +206,7 @@ export type SyncPermissionResult =
   | { granted: false }
   | { granted: false; error: string };
 
-export type SyncErrorKind = 'unauthorized' | 'not_found' | 'conflict' | 'network_error';
+export type SyncErrorKind = 'unauthorized' | 'forbidden' | 'not_found' | 'conflict' | 'network_error';
 
 export type SyncApiResponse<T> =
   | { success: true; data: T }

@@ -174,55 +174,131 @@ function extractEmailFromAttributes(node: Element): string | null {
   return null;
 }
 
-export function resolveAccountRawIdentifier(): string {
-  const accountIndex = getAccountIndex();
+export function resolveAccountRawIdentifierCandidates(): string[] {
+  const candidates: string[] = [];
+  if (typeof document === 'undefined') return candidates;
 
-  if (typeof document !== 'undefined') {
-    for (const selector of [...PROFILE_BADGE_SELECTORS, ...EXTENDED_IDENTITY_SELECTORS]) {
-      let nodes: NodeListOf<Element>;
-      try {
-        nodes = document.querySelectorAll(selector);
-      } catch {
-        continue;
-      }
-      for (const node of Array.from(nodes)) {
-        const email = extractEmailFromAttributes(node);
-        if (email) return email;
-      }
+  for (const selector of [...PROFILE_BADGE_SELECTORS, ...EXTENDED_IDENTITY_SELECTORS]) {
+    let nodes: NodeListOf<Element>;
+    try {
+      nodes = document.querySelectorAll(selector);
+    } catch {
+      continue;
+    }
+    for (const node of Array.from(nodes)) {
+      const email = extractEmailFromAttributes(node);
+      if (email && !candidates.includes(email)) candidates.push(email);
     }
   }
+  return candidates;
+}
 
-  return `account_index_${accountIndex}`;
+export function resolveAccountRawIdentifier(): string {
+  const candidates = resolveAccountRawIdentifierCandidates();
+  if (candidates.length > 0) return candidates[0];
+  return `account_index_${getAccountIndex()}`;
+}
+
+/** Reads the sticky identity recorded for a /u/<index>/ URL scope, if any. */
+async function readStickyIdentity(accountIndex: string): Promise<string | null> {
+  try {
+    const result = await storageLocalGet<Record<string, unknown>>([IDENTITY_REGISTRY_KEY]);
+    const registry = asRegistry(result[IDENTITY_REGISTRY_KEY]);
+    const sticky = registry.byIndex[accountIndex];
+    if (sticky && !sticky.startsWith('account_index_')) return sticky;
+  } catch (error) {
+    console.warn('[gemini-projects] sticky identity lookup failed', error);
+  }
+  return null;
 }
 
 /**
  * Resolves the raw identifier with the sticky index map: when the profile
  * badge cannot be read right now, the last email observed at this URL index
  * is reused so the account keeps the same workspace partition.
+ *
+ * With several Google accounts signed in, the header and account switcher can
+ * expose more than one email at once; first-match DOM order is NOT guaranteed
+ * to reflect the active account. When the scan is ambiguous, the identity
+ * already confirmed for this /u/<index>/ scope wins over an arbitrary first
+ * candidate, so a background account's email can never silently hijack the
+ * active account's workspace partition.
  */
 export async function resolveStableAccountRawIdentifier(): Promise<string> {
   const accountIndex = getAccountIndex();
-  const domIdentifier = resolveAccountRawIdentifier();
+  const candidates = resolveAccountRawIdentifierCandidates();
 
-  if (!domIdentifier.startsWith('account_index_')) {
-    void rememberAccountIdentity(domIdentifier, await getAccountIdHash(domIdentifier), accountIndex);
-    return domIdentifier;
+  if (candidates.length > 0) {
+    let chosen = candidates[0];
+    if (candidates.length > 1) {
+      const sticky = await readStickyIdentity(accountIndex);
+      if (sticky) {
+        chosen = sticky;
+        console.info(
+          `[gemini-projects] ambiguous identity scan; using sticky identity for /u/${accountIndex}`,
+          JSON.stringify({ candidates, chosen })
+        );
+      } else {
+        console.info(
+          '[gemini-projects] ambiguous identity scan without a sticky identity; using first candidate',
+          JSON.stringify({ candidates, chosen })
+        );
+      }
+    }
+    void rememberAccountIdentity(chosen, await getAccountIdHash(chosen), accountIndex);
+    return chosen;
   }
 
+  const sticky = await readStickyIdentity(accountIndex);
+  if (sticky) {
+    console.info('[gemini-projects] using sticky identity for account index', accountIndex);
+    void rememberAccountIdentity(sticky, await getAccountIdHash(sticky), accountIndex);
+    return sticky;
+  }
+
+  return `account_index_${accountIndex}`;
+}
+
+export interface AccountIdentityDebugInfo {
+  accountIndex: string;
+  /** All distinct emails the current DOM exposes, in scan order. */
+  candidates: string[];
+  resolvedRawIdentifier: string;
+  accountHash: string;
+  registry: AccountIdentityRegistry;
+}
+
+/** Diagnostic snapshot for comparing identity resolution across windows/devices. */
+export async function debugAccountIdentity(): Promise<AccountIdentityDebugInfo> {
+  const accountIndex = getAccountIndex();
+  const candidates = resolveAccountRawIdentifierCandidates();
+  const resolvedRawIdentifier = await resolveStableAccountRawIdentifier();
+  const accountHash = await getAccountIdHash(resolvedRawIdentifier);
+  let registry = emptyRegistry();
+  try {
+    const result = await storageLocalGet<Record<string, unknown>>([IDENTITY_REGISTRY_KEY]);
+    registry = asRegistry(result[IDENTITY_REGISTRY_KEY]);
+  } catch {
+    // Registry unreadable: report the empty shape, resolution still worked.
+  }
+  return { accountIndex, candidates, resolvedRawIdentifier, accountHash, registry };
+}
+
+/**
+ * Clears the sticky per-index identity map so identity is re-resolved from the
+ * page. `byHash` is deliberately kept: it is required to decrypt existing
+ * local vault partitions and deleting it would lock the user out of data.
+ */
+export async function resetStickyAccountIdentities(): Promise<void> {
   try {
     const result = await storageLocalGet<Record<string, unknown>>([IDENTITY_REGISTRY_KEY]);
     const registry = asRegistry(result[IDENTITY_REGISTRY_KEY]);
-    const sticky = registry.byIndex[accountIndex];
-    if (sticky && !sticky.startsWith('account_index_')) {
-      console.info('[gemini-projects] using sticky identity for account index', accountIndex);
-      void rememberAccountIdentity(sticky, await getAccountIdHash(sticky), accountIndex);
-      return sticky;
-    }
+    registry.byIndex = {};
+    await storageLocalSet({ [IDENTITY_REGISTRY_KEY]: registry });
+    console.info('[gemini-projects] sticky per-index identities cleared; identity will be re-resolved from the page');
   } catch (error) {
-    console.warn('[gemini-projects] sticky identity lookup failed', error);
+    console.warn('[gemini-projects] sticky identity reset failed', error);
   }
-
-  return domIdentifier;
 }
 
 export async function getAccountIdHash(rawIdentifier: string): Promise<string> {

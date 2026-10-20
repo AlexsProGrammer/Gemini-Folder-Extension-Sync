@@ -1,4 +1,10 @@
-﻿type NodeSummary = {
+﻿import {
+  debugAccountIdentity,
+  resetStickyAccountIdentities,
+  type AccountIdentityDebugInfo
+} from '../shared/account';
+
+type NodeSummary = {
   path: string;
   tag: string;
   role: string | null;
@@ -37,6 +43,8 @@ type SidebarInspectionReport = {
 declare global {
   interface Window {
     __gpInspectSidebar?: () => SidebarInspectionReport;
+    __gpAccountDebug?: () => Promise<AccountIdentityDebugInfo>;
+    __gpAccountResetIdentity?: () => Promise<void>;
   }
 }
 
@@ -63,6 +71,16 @@ export function installSidebarInspector(): void {
       return report;
     };
   }
+
+  // Identity diagnostics: resolves which raw identifier (email or fallback)
+  // owns the workspace partition in THIS context, so two windows/devices can
+  // be compared when synced data appears under a different account hash.
+  window.__gpAccountDebug = async () => {
+    const info = await debugAccountIdentity();
+    console.info('[gemini-projects] account identity', JSON.stringify(info, null, 2));
+    return info;
+  };
+  window.__gpAccountResetIdentity = () => resetStickyAccountIdentities();
 
   document.addEventListener(REQUEST_EVENT, (event) => {
     const requestId = (event as CustomEvent<{ requestId?: string }>).detail?.requestId || String(Date.now());
@@ -91,7 +109,7 @@ export function installSidebarInspector(): void {
   );
 
   console.info(
-    '[gemini-projects] DOM inspector ready: run await window.__gpInspectSidebar() or press Ctrl+Shift+Alt+G'
+    '[gemini-projects] DOM inspector ready: run await window.__gpInspectSidebar() or press Ctrl+Shift+Alt+G — identity: await window.__gpAccountDebug()'
   );
 }
 

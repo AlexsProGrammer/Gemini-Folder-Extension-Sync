@@ -296,6 +296,10 @@ export class SyncEngine {
         this.setStatus(accountHash, 'error', 'Invalid API key (401). Re-enter your key in sync settings.');
         return;
       }
+      if (response.error === 'forbidden') {
+        this.setStatus(accountHash, 'error', 'API key is not authorized for this account (403). Check the key binding on the server.');
+        return;
+      }
       this.setStatus(accountHash, 'error', response.message ?? `Push failed (${response.error}).`);
     } catch (error) {
       debugWarn('runPush: push failed (exception)', error);
@@ -363,6 +367,10 @@ export class SyncEngine {
         debugWarn('runPull: pull failed:', response.error, response.message);
         if (response.error === 'unauthorized') {
           this.setStatus(accountHash, 'error', 'Invalid API key (401). Re-enter your key in sync settings.');
+          return;
+        }
+        if (response.error === 'forbidden') {
+          this.setStatus(accountHash, 'error', 'API key is not authorized for this account (403). Check the key binding on the server.');
           return;
         }
         this.setStatus(accountHash, 'error', response.message ?? `Pull failed (${response.error}).`);

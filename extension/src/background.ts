@@ -103,6 +103,9 @@ async function handleSyncPull(
     if (response.status === 401) {
       return { success: false, error: 'unauthorized', status: 401 };
     }
+    if (response.status === 403) {
+      return { success: false, error: 'forbidden', status: 403 };
+    }
     return { success: false, error: 'network_error', status: response.status };
   } catch (error) {
     return networkFailure(error);
@@ -142,6 +145,9 @@ async function handleSyncPush(message: SyncPushMessage): Promise<SyncHandlerResp
     }
     if (response.status === 401) {
       return { success: false, error: 'unauthorized', status: 401 };
+    }
+    if (response.status === 403) {
+      return { success: false, error: 'forbidden', status: 403 };
     }
     return { success: false, error: 'network_error', status: response.status };
   } catch (error) {
