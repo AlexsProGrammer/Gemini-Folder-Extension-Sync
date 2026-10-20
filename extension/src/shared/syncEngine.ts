@@ -132,6 +132,19 @@ function mergeProjects(
   return merged;
 }
 
+/**
+ * True when a workspace payload carries no user-visible content at all
+ * (no projects/folders, no chat assignments, no prompts). Sidebar prefs and
+ * tag colors alone do not count as content.
+ */
+function workspaceHasContent(state: WorkspacePayload): boolean {
+  return (
+    Object.keys(state.projects ?? {}).length > 0 ||
+    Object.keys(state.chats ?? {}).length > 0 ||
+    (state.prompts ?? []).length > 0
+  );
+}
+
 export class SyncEngine {
   /** Ephemeral CryptoKey cache, keyed by account hash. Never persisted. */
   private keys = new Map<string, CryptoKey>();
@@ -373,6 +386,17 @@ export class SyncEngine {
           this.setStatus(accountHash, 'error', 'API key is not authorized for this account (403). Check the key binding on the server.');
           return;
         }
+        if (response.error === 'network_error') {
+          // Server unreachable (or any transport failure): the local workspace
+          // stays authoritative, so the sidebar keeps rendering the locally
+          // saved folders/projects until the server responds again.
+          this.setStatus(
+            accountHash,
+            this.online ? 'error' : 'offline',
+            `Server unreachable — using the locally saved data.${response.message ? ` (${response.message})` : ''}`
+          );
+          return;
+        }
         this.setStatus(accountHash, 'error', response.message ?? `Pull failed (${response.error}).`);
         return;
       }
@@ -389,6 +413,19 @@ export class SyncEngine {
       debugLog(`runPull: version comparison — remote: ${remoteState.version}, local: ${localState.version}`);
 
       if (remoteState.version > localState.version) {
+        // Local-first guard: a remote payload without any content (fresh,
+        // reset or mis-bound server partition) must never wipe a populated
+        // local workspace — that is how a briefly unreachable/empty server
+        // turned into an empty sidebar with no way back. Keep the locally
+        // saved folders/projects and re-seed the server from this device
+        // instead. (Intentional "delete everything" still propagates: the
+        // re-seed push then conflicts and the conflict modal decides.)
+        if (!workspaceHasContent(remoteState) && workspaceHasContent(localState)) {
+          debugWarn('runPull: remote is newer but carries no content; keeping local data and re-seeding the server');
+          this.schedulePush(accountHash);
+          this.setStatus(accountHash, 'synced', 'Server state was empty; kept the locally saved data.');
+          return;
+        }
         debugLog('runPull: remote is newer; adopting remote state');
         await putWorkspace(accountHash, remoteState);
         dispatchWindowEvent(WORKSPACE_UPDATED_EVENT, { accountId: accountHash });
@@ -406,10 +443,12 @@ export class SyncEngine {
       this.setStatus(accountHash, 'synced');
     } catch (error) {
       debugWarn('runPull: pull failed (exception)', error);
+      // Local-first: a failed pull never touches the local workspace — the
+      // panel keeps showing the locally saved folders/projects.
       this.setStatus(
         accountHash,
         this.online ? 'error' : 'offline',
-        errorMessage(error)
+        `Pull failed — continuing with the locally saved data (${errorMessage(error)}).`
       );
     }
   }

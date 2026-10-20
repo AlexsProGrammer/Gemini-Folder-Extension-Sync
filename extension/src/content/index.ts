@@ -553,18 +553,38 @@ function initProjectInstructionInjection(): void {
  * Loads the active account's encrypted workspace partition into the sidebar
  * state. The account partition is the single source of truth: switching
  * Google accounts swaps the entire dataset, never sharing one between them.
+ *
+ * The load is purely local (no server round-trip), and a failed read is
+ * retried once: the locally saved workspace is the fallback source of truth,
+ * so a transient storage/vault hiccup must never leave the sidebar empty for
+ * the session.
  */
 async function loadInitialState() {
-  try {
+  const loadWorkspace = async () => {
     const accountHash = await debugStep('load:resolve-account', () => resolveActiveAccountHash());
     const workspace = await debugStep('load:get-workspace', () => getWorkspace(accountHash));
     debugStep('load:apply-state', () => applyStoredState(workspaceToStoredState(workspace)));
+  };
+
+  try {
+    await loadWorkspace();
   } catch (error) {
     if (errorName(error) === 'VaultLockedError') {
       applyVaultLockedNotice();
     } else {
       console.error('[gemini-projects] workspace load failed; starting empty:',
         errorMessage(error), '\n', errorStack(error));
+    }
+    await new Promise((resolve) => window.setTimeout(resolve, 400));
+    try {
+      await loadWorkspace();
+    } catch (retryError) {
+      if (errorName(retryError) === 'VaultLockedError') {
+        applyVaultLockedNotice();
+      } else {
+        console.error('[gemini-projects] workspace load retry failed; starting empty:',
+          errorMessage(retryError), '\n', errorStack(retryError));
+      }
     }
   }
   await loadCollapsedFolders(getActiveAccountHash());
