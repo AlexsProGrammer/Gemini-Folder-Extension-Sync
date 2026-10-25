@@ -2,7 +2,7 @@
 
 A heavily upgraded fork of [linyushuo0818/gemini-folder-extension](https://github.com/linyushuo0818/gemini-folder-extension) that adds a **zero-knowledge encrypted sync backend**, a hierarchical project workspace, per-project system prompts & notes, and a full cross-browser (Chrome / Firefox / Zen) build pipeline.
 
-> **Credits:** The original extension — local Gemini sidebar projects, folders and prompt library — is by **[linyushuo0818](https://github.com/linyushuo0818/gemini-folder-extension)**. This fork preserves the upstream subtree under `extension/` (tracked at upstream commit `4a2f209`) so future upstream improvements can be merged via `git subtree pull`. The frontend has been substantially extended and a custom self-hosted sync backend was added.
+> **Credits:** The original extension — local Gemini sidebar projects, folders and prompt library — is by **[linyushuo0818](https://github.com/linyushuo0818/gemini-folder-extension)**. This fork preserves the upstream subtree under `extension/` (tracked at upstream commit `4a2f209`) so future upstream improvements can be merged via `git subtree pull`. The frontend has been substantially extended and a custom self-hosted sync backend was added. 
 
 ## Installation
 
