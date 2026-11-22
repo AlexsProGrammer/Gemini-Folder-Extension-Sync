@@ -498,6 +498,36 @@ function handleManualInjectInstructions(): void {
   })();
 }
 
+function savePendingNewChat(projectId: string, preExistingIds: Set<string>): void {
+  try {
+    sessionStorage.setItem(
+      PENDING_NEW_CHAT_KEY,
+      JSON.stringify({ projectId, preExistingIds: Array.from(preExistingIds) })
+    );
+  } catch {
+    // sessionStorage may be unavailable in restricted contexts; injection still
+    // works via the in-memory fallback when no full navigation occurs.
+  }
+}
+
+function readPendingNewChat(): { projectId: string; preExistingIds: Set<string> } | null {
+  try {
+    const raw = sessionStorage.getItem(PENDING_NEW_CHAT_KEY);
+    if (!raw) return null;
+    if (raw.startsWith('{')) {
+      const parsed = JSON.parse(raw) as { projectId?: unknown; preExistingIds?: unknown };
+      if (typeof parsed.projectId !== 'string' || !parsed.projectId) return null;
+      const ids = Array.isArray(parsed.preExistingIds)
+        ? parsed.preExistingIds.filter((id): id is string => typeof id === 'string')
+        : [];
+      return { projectId: parsed.projectId, preExistingIds: new Set(ids) };
+    }
+    return { projectId: raw, preExistingIds: new Set() };
+  } catch {
+    return null;
+  }
+}
+
 /**
  * Watches Gemini's chat surface and keeps the active project's system prompt
  * (and notes) in the composer: injected when a project chat is opened or a
@@ -508,17 +538,14 @@ function handleManualInjectInstructions(): void {
 function initProjectInstructionInjection(): void {
   // A "New chat in project" action navigates to a fresh conversation via a full
   // page load; restore the pending project so injection still fires afterwards.
-  try {
-    const pending = sessionStorage.getItem(PENDING_NEW_CHAT_KEY);
-    if (pending) {
-      pendingNewChatProjectId = pending;
-      pendingNewChatPreExistingIds = new Set([
-        ...state.chatIndex.keys(),
-        ...state.nativeConversationIds
-      ]);
-    }
-  } catch {
-    // sessionStorage unavailable — rely on the in-memory value only.
+  const pending = readPendingNewChat();
+  if (pending) {
+    pendingNewChatProjectId = pending.projectId;
+    pendingNewChatPreExistingIds = new Set([
+      ...pending.preExistingIds,
+      ...state.chatIndex.keys(),
+      ...state.nativeConversationIds
+    ]);
   }
 
   // A reload straight into an existing conversation (e.g. Gemini performed a
@@ -527,6 +554,7 @@ function initProjectInstructionInjection(): void {
   const currentConversationId = getConversationId(window.location.href);
   if (currentConversationId && pendingNewChatProjectId) {
     pendingNewChatProjectId = null;
+    pendingNewChatPreExistingIds = null;
     try {
       sessionStorage.removeItem(PENDING_NEW_CHAT_KEY);
     } catch {
@@ -670,13 +698,19 @@ function initProjectInstructionInjection(): void {
  * so a transient storage/vault hiccup must never leave the sidebar empty for
  * the session.
  */
+let stateLoadGeneration = 0;
+
 async function loadInitialState() {
+  const generation = ++stateLoadGeneration;
   const loadWorkspace = async () => {
     const accountHash = await resolveActiveAccountHash();
     const [workspace, localUiPrefs] = await Promise.all([
       getWorkspace(accountHash),
       getLocalUiPrefs(accountHash).catch(() => null)
     ]);
+    if (generation !== stateLoadGeneration) return;
+    const activeHash = getActiveAccountHash();
+    if (activeHash && activeHash !== accountHash) return;
     const stored = workspaceToStoredState(workspace);
     if (localUiPrefs) {
       stored.uiPrefs = localUiPrefs;
@@ -687,6 +721,7 @@ async function loadInitialState() {
   try {
     await loadWorkspace();
   } catch (error) {
+    if (generation !== stateLoadGeneration) return;
     if (errorName(error) === 'VaultLockedError') {
       applyVaultLockedNotice();
     } else {
@@ -694,9 +729,11 @@ async function loadInitialState() {
         errorMessage(error), '\n', errorStack(error));
     }
     await new Promise((resolve) => window.setTimeout(resolve, 400));
+    if (generation !== stateLoadGeneration) return;
     try {
       await loadWorkspace();
     } catch (retryError) {
+      if (generation !== stateLoadGeneration) return;
       if (errorName(retryError) === 'VaultLockedError') {
         applyVaultLockedNotice();
       } else {
@@ -705,26 +742,33 @@ async function loadInitialState() {
       }
     }
   }
-  await loadCollapsedFolders(getActiveAccountHash());
+  if (generation !== stateLoadGeneration) return;
+  await loadCollapsedFolders(getActiveAccountHash(), generation);
 }
 
 /* ------------------------------------------------------------------ *
  * Persistent per-account folder collapse state
  * ------------------------------------------------------------------ */
 
-async function loadCollapsedFolders(accountHash: string | null): Promise<void> {
+async function loadCollapsedFolders(accountHash: string | null, generation?: number): Promise<void> {
   if (!accountHash) {
-    state.collapsedProjectIds.clear();
+    if (generation === undefined || generation === stateLoadGeneration) {
+      state.collapsedProjectIds.clear();
+    }
     return;
   }
   const key = `${COLLAPSED_FOLDERS_KEY_PREFIX}${accountHash}`;
   try {
     const result = await storageLocalGet<Record<string, unknown>>([key]);
+    if (generation !== undefined && generation !== stateLoadGeneration) return;
+    const activeHash = getActiveAccountHash();
+    if (activeHash && activeHash !== accountHash) return;
     const raw = result[key];
     state.collapsedProjectIds = new Set(
       Array.isArray(raw) ? raw.filter((entry): entry is string => typeof entry === 'string') : []
     );
   } catch (error) {
+    if (generation !== undefined && generation !== stateLoadGeneration) return;
     console.warn('[gemini-projects] collapsed-folder load failed', error);
     state.collapsedProjectIds.clear();
   }
@@ -1084,6 +1128,15 @@ function syncNativeChatsFromDom() {
   state.nativeConversationIds = nativeConversationIds;
   state.nativeChatsReady = nativeConversationIds.size > 0;
 
+  if (pendingNewChatProjectId && !getConversationId(window.location.href)) {
+    if (!pendingNewChatPreExistingIds) {
+      pendingNewChatPreExistingIds = new Set(state.chatIndex.keys());
+    }
+    for (const id of nativeConversationIds) {
+      pendingNewChatPreExistingIds.add(id);
+    }
+  }
+
   if (!updates.length) return;
 
   const persistedUpdates: ChatRef[] = [];
@@ -1353,12 +1406,7 @@ function handleNewChatInProject(projectId: string): void {
     ...state.chatIndex.keys(),
     ...state.nativeConversationIds
   ]);
-  try {
-    sessionStorage.setItem(PENDING_NEW_CHAT_KEY, projectId);
-  } catch {
-    // sessionStorage may be unavailable in restricted contexts; injection still
-    // works via the in-memory fallback when no full navigation occurs.
-  }
+  savePendingNewChat(projectId, pendingNewChatPreExistingIds);
   state.collapsedProjectIds.delete(projectId);
   persistCollapsedFolders(getActiveAccountHash());
   renderPanelIfChanged(true);
@@ -1421,9 +1469,9 @@ async function handleDeleteProject(projectId: string) {
 
 async function handleMoveChat(conversationId: string, projectId: string | null) {
   try {
-    await ensureChatKnown(conversationId);
+    const metadata = resolveChatMetadata(conversationId);
     const accountHash = await resolveActiveAccountHash();
-    const next = await moveWorkspaceChat(accountHash, conversationId, projectId);
+    const next = await moveWorkspaceChat(accountHash, conversationId, projectId, metadata);
     applyStoredState(next);
     if (projectId) {
       state.collapsedProjectIds.delete(projectId);
@@ -1436,43 +1484,41 @@ async function handleMoveChat(conversationId: string, projectId: string | null) 
   }
 }
 
-async function ensureChatKnown(conversationId: string) {
+function resolveChatMetadata(conversationId: string): {
+  title: string;
+  lastUrl: string;
+  isPinned?: boolean;
+} {
   const existing = state.chatIndex.get(conversationId);
-  if (existing?.title && existing.lastUrl) return;
-
-  const link = findNativeLinkByConversationId(conversationId);
-
-  if (!link) {
-    // The chat is not listed in the sidebar (e.g. it lives under another
-    // account context or the sidebar failed to render). Fall back to the
-    // current URL and the document title so the assignment still works.
-    const fallbackTitle = normalizeTitle(document.title.replace(/\s*[-–—|]\s*Gemini.*$/i, ''));
-    const chat: ChatRef = {
-      conversationId,
-      title: fallbackTitle || existing?.title || 'Untitled chat',
-      isPinned: existing?.isPinned ?? false,
-      projectId: existing?.projectId ?? null,
-      updatedAt: Date.now(),
-      lastUrl: normalizeCanonicalChatUrl(existing?.lastUrl || window.location.pathname, conversationId)
+  const existingTitle = existing?.title && existing.title !== 'Untitled chat' ? existing.title : '';
+  if (existingTitle && existing?.lastUrl) {
+    return {
+      title: existingTitle,
+      lastUrl: normalizeCanonicalChatUrl(existing.lastUrl, conversationId),
+      isPinned: existing.isPinned
     };
-    state.chatIndex.set(conversationId, chat);
-    const accountHash = await resolveActiveAccountHash();
-    applyStoredState(await upsertWorkspaceChatRefs(accountHash, [chat]));
-    return;
   }
 
-  const row = chatsList ? findChatRowElement(link, chatsList) : link;
-  const chat: ChatRef = {
-    conversationId,
-    title: normalizeTitle(link.textContent || row?.textContent || existing?.title || '') || 'Untitled chat',
-    isPinned: existing?.isPinned ?? false,
-    projectId: existing?.projectId ?? null,
-    updatedAt: Date.now(),
-    lastUrl: normalizeCanonicalChatUrl(link.href, conversationId)
+  const link = findNativeLinkByConversationId(conversationId);
+  if (link) {
+    const row = chatsList ? findChatRowElement(link, chatsList) : link;
+    const scrapedTitle = normalizeTitle(link.textContent || row?.textContent || '');
+    return {
+      title: existingTitle || scrapedTitle || 'Untitled chat',
+      lastUrl: normalizeCanonicalChatUrl(existing?.lastUrl || link.href, conversationId),
+      isPinned: existing?.isPinned ?? detectNativePinned((row || link) as HTMLElement)
+    };
+  }
+
+  // The chat is not listed in the sidebar (e.g. it lives under another
+  // account context or the sidebar failed to render). Fall back to the
+  // current URL and the document title so the assignment still works.
+  const fallbackTitle = normalizeTitle(document.title.replace(/\s*[-–—|]\s*Gemini.*$/i, ''));
+  return {
+    title: existingTitle || fallbackTitle || 'Untitled chat',
+    lastUrl: normalizeCanonicalChatUrl(existing?.lastUrl || window.location.pathname, conversationId),
+    isPinned: existing?.isPinned ?? false
   };
-  state.chatIndex.set(conversationId, chat);
-  const accountHash = await resolveActiveAccountHash();
-  applyStoredState(await upsertWorkspaceChatRefs(accountHash, [chat]));
 }
 
 function findNativeLinkByConversationId(conversationId: string): HTMLAnchorElement | null {

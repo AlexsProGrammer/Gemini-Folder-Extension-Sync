@@ -790,7 +790,7 @@ export class PromptPicker {
       id: this.editingPrompt?.id || crypto.randomUUID(),
       title,
       content,
-      tags: [],
+      tags: this.editingPrompt?.tags ? [...this.editingPrompt.tags] : [],
       createdAt: this.editingPrompt?.createdAt || now,
       updatedAt: now,
       usageCount: this.editingPrompt?.usageCount || 0,

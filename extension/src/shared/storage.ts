@@ -1040,22 +1040,29 @@ export function deleteWorkspaceProject(
 export function moveWorkspaceChat(
   accountHash: string,
   conversationId: string,
-  projectId: string | null
+  projectId: string | null,
+  metadata?: { title?: string; lastUrl?: string; isPinned?: boolean }
 ): Promise<StoredState> {
   return withWorkspaceLock(accountHash, async () => {
     const workspace = await getWorkspaceUnlocked(accountHash, true);
     const chats = workspace.chats ?? (workspace.chats = {});
     const existing = chats[conversationId];
-    if (projectId === null && existing?.isPinned !== true) {
+    const isPinned = existing?.isPinned ?? metadata?.isPinned ?? false;
+    if (projectId === null && !isPinned) {
       delete chats[conversationId];
     } else {
+      const existingTitle = existing?.title?.trim();
+      const resolvedTitle =
+        existingTitle && existingTitle !== 'Untitled chat'
+          ? existingTitle
+          : metadata?.title?.trim() || existingTitle || '';
       chats[conversationId] = {
         conversationId,
-        title: existing?.title ?? '',
-        isPinned: existing?.isPinned ?? false,
+        title: resolvedTitle,
+        isPinned,
         projectId,
         updatedAt: Date.now(),
-        lastUrl: normalizeCanonicalChatUrl(existing?.lastUrl, conversationId)
+        lastUrl: normalizeCanonicalChatUrl(existing?.lastUrl || metadata?.lastUrl, conversationId)
       };
     }
     await saveWorkspace(accountHash, workspace);
