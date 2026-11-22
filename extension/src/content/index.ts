@@ -1616,7 +1616,8 @@ function isExpandedSidebar(sidebar: HTMLElement): boolean {
 }
 
 function isSparkSurface(): boolean {
-  return window.location.pathname === '/spark' || window.location.pathname.startsWith('/spark/');
+  const normalizedPath = window.location.pathname.replace(/^\/u\/\d+(?=\/|$)/, '');
+  return normalizedPath === '/spark' || normalizedPath.startsWith('/spark/');
 }
 
 function cleanupInjectedProjects() {
