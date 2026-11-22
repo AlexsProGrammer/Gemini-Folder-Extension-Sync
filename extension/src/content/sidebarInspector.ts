@@ -1,8 +1,13 @@
-﻿import {
+import {
   debugAccountIdentity,
   resetStickyAccountIdentities,
   type AccountIdentityDebugInfo
 } from '../shared/account';
+import {
+  FEATURE_SETTINGS_CHANGED_EVENT,
+  getFeatureSettings,
+  type FeatureSettings
+} from '../shared/storage';
 
 type NodeSummary = {
   path: string;
@@ -63,54 +68,89 @@ const DATA_ATTR_ALLOWLIST = [
   'data-gp-build'
 ];
 
-export function installSidebarInspector(): void {
-  if (!window.__gpInspectSidebar) {
-    window.__gpInspectSidebar = () => {
-      const report = collectSidebarReport();
-      publishReport(report);
-      return report;
-    };
-  }
+let inspectorEnabled = false;
+let inspectorInitialized = false;
 
-  // Identity diagnostics: resolves which raw identifier (email or fallback)
-  // owns the workspace partition in THIS context, so two windows/devices can
-  // be compared when synced data appears under a different account hash.
-  window.__gpAccountDebug = async () => {
-    const info = await debugAccountIdentity();
-    console.info('[gemini-projects] account identity', JSON.stringify(info, null, 2));
-    return info;
-  };
-  window.__gpAccountResetIdentity = () => resetStickyAccountIdentities();
-
-  document.addEventListener(REQUEST_EVENT, (event) => {
-    const requestId = (event as CustomEvent<{ requestId?: string }>).detail?.requestId || String(Date.now());
-    const report = collectSidebarReport();
-    publishReport(report);
-    document.dispatchEvent(
-      new CustomEvent(RESPONSE_EVENT, {
-        detail: {
-          requestId,
-          json: JSON.stringify(report)
-        }
-      })
-    );
-  });
-
-  window.addEventListener(
-    'keydown',
-    (event) => {
-      if (!(event.ctrlKey && event.shiftKey && event.altKey && event.key.toLowerCase() === 'g')) {
-        return;
+function handleInspectionRequest(event: Event): void {
+  if (!inspectorEnabled) return;
+  const requestId = (event as CustomEvent<{ requestId?: string }>).detail?.requestId || String(Date.now());
+  const report = collectSidebarReport();
+  publishReport(report, false);
+  document.dispatchEvent(
+    new CustomEvent(RESPONSE_EVENT, {
+      detail: {
+        requestId,
+        json: JSON.stringify(report)
       }
-      event.preventDefault();
-      window.__gpInspectSidebar?.();
-    },
-    true
+    })
   );
+}
 
-  console.info(
-    '[gemini-projects] DOM inspector ready: run await window.__gpInspectSidebar() or press Ctrl+Shift+Alt+G — identity: await window.__gpAccountDebug()'
-  );
+function handleInspectorKeydown(event: KeyboardEvent): void {
+  if (!inspectorEnabled) return;
+  if (!(event.ctrlKey && event.shiftKey && event.altKey && event.key.toLowerCase() === 'g')) {
+    return;
+  }
+  event.preventDefault();
+  const report = collectSidebarReport();
+  publishReport(report, true);
+}
+
+function setSidebarInspectorEnabled(enabled: boolean): void {
+  if (enabled === inspectorEnabled) return;
+  inspectorEnabled = enabled;
+
+  if (enabled) {
+    if (!window.__gpInspectSidebar) {
+      window.__gpInspectSidebar = () => {
+        const report = collectSidebarReport();
+        publishReport(report, false);
+        return report;
+      };
+    }
+
+    window.__gpAccountDebug = async () => {
+      const info = await debugAccountIdentity();
+      console.info('[gemini-projects] account identity', JSON.stringify(info, null, 2));
+      return info;
+    };
+    window.__gpAccountResetIdentity = () => resetStickyAccountIdentities();
+
+    document.addEventListener(REQUEST_EVENT, handleInspectionRequest);
+    window.addEventListener('keydown', handleInspectorKeydown, true);
+
+    console.info('[gemini-projects] DOM inspector ready (debug mode): press Ctrl+Shift+Alt+G');
+  } else {
+    document.removeEventListener(REQUEST_EVENT, handleInspectionRequest);
+    window.removeEventListener('keydown', handleInspectorKeydown, true);
+    delete window.__gpInspectSidebar;
+    delete window.__gpAccountDebug;
+    delete window.__gpAccountResetIdentity;
+  }
+}
+
+export function installSidebarInspector(): void {
+  if (inspectorInitialized) return;
+  inspectorInitialized = true;
+
+  void getFeatureSettings()
+    .then((settings) => {
+      setSidebarInspectorEnabled(settings.debugLogging === true);
+    })
+    .catch(() => undefined);
+
+  window.addEventListener(FEATURE_SETTINGS_CHANGED_EVENT, (event) => {
+    const detail = (event as CustomEvent<FeatureSettings | undefined>).detail;
+    if (detail) {
+      setSidebarInspectorEnabled(detail.debugLogging === true);
+      return;
+    }
+    void getFeatureSettings()
+      .then((settings) => {
+        setSidebarInspectorEnabled(settings.debugLogging === true);
+      })
+      .catch(() => undefined);
+  });
 }
 
 function collectSidebarReport(): SidebarInspectionReport {
@@ -316,7 +356,7 @@ function isNodeSummary(value: NodeSummary | null): value is NodeSummary {
   return !!value;
 }
 
-function publishReport(report: SidebarInspectionReport): void {
+function publishReport(report: SidebarInspectionReport, copyToClipboard = false): void {
   const json = JSON.stringify(report, null, 2);
   const summary = {
     version: report.version,
@@ -340,8 +380,10 @@ function publishReport(report: SidebarInspectionReport): void {
     // Ignore quota/private-mode errors; console output is still available.
   }
 
-  navigator.clipboard?.writeText(json).then(
-    () => console.info('[gemini-projects] Sidebar inspection copied to clipboard'),
-    () => console.info('[gemini-projects] Sidebar inspection saved to localStorage and console')
-  );
+  if (copyToClipboard) {
+    navigator.clipboard?.writeText(json).then(
+      () => console.info('[gemini-projects] Sidebar inspection copied to clipboard'),
+      () => console.info('[gemini-projects] Sidebar inspection saved to localStorage and console')
+    );
+  }
 }

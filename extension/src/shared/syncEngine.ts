@@ -468,7 +468,7 @@ export class SyncEngine {
 
     this.setStatus(accountHash, 'syncing');
     debugLog(
-      `runPush: starting push (account: ${accountHash.slice(0, 8)}…, endpoint: ${config.serverUrl}, apiKey len: ${config.apiKey.length}, apiKey…${config.apiKey.slice(-4)})`
+      `runPush: starting push (account: ${accountHash.slice(0, 8)}…, endpoint: ${config.serverUrl}, apiKeyPresent: ${Boolean(config.apiKey)})`
     );
 
     try {
@@ -587,7 +587,7 @@ export class SyncEngine {
       return;
     }
     debugLog(
-      `runPull: using config (account: ${accountHash.slice(0, 8)}…, endpoint: ${config.serverUrl}, apiKey len: ${config.apiKey.length}, apiKey…${config.apiKey.slice(-4)})`
+      `runPull: using config (account: ${accountHash.slice(0, 8)}…, endpoint: ${config.serverUrl}, apiKeyPresent: ${Boolean(config.apiKey)})`
     );
 
     this.setStatus(accountHash, 'syncing');

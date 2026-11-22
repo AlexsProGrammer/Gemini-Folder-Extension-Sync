@@ -1,6 +1,5 @@
 import { ChatRef, Project, PromptTemplate, StoredState, SyncConfig, SyncMeta, SyncSettings, TagMeta, UiPrefs, WorkspacePayload } from './types';
 import {
-  debugStep,
   errorName,
   storageLocalGet,
   storageLocalRemove,
@@ -328,13 +327,13 @@ function notifyVaultLocked(accountHash: string): void {
 
 async function getWorkspaceUnlocked(accountHash: string, insideLock: boolean): Promise<WorkspacePayload> {
   const key = getWorkspaceKey(accountHash);
-  const result = await debugStep('getWorkspace:storage-read', () => storageLocalGet<Record<string, unknown>>([key]));
+  const result = await storageLocalGet<Record<string, unknown>>([key]);
   const raw = result[key];
 
   if (raw !== undefined && raw !== null) {
     try {
-      const rawIdentifier = await debugStep('getWorkspace:identity', () => requireRawIdentifier(accountHash));
-      const opened = await debugStep('getWorkspace:open-envelope', () => openWorkspaceEnvelope(accountHash, rawIdentifier, raw));
+      const rawIdentifier = await requireRawIdentifier(accountHash);
+      const opened = await openWorkspaceEnvelope(accountHash, rawIdentifier, raw);
       if (opened) {
         return normalizeWorkspacePayload(opened.payload, accountHash);
       }
@@ -389,11 +388,11 @@ async function existingVaultMeta(accountHash: string): Promise<VaultMeta | undef
 async function writeWorkspaceEnvelope(accountHash: string, payload: WorkspacePayload): Promise<void> {
   // parseWorkspace is the Xray-safe validator: it never touches the
   // prototype chain of the (possibly cross-compartment) input.
-  const validated = await debugStep('seal:validate', () => parseWorkspace(payload));
-  const rawIdentifier = await debugStep('seal:identity', () => requireRawIdentifier(accountHash));
-  const meta = await debugStep('seal:read-meta', () => existingVaultMeta(accountHash));
-  const envelope = await debugStep('seal:encrypt', () => sealWorkspaceEnvelope(accountHash, rawIdentifier, validated, meta));
-  await debugStep('seal:persist', () => storageLocalSet({ [getWorkspaceKey(accountHash)]: envelope }));
+  const validated = parseWorkspace(payload);
+  const rawIdentifier = await requireRawIdentifier(accountHash);
+  const meta = await existingVaultMeta(accountHash);
+  const envelope = await sealWorkspaceEnvelope(accountHash, rawIdentifier, validated, meta);
+  await storageLocalSet({ [getWorkspaceKey(accountHash)]: envelope });
 }
 
 export function getLocalUiPrefsKey(accountHash: string): string {
@@ -824,12 +823,12 @@ export function upsertWorkspaceProject(
   project: Project
 ): Promise<StoredState> {
   return withWorkspaceLock(accountHash, async () => {
-    const workspace = await debugStep('upsert:get-workspace', () => getWorkspaceUnlocked(accountHash, true));
+    const workspace = await getWorkspaceUnlocked(accountHash, true);
     const existing = workspace.projects[project.id];
     workspace.projects[project.id] = existing
       ? { ...existing, ...project, updatedAt: project.updatedAt ?? Date.now() }
       : project;
-    await debugStep('upsert:save-workspace', () => saveWorkspace(accountHash, workspace));
+    await saveWorkspace(accountHash, workspace);
     return workspaceToStoredState(workspace);
   });
 }

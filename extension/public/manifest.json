@@ -4,8 +4,7 @@
     "version": "2.1.1",
     "description": "Projects, folders & a prompt library for Gemini with optional self-hosted encrypted sync to your own server.",
     "permissions": [
-        "storage",
-        "tabs"
+        "storage"
     ],
     "host_permissions": [
         "https://gemini.google.com/*"
@@ -48,17 +47,6 @@
                 "content.js"
             ],
             "run_at": "document_idle"
-        }
-    ],
-    "web_accessible_resources": [
-        {
-            "resources": [
-                "pageBridge.js",
-                "icons/*"
-            ],
-            "matches": [
-                "https://gemini.google.com/*"
-            ]
         }
     ],
     "action": {

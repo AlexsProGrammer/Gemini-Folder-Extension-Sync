@@ -122,28 +122,9 @@ export function sanitizeStorageValue<T>(value: T): T {
   try {
     return JSON.parse(JSON.stringify(value)) as T;
   } catch (error) {
-    // TEMP diagnostics (gp-debug): if this fires, storage handed us a value the
-    // JSON round-trip cannot normalize and downstream code sees raw data.
-    console.warn('[gp-debug] storage value JSON round-trip failed; returning raw cross-compartment value', error);
+    console.warn('[gemini-projects] storage value JSON round-trip failed; returning raw cross-compartment value', error);
     // Fall back to the raw value; callers must tolerate cross-compartment data.
     return value;
-  }
-}
-
-/**
- * TEMP diagnostics (gp-debug): runs one pipeline step and, when it throws,
- * logs the failing step label before rethrowing the original error.
- *
- * Xray "Permission denied" SecurityErrors carry no JS stack, so step labels
- * are the only way to localize the throwing statement in a minified build.
- * Remove once the failing step is known.
- */
-export async function debugStep<T>(label: string, run: () => T | Promise<T>): Promise<T> {
-  try {
-    return await run();
-  } catch (error) {
-    console.error(`[gp-debug] step failed: ${label}:`, errorMessage(error));
-    throw error;
   }
 }
 

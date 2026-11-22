@@ -1,5 +1,4 @@
 import { getAccountIdHash, resolveStableAccountRawIdentifier } from '../shared/account';
-import { debugStep } from '../shared/webext';
 import { onSpaNavigation } from './dom/spaNavigation';
 
 export const ACCOUNT_CHANGED_EVENT = 'gemini-workspace:account-changed';
@@ -30,8 +29,8 @@ function dispatchAccountChanged(previousHash: string | null, newHash: string): v
 }
 
 export async function resolveActiveAccountHash(): Promise<string> {
-  const rawIdentifier = await debugStep('account:resolve-identity', () => resolveStableAccountRawIdentifier());
-  const hash = await debugStep('account:hash-identity', () => getAccountIdHash(rawIdentifier));
+  const rawIdentifier = await resolveStableAccountRawIdentifier();
+  const hash = await getAccountIdHash(rawIdentifier);
 
   if (hash !== currentHash) {
     const previous = currentHash;

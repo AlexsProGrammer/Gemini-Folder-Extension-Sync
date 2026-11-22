@@ -1,6 +1,6 @@
 import { ChatRef, Project, RuntimeState, StoredState, SyncStatus } from '../shared/types';
 import { normalizeCanonicalChatUrl, withActiveAccountScope } from '../shared/account';
-import { debugStep, errorMessage, errorName, errorStack, storageLocalGet, storageLocalSet, webext } from '../shared/webext';
+import { errorMessage, errorName, errorStack, storageLocalGet, storageLocalSet, webext } from '../shared/webext';
 import {
   createDefaultFeatureSettings,
   deleteWorkspaceProject,
@@ -63,7 +63,6 @@ import {
 } from './prompts/injector';
 import { installSidebarInspector } from './sidebarInspector';
 import { CHAT_DRAG_MIME, createProjectsPanel } from './ui/projectsPanel';
-import { initChatGPT } from './chatgpt';
 
 const BUILD_MARKER = '2.1.1';
 const HIDDEN_ATTR = 'data-gp-native-hidden';
@@ -306,11 +305,6 @@ async function bootstrap() {
       refreshInstructionsButton();
     })
     .catch(() => undefined);
-
-  if (window.location.hostname.includes('chatgpt.com') || window.location.hostname.includes('openai.com')) {
-    initChatGPT();
-    return;
-  }
 
   installSidebarInspector();
   installNativeHideStyle();
@@ -657,16 +651,16 @@ function initProjectInstructionInjection(): void {
  */
 async function loadInitialState() {
   const loadWorkspace = async () => {
-    const accountHash = await debugStep('load:resolve-account', () => resolveActiveAccountHash());
+    const accountHash = await resolveActiveAccountHash();
     const [workspace, localUiPrefs] = await Promise.all([
-      debugStep('load:get-workspace', () => getWorkspace(accountHash)),
+      getWorkspace(accountHash),
       getLocalUiPrefs(accountHash).catch(() => null)
     ]);
     const stored = workspaceToStoredState(workspace);
     if (localUiPrefs) {
       stored.uiPrefs = localUiPrefs;
     }
-    debugStep('load:apply-state', () => applyStoredState(stored));
+    applyStoredState(stored);
   };
 
   try {
@@ -1261,13 +1255,13 @@ function ensureNativeRowsDraggable() {
 
 async function handleSaveProject(project: Project) {
   try {
-    const accountHash = await debugStep('save:resolve-account', () => resolveActiveAccountHash());
-    const next = await debugStep('save:upsert-workspace', () => upsertWorkspaceProject(accountHash, project));
-    debugStep('save:apply-state', () => applyStoredState(next));
+    const accountHash = await resolveActiveAccountHash();
+    const next = await upsertWorkspaceProject(accountHash, project);
+    applyStoredState(next);
     if (project.parentId) state.collapsedProjectIds.delete(project.parentId);
     if (project.kind === 'folder') state.collapsedProjectIds.delete(project.id);
-    debugStep('save:persist-collapsed', () => { persistCollapsedFolders(getActiveAccountHash()); });
-    debugStep('save:render', () => renderPanelIfChanged(true));
+    persistCollapsedFolders(getActiveAccountHash());
+    renderPanelIfChanged(true);
   } catch (error) {
     if (errorName(error) === 'VaultLockedError') {
       applyVaultLockedNotice();
