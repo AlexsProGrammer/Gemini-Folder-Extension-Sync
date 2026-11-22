@@ -9,11 +9,13 @@ export interface AccountChangeDetail {
 }
 
 const REEVALUATE_DELAY_MS = 500;
+const PROFILE_OBSERVER_TIMEOUT_MS = 15_000;
 
 let currentHash: string | null = null;
 let hasResolved = false;
 let initialized = false;
 let profileObserver: MutationObserver | null = null;
+let profileObserverTimeout: number | null = null;
 let reevaluateTimer: number | null = null;
 
 export function getActiveAccountHash(): string | null {
@@ -28,8 +30,20 @@ function dispatchAccountChanged(previousHash: string | null, newHash: string): v
   );
 }
 
+function stopProfileObserver(): void {
+  profileObserver?.disconnect();
+  profileObserver = null;
+  if (profileObserverTimeout !== null) {
+    window.clearTimeout(profileObserverTimeout);
+    profileObserverTimeout = null;
+  }
+}
+
 export async function resolveActiveAccountHash(): Promise<string> {
   const rawIdentifier = await resolveStableAccountRawIdentifier();
+  if (!rawIdentifier.startsWith('account_index_')) {
+    stopProfileObserver();
+  }
   const hash = await getAccountIdHash(rawIdentifier);
 
   if (hash !== currentHash) {
@@ -54,11 +68,14 @@ function scheduleReevaluate(): void {
 }
 
 function observeProfileContainers(): void {
-  profileObserver?.disconnect();
+  stopProfileObserver();
   profileObserver = new MutationObserver(() => scheduleReevaluate());
   // The account switcher lives inside Gemini's persistent header; observing
-  // the body subtree catches it in both header layouts and during re-mounts.
+  // the body subtree during boot catches it until a real email resolves.
   profileObserver.observe(document.body, { childList: true, subtree: true });
+  profileObserverTimeout = window.setTimeout(() => {
+    stopProfileObserver();
+  }, PROFILE_OBSERVER_TIMEOUT_MS);
 }
 
 export function initAccountWatcher(): void {
@@ -66,6 +83,12 @@ export function initAccountWatcher(): void {
   initialized = true;
 
   onSpaNavigation(() => scheduleReevaluate());
+  window.addEventListener('focus', () => scheduleReevaluate());
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'visible') {
+      scheduleReevaluate();
+    }
+  });
   observeProfileContainers();
   void resolveActiveAccountHash().catch((error) =>
     console.warn('[gemini-projects] initial account resolution failed', error)

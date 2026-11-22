@@ -95,6 +95,8 @@ let chatsHeader: HTMLElement | null = null;
 let chatsList: HTMLElement | null = null;
 let rootObserver: MutationObserver | null = null;
 let sidebarObserver: MutationObserver | null = null;
+let sidebarResizeObserver: ResizeObserver | null = null;
+let sidebarParentObserver: MutationObserver | null = null;
 let chatsObserver: MutationObserver | null = null;
 let rescanTimer: number | null = null;
 let pendingPanelRetryCount = 0;
@@ -873,6 +875,21 @@ function rescanSidebar() {
     sidebarObserver?.disconnect();
     sidebarObserver = new MutationObserver(() => scheduleRescan());
     sidebarObserver.observe(sidebarRoot, { childList: true, subtree: true });
+
+    sidebarResizeObserver?.disconnect();
+    sidebarResizeObserver = null;
+    if (typeof ResizeObserver === 'function') {
+      sidebarResizeObserver = new ResizeObserver(() => scheduleRescan());
+      sidebarResizeObserver.observe(sidebarRoot);
+    }
+
+    sidebarParentObserver?.disconnect();
+    sidebarParentObserver = null;
+    if (sidebarRoot.parentElement && sidebarRoot.parentElement !== document.body) {
+      sidebarParentObserver = new MutationObserver(() => scheduleRescan());
+      sidebarParentObserver.observe(sidebarRoot.parentElement, { childList: true });
+    }
+
     panel?.destroy();
     panel = null;
     panelHost = null;
@@ -903,6 +920,7 @@ function rescanSidebar() {
 function installLifecycleRescans() {
   window.addEventListener('pageshow', () => scheduleRescan(0));
   window.addEventListener('focus', () => scheduleRescan(0));
+  window.addEventListener('resize', () => scheduleRescan(), { passive: true });
   onSpaNavigation(() => {
     if (!sidebarRoot?.isConnected) {
       ensureRootObserver();
@@ -924,6 +942,7 @@ function ensurePanel() {
   const { host, shadow, overlayShadow } = injectProjectsSection(sidebarRoot, gems, chats);
 
   if (!panel || panelHost !== host) {
+    panel?.destroy();
     panel = createProjectsPanel({
       shadow,
       overlayShadow,
@@ -1570,6 +1589,9 @@ function cleanupInjectedProjects() {
   document.getElementById('gemini-projects-host')?.remove();
   document.getElementById('gemini-projects-overlay')?.remove();
   document.querySelectorAll<HTMLElement>(`[${HIDDEN_ATTR}]`).forEach((node) => node.removeAttribute(HIDDEN_ATTR));
+  if (!sidebarRoot?.isConnected) {
+    ensureRootObserver();
+  }
 }
 
 function isRelevantChatsMutation(mutation: MutationRecord): boolean {

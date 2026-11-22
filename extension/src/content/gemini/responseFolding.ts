@@ -20,6 +20,8 @@ const DEFAULT_MAX_REMEMBERED = 1200;
 const DEFAULT_ERROR_THRESHOLD = 3;
 const PERSIST_DELAY_MS = 180;
 const SCAN_DEBOUNCE_MS = 350;
+const SETTLE_SCAN_DELAY_MS = 600;
+const MAX_SETTLE_ATTEMPTS = 6;
 
 const RESPONSE_ROOT_SELECTORS = [
   'main model-response',
@@ -83,6 +85,8 @@ interface RuntimeState {
   observer: MutationObserver | null;
   observedTarget: HTMLElement | null;
   scanTimerId: number | null;
+  settleTimerId: number | null;
+  settleAttempts: number;
   persistTimerId: number | null;
   unsubscribeSpa: (() => void) | null;
   initialized: boolean;
@@ -109,6 +113,8 @@ const runtime: RuntimeState = {
   observer: null,
   observedTarget: null,
   scanTimerId: null,
+  settleTimerId: null,
+  settleAttempts: 0,
   persistTimerId: null,
   unsubscribeSpa: null,
   initialized: false,
@@ -158,6 +164,7 @@ function attachObserverTarget(): void {
   }
   runtime.observer?.disconnect();
   runtime.observer = new MutationObserver(() => {
+    clearSettleTimer(true);
     scheduleScan();
   });
   runtime.observedTarget = target;
@@ -193,6 +200,7 @@ function startObservers(): void {
 
   window.addEventListener('resize', onPassiveSignal, { passive: true });
   runtime.unsubscribeSpa = onSpaNavigation((href) => {
+    clearSettleTimer(true);
     const nextConversationId = getConversationId(href);
     if (nextConversationId !== runtime.currentConversationId) {
       const wasHome = runtime.currentConversationId === null;
@@ -274,6 +282,34 @@ function renderResponseFolding(): void {
       runtime.observedRoots.delete(root);
       runtime.contentByRoot.delete(root);
     }
+  }
+
+  const hasEphemeral = candidates.some((candidate) => candidate.isEphemeral);
+  const conversationId = getConversationId(window.location.href);
+  if (hasEphemeral && conversationId && runtime.settleAttempts < MAX_SETTLE_ATTEMPTS) {
+    if (runtime.settleTimerId === null) {
+      runtime.settleTimerId = window.setTimeout(() => {
+        runtime.settleTimerId = null;
+        if (runtime.tripped) return;
+        runtime.settleAttempts += 1;
+        void guardedAsync('settle-scan', async () => {
+          renderResponseFolding();
+          runtime.consecutiveErrors = 0;
+        });
+      }, SETTLE_SCAN_DELAY_MS);
+    }
+  } else {
+    clearSettleTimer(!hasEphemeral);
+  }
+}
+
+function clearSettleTimer(resetAttempts = false): void {
+  if (runtime.settleTimerId !== null) {
+    window.clearTimeout(runtime.settleTimerId);
+    runtime.settleTimerId = null;
+  }
+  if (resetAttempts) {
+    runtime.settleAttempts = 0;
   }
 }
 
@@ -688,6 +724,8 @@ function stopRuntime(): void {
     window.clearTimeout(runtime.scanTimerId);
     runtime.scanTimerId = null;
   }
+
+  clearSettleTimer(true);
 
   if (runtime.persistTimerId !== null) {
     window.clearTimeout(runtime.persistTimerId);

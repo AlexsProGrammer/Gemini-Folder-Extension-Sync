@@ -337,13 +337,19 @@ export async function resetStickyAccountIdentities(): Promise<void> {
   }
 }
 
+const accountIdHashCache = new Map<string, string>();
+
 export async function getAccountIdHash(rawIdentifier: string): Promise<string> {
   const normalized = rawIdentifier.toLowerCase().trim();
+  const cached = accountIdHashCache.get(normalized);
+  if (cached) return cached;
   const data = new TextEncoder().encode(normalized);
   const digest = await crypto.subtle.digest('SHA-256', data as unknown as BufferSource);
-  return Array.from(new Uint8Array(digest))
+  const hash = Array.from(new Uint8Array(digest))
     .map((byte) => byte.toString(16).padStart(2, '0'))
     .join('');
+  accountIdHashCache.set(normalized, hash);
+  return hash;
 }
 
 export async function resolveAccountHash(): Promise<string> {

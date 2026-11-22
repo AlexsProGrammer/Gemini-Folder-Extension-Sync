@@ -31,6 +31,29 @@ let lastSyncStatus: SyncStatus = 'unconfigured';
 /** Registers the conflict listener exactly once per page load. */
 let syncConflictListenerAttached = false;
 
+function openConflictResolutionModal(accountId: string, conflict: SyncConflictDetail): void {
+  openConflictModal(conflict, (choice) => {
+    void syncEngine
+      .resolveConflictResolution(choice, conflict, accountId)
+      .catch((error) => console.warn('[gemini-projects] conflict resolution failed', error));
+  });
+}
+
+function ensureSyncConflictListener(): void {
+  if (syncConflictListenerAttached) return;
+  syncConflictListenerAttached = true;
+  window.addEventListener(SYNC_CONFLICT_EVENT, (event) => {
+    const detail = (event as CustomEvent).detail as
+      | { accountId?: string; localState?: unknown; remoteState?: unknown }
+      | undefined;
+    if (!detail || !detail.localState || !detail.remoteState) return;
+    openConflictResolutionModal(detail.accountId ?? '', {
+      localState: detail.localState as WorkspacePayload,
+      remoteState: detail.remoteState as WorkspacePayload
+    });
+  });
+}
+
 interface ProjectsPanelOptions {
   shadow: ShadowRoot;
   overlayShadow: ShadowRoot;
@@ -132,14 +155,6 @@ export function createProjectsPanel(options: ProjectsPanelOptions) {
   // Initialize theme observer
   const themeObserver = attachThemeObserver(panelRoot, overlayLayer, signal);
 
-  function openConflictResolutionModal(accountId: string, conflict: SyncConflictDetail): void {
-    openConflictModal(conflict, (choice) => {
-      void syncEngine
-        .resolveConflictResolution(choice, conflict, accountId)
-        .catch((error) => console.warn('[gemini-projects] conflict resolution failed', error));
-    });
-  }
-
   // Settings badge: the single combined badge (sync state dot + gear icon)
   // that opens the tabbed Sync/Settings modal, plus the conflict resolver.
   function openSettings() {
@@ -228,19 +243,7 @@ export function createProjectsPanel(options: ProjectsPanelOptions) {
     }
   }
 
-  if (!syncConflictListenerAttached) {
-    syncConflictListenerAttached = true;
-    window.addEventListener(SYNC_CONFLICT_EVENT, (event) => {
-      const detail = (event as CustomEvent).detail as
-        | { accountId?: string; localState?: unknown; remoteState?: unknown }
-        | undefined;
-      if (!detail || !detail.localState || !detail.remoteState) return;
-      openConflictResolutionModal(detail.accountId ?? '', {
-        localState: detail.localState as WorkspacePayload,
-        remoteState: detail.remoteState as WorkspacePayload
-      });
-    });
-  }
+  ensureSyncConflictListener();
 
   // 用于存储当前 state 以供 chatMenu 获取项目列表
   const chatMenu = createChatMenu(overlayLayer, signal);
