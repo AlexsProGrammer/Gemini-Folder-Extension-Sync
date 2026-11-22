@@ -39,6 +39,7 @@ import {
   resolveActiveAccountHash
 } from './accountWatcher';
 import {
+  findAnySidebarElement,
   findChatRowElement,
   findChatsListContainer,
   findChatsSection,
@@ -95,6 +96,7 @@ let chatsHeader: HTMLElement | null = null;
 let chatsList: HTMLElement | null = null;
 let rootObserver: MutationObserver | null = null;
 let sidebarObserver: MutationObserver | null = null;
+let sidebarAttrObserver: MutationObserver | null = null;
 let sidebarResizeObserver: ResizeObserver | null = null;
 let sidebarParentObserver: MutationObserver | null = null;
 let chatsObserver: MutationObserver | null = null;
@@ -847,13 +849,59 @@ function scheduleRescan(delay = RESCAN_DELAY_MS) {
   }, delay);
 }
 
+function disconnectSidebarObservers() {
+  sidebarObserver?.disconnect();
+  sidebarObserver = null;
+  sidebarAttrObserver?.disconnect();
+  sidebarAttrObserver = null;
+  sidebarResizeObserver?.disconnect();
+  sidebarResizeObserver = null;
+  sidebarParentObserver?.disconnect();
+  sidebarParentObserver = null;
+}
+
+function bindSidebarObservers(nextSidebar: HTMLElement) {
+  if (sidebarRoot === nextSidebar) return;
+
+  disconnectSidebarObservers();
+  sidebarRoot = nextSidebar;
+
+  sidebarObserver = new MutationObserver(() => scheduleRescan());
+  sidebarObserver.observe(sidebarRoot, { childList: true, subtree: true });
+
+  // Observe class/style/visibility attribute changes on the sidebar and its
+  // container without subtree: true so chat streaming never triggers rescans.
+  sidebarAttrObserver = new MutationObserver(() => scheduleRescan());
+  const attrOptions: MutationObserverInit = {
+    attributes: true,
+    attributeFilter: ['class', 'style', 'aria-hidden', 'inert']
+  };
+  sidebarAttrObserver.observe(sidebarRoot, attrOptions);
+  if (sidebarRoot.parentElement && sidebarRoot.parentElement !== document.body) {
+    sidebarAttrObserver.observe(sidebarRoot.parentElement, attrOptions);
+    sidebarParentObserver = new MutationObserver(() => scheduleRescan());
+    sidebarParentObserver.observe(sidebarRoot.parentElement, { childList: true });
+  }
+
+  if (typeof ResizeObserver === 'function') {
+    sidebarResizeObserver = new ResizeObserver(() => scheduleRescan());
+    sidebarResizeObserver.observe(sidebarRoot);
+  }
+
+  panel?.destroy();
+  panel = null;
+  panelHost = null;
+  chatsList = null;
+  pendingPanelRetryCount = 0;
+}
+
 function rescanSidebar() {
   if (isSparkSurface()) {
     cleanupInjectedProjects();
     return;
   }
 
-  const nextSidebar = findSidebarRoot();
+  const nextSidebar = findSidebarRoot() || findAnySidebarElement();
   if (!nextSidebar) {
     ensureRootObserver();
     if (pendingPanelRetryCount < PANEL_READY_RETRY_LIMIT) {
@@ -863,38 +911,11 @@ function rescanSidebar() {
     return;
   }
 
+  bindSidebarObservers(nextSidebar);
+
   if (!isExpandedSidebar(nextSidebar)) {
-    state.nativeConversationIds = new Set();
-    state.nativeChatsReady = false;
     cleanupInjectedProjects();
     return;
-  }
-
-  if (sidebarRoot !== nextSidebar) {
-    sidebarRoot = nextSidebar;
-    sidebarObserver?.disconnect();
-    sidebarObserver = new MutationObserver(() => scheduleRescan());
-    sidebarObserver.observe(sidebarRoot, { childList: true, subtree: true });
-
-    sidebarResizeObserver?.disconnect();
-    sidebarResizeObserver = null;
-    if (typeof ResizeObserver === 'function') {
-      sidebarResizeObserver = new ResizeObserver(() => scheduleRescan());
-      sidebarResizeObserver.observe(sidebarRoot);
-    }
-
-    sidebarParentObserver?.disconnect();
-    sidebarParentObserver = null;
-    if (sidebarRoot.parentElement && sidebarRoot.parentElement !== document.body) {
-      sidebarParentObserver = new MutationObserver(() => scheduleRescan());
-      sidebarParentObserver.observe(sidebarRoot.parentElement, { childList: true });
-    }
-
-    panel?.destroy();
-    panel = null;
-    panelHost = null;
-    chatsList = null;
-    pendingPanelRetryCount = 0;
   }
 
   if (!ensurePanel()) {
@@ -1590,6 +1611,8 @@ function cleanupInjectedProjects() {
   document.getElementById('gemini-projects-overlay')?.remove();
   document.querySelectorAll<HTMLElement>(`[${HIDDEN_ATTR}]`).forEach((node) => node.removeAttribute(HIDDEN_ATTR));
   if (!sidebarRoot?.isConnected) {
+    disconnectSidebarObservers();
+    sidebarRoot = null;
     ensureRootObserver();
   }
 }

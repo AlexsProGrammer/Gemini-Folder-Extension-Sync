@@ -140,6 +140,12 @@ export function findSidebarRoot(): HTMLElement | null {
   return findSidebarByLandmarks();
 }
 
+export function findAnySidebarElement(): HTMLElement | null {
+  return document.querySelector<HTMLElement>(
+    'bard-sidenav, side-nav, mat-sidenav, [aria-label="Side navigation"]'
+  );
+}
+
 function findSectionByTexts(root: HTMLElement, labels: string[]): HTMLElement | null {
   const targets = labels.map((label) => normalizeText(label));
   const elements = root.querySelectorAll<HTMLElement>('a, div, span, h1, h2, h3, h4, button, p');
