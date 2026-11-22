@@ -1,11 +1,25 @@
-import { ChatRef, Project, PromptTemplate, StoredState, SyncConfig, SyncMeta, SyncSettings, TagMeta, UiPrefs, WorkspacePayload } from './types';
+import {
+  ChatRef,
+  Project,
+  PromptTemplate,
+  SessionPassphrasePayload,
+  StoredState,
+  SyncConfig,
+  SyncMeta,
+  SyncSessionGetResult,
+  SyncSessionWriteResult,
+  SyncSettings,
+  TagMeta,
+  UiPrefs,
+  WorkspacePayload
+} from './types';
 import {
   errorName,
+  runtimeSendMessage,
+  sanitizeStorageValue,
   storageLocalGet,
   storageLocalRemove,
-  storageLocalSet,
-  storageSessionGet,
-  storageSessionSet
+  storageLocalSet
 } from './webext';
 import { normalizeChatIndex, parseWorkspace } from './schemas';
 import { getRawIdentifierForHash, normalizeCanonicalChatUrl } from './account';
@@ -550,9 +564,62 @@ export async function saveSyncConfig(config: SyncConfig): Promise<void> {
 export const SYNC_SETTINGS_KEY = 'gemini_sync_settings';
 export const SYNC_SESSION_PASSPHRASE_KEY = 'gemini_sync_session_passphrases';
 
-interface SessionPassphraseStore {
-  globalPassphrase?: string;
-  accountPassphrases?: Record<string, string>;
+let lastLocalSettingsWriteId: string | null = null;
+
+function generateSettingsWriteId(): string {
+  if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
+    return crypto.randomUUID();
+  }
+  return `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+}
+
+/**
+ * Returns true when a `SYNC_SETTINGS_KEY` `storage.onChanged` event matches
+ * the write most recently performed by this tab, so the tab does not clear
+ * and re-derive its own freshly derived encryption key.
+ */
+export function isOwnSyncSettingsChange(newValue: unknown): boolean {
+  if (!lastLocalSettingsWriteId || !newValue || typeof newValue !== 'object') return false;
+  try {
+    const sanitized = sanitizeStorageValue(newValue) as { settingsWriteId?: unknown };
+    return sanitized.settingsWriteId === lastLocalSettingsWriteId;
+  } catch {
+    return false;
+  }
+}
+
+async function readSessionPassphrases(): Promise<SessionPassphrasePayload | null> {
+  try {
+    const result = await runtimeSendMessage<SyncSessionGetResult>({ action: 'SYNC_SESSION_GET' });
+    if (result?.ok) {
+      return result.data ?? null;
+    }
+    console.warn('[gemini-projects] failed to read session passphrases', result?.error);
+    return null;
+  } catch (error) {
+    console.warn('[gemini-projects] session passphrase IPC read failed', error);
+    return null;
+  }
+}
+
+async function writeSessionPassphrases(payload: SessionPassphrasePayload): Promise<SyncSessionWriteResult> {
+  const result = await runtimeSendMessage<SyncSessionWriteResult>({
+    action: 'SYNC_SESSION_SET',
+    payload
+  });
+  if (!result?.ok) {
+    throw new Error(result?.error || 'Failed to store session passphrase.');
+  }
+  return result;
+}
+
+/** Clears session-scoped sync passphrases held in the trusted background context. */
+export async function clearSessionPassphrases(): Promise<void> {
+  try {
+    await runtimeSendMessage<SyncSessionWriteResult>({ action: 'SYNC_SESSION_CLEAR' });
+  } catch (error) {
+    console.warn('[gemini-projects] failed to clear session passphrases', error);
+  }
 }
 
 function extractPassphraseMap(raw: unknown): Record<string, string> {
@@ -575,12 +642,11 @@ export function createDefaultSyncSettings(): SyncSettings {
 }
 
 export async function getSyncSettings(): Promise<SyncSettings> {
-  const [localResult, sessionResult] = await Promise.all([
+  const [localResult, sessionRaw] = await Promise.all([
     storageLocalGet<Record<string, unknown>>([SYNC_SETTINGS_KEY]),
-    storageSessionGet<Record<string, unknown>>([SYNC_SESSION_PASSPHRASE_KEY])
+    readSessionPassphrases()
   ]);
   const raw = localResult[SYNC_SETTINGS_KEY];
-  const sessionRaw = sessionResult?.[SYNC_SESSION_PASSPHRASE_KEY] as SessionPassphraseStore | undefined;
 
   const sessionGlobal = typeof sessionRaw?.globalPassphrase === 'string' ? sessionRaw.globalPassphrase : undefined;
   const sessionAccounts = extractPassphraseMap(sessionRaw?.accountPassphrases);
@@ -614,12 +680,22 @@ export async function getSyncSettings(): Promise<SyncSettings> {
 export async function saveSyncSettings(settings: SyncSettings): Promise<void> {
   const rememberOnDisk = settings.rememberPassphraseOnDisk === true;
   const accountPassphrases = { ...(settings.accountPassphrases ?? {}) };
-  const sessionPayload: SessionPassphraseStore = {
+  const sessionPayload: SessionPassphrasePayload = {
     ...(settings.globalPassphrase ? { globalPassphrase: settings.globalPassphrase } : {}),
     accountPassphrases
   };
 
-  await storageSessionSet({ [SYNC_SESSION_PASSPHRASE_KEY]: sessionPayload });
+  try {
+    await writeSessionPassphrases(sessionPayload);
+  } catch (error) {
+    if (!rememberOnDisk) {
+      throw error;
+    }
+    console.warn('[gemini-projects] session passphrase write failed while disk persistence is enabled', error);
+  }
+
+  const writeId = generateSettingsWriteId();
+  lastLocalSettingsWriteId = writeId;
 
   const normalized: SyncSettings = {
     serverUrl: settings.serverUrl.trim().replace(/\/+$/, ''),
@@ -627,7 +703,9 @@ export async function saveSyncSettings(settings: SyncSettings): Promise<void> {
     useGlobalPassphrase: settings.useGlobalPassphrase === true,
     rememberPassphraseOnDisk: rememberOnDisk,
     ...(rememberOnDisk && settings.globalPassphrase ? { globalPassphrase: settings.globalPassphrase } : {}),
-    accountPassphrases: rememberOnDisk ? accountPassphrases : {}
+    accountPassphrases: rememberOnDisk ? accountPassphrases : {},
+    passphraseUpdatedAt: Date.now(),
+    settingsWriteId: writeId
   };
   await storageLocalSet({ [SYNC_SETTINGS_KEY]: normalized });
 }

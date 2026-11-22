@@ -164,6 +164,15 @@ export interface SyncSettings {
   accountPassphrases: Record<string, string>;
   /** Opt-in to persist passphrases in storage.local across browser restarts. */
   rememberPassphraseOnDisk?: boolean;
+  /** Timestamp of the last passphrase save so passphrase-only changes trigger storage.onChanged across tabs. */
+  passphraseUpdatedAt?: number;
+  /** Ephemeral per-write nonce used to ignore self-originated storage.onChanged events. */
+  settingsWriteId?: string;
+}
+
+export interface SessionPassphrasePayload {
+  globalPassphrase?: string;
+  accountPassphrases: Record<string, string>;
 }
 
 /** Encrypted envelope pushed to / received from the server. */
@@ -203,11 +212,35 @@ export interface SyncPushMessage {
   data: EncryptedSyncEnvelope;
 }
 
+export interface SyncSessionGetMessage {
+  action: 'SYNC_SESSION_GET';
+}
+
+export interface SyncSessionSetMessage {
+  action: 'SYNC_SESSION_SET';
+  payload: SessionPassphrasePayload;
+}
+
+export interface SyncSessionClearMessage {
+  action: 'SYNC_SESSION_CLEAR';
+}
+
+export type SyncSessionGetResult =
+  | { ok: true; data: SessionPassphrasePayload | null }
+  | { ok: false; error: string };
+
+export type SyncSessionWriteResult =
+  | { ok: true; persistedInSession: boolean }
+  | { ok: false; error: string };
+
 export type SyncMessage =
   | SyncPullMessage
   | SyncPushMessage
   | SyncCheckPermissionMessage
-  | SyncOpenPermissionPageMessage;
+  | SyncOpenPermissionPageMessage
+  | SyncSessionGetMessage
+  | SyncSessionSetMessage
+  | SyncSessionClearMessage;
 
 /** Ask the background worker (which owns the permissions API) whether host access is already granted for an origin. */
 export interface SyncCheckPermissionMessage {

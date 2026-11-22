@@ -14,12 +14,12 @@ import {
   getWorkspace,
   getWorkspaceKey,
   initDebugLoggingFlag,
+  isOwnSyncSettingsChange,
   moveWorkspaceChat,
   onWorkspaceSaved,
   setLocalUiPrefs,
   setWorkspaceChatPinned,
   setWorkspaceProjectPinned,
-  SYNC_SESSION_PASSPHRASE_KEY,
   SYNC_SETTINGS_KEY,
   upsertWorkspaceChatRefs,
   upsertWorkspaceProject,
@@ -128,28 +128,43 @@ function applyVaultLockedNotice(): void {
   panel?.showToast('Workspace locked: account identity unavailable');
 }
 
+const unlockInFlight = new Map<string, Promise<boolean>>();
+
 /**
  * Re-derives the account's sync encryption key from the persisted settings
  * (the passphrase never lives in memory across page loads) and reconciles
- * with the server. Without this, sync would stay idle forever after a
- * reload because the engine starts with an empty key cache.
+ * with the server. Returns true when this call unlocked and pulled/pushed
+ * so callers do not trigger a redundant immediate pull.
  */
-async function ensureSyncUnlocked(accountHash: string): Promise<void> {
-  if (!accountHash || syncEngine.hasKey(accountHash)) return;
-  try {
-    const settings = await getSyncSettings();
-    const passphrase = settings.useGlobalPassphrase
-      ? settings.globalPassphrase
-      : settings.accountPassphrases[accountHash];
-    if (!passphrase) return;
-    const derived = await syncEngine.setPassphrase(accountHash, passphrase);
-    if (derived) {
-      await syncEngine.pull(accountHash);
-      await syncEngine.pushIfDirty(accountHash);
+async function ensureSyncUnlocked(accountHash: string): Promise<boolean> {
+  if (!accountHash || syncEngine.hasKey(accountHash)) return false;
+  const existing = unlockInFlight.get(accountHash);
+  if (existing) return existing;
+
+  const task = (async (): Promise<boolean> => {
+    try {
+      const settings = await getSyncSettings();
+      const passphrase = settings.useGlobalPassphrase
+        ? settings.globalPassphrase
+        : settings.accountPassphrases[accountHash];
+      if (!passphrase) return false;
+      const derived = await syncEngine.setPassphrase(accountHash, passphrase);
+      if (derived) {
+        await syncEngine.pull(accountHash);
+        await syncEngine.pushIfDirty(accountHash);
+        return true;
+      }
+      return false;
+    } catch (error) {
+      console.warn('[gemini-projects] sync unlock failed', error);
+      return false;
+    } finally {
+      unlockInFlight.delete(accountHash);
     }
-  } catch (error) {
-    console.warn('[gemini-projects] sync unlock failed', error);
-  }
+  })();
+
+  unlockInFlight.set(accountHash, task);
+  return task;
 }
 
 /**
@@ -164,8 +179,11 @@ function initWorkspaceSync(): void {
     const accountHash = getActiveAccountHash();
     if (!accountHash) return;
     ensureSyncUnlocked(accountHash)
-      .catch((error) => console.warn('[gemini-projects] focus unlock failed', error))
-      .then(() => syncEngine.pull(accountHash))
+      .then((unlockedAndPulled) => {
+        if (!unlockedAndPulled) {
+          return syncEngine.pull(accountHash);
+        }
+      })
       .catch((error) =>
         console.warn('[gemini-projects] focus pull failed', error)
       );
@@ -194,8 +212,11 @@ function initWorkspaceSync(): void {
     const accountHash = getActiveAccountHash();
     if (!accountHash) return;
     ensureSyncUnlocked(accountHash)
-      .catch((error) => console.warn('[gemini-projects] reconnect unlock failed', error))
-      .then(() => syncEngine.pull(accountHash))
+      .then((unlockedAndPulled) => {
+        if (!unlockedAndPulled) {
+          return syncEngine.pull(accountHash);
+        }
+      })
       .catch((error) =>
         console.warn('[gemini-projects] reconnect pull failed', error)
       );
@@ -275,12 +296,12 @@ function initWorkspaceSync(): void {
           .catch(() => undefined);
       }
       if (changes[SYNC_SETTINGS_KEY]) {
-        syncEngine.clearPassphrase(accountHash);
-        void ensureSyncUnlocked(accountHash);
+        const change = changes[SYNC_SETTINGS_KEY] as { newValue?: unknown } | undefined;
+        if (!isOwnSyncSettingsChange(change?.newValue)) {
+          syncEngine.clearPassphrase(accountHash);
+          void ensureSyncUnlocked(accountHash);
+        }
       }
-    } else if (area === 'session' && changes[SYNC_SESSION_PASSPHRASE_KEY]) {
-      syncEngine.clearPassphrase(accountHash);
-      void ensureSyncUnlocked(accountHash);
     }
   });
 }

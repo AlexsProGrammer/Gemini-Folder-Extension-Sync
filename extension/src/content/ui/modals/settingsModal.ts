@@ -1,7 +1,7 @@
 import { deriveWorkspaceKey, testPassphrase } from '../../../shared/crypto';
 import { ensureServerHostPermission, openServerHostPermissionPage, requestRemotePull } from '../../../shared/syncClient';
 import { syncEngine } from '../../../shared/syncEngine';
-import { getFeatureSettings, getSyncSettings, saveFeatureSettings, saveSyncSettings } from '../../../shared/storage';
+import { clearSessionPassphrases, getFeatureSettings, getSyncSettings, saveFeatureSettings, saveSyncSettings } from '../../../shared/storage';
 import type { SyncSettings } from '../../../shared/types';
 import { isMobileEnvironment } from '../../../shared/env';
 import { exportAllData, triggerImport } from '../../../shared/backup';
@@ -879,7 +879,10 @@ export function openSettingsModal(activeAccountId: string, activeAccountLabel: s
     dangerButton.disabled = true;
     dangerButton.textContent = 'Deleting…';
     try {
-      await storageLocalClear();
+      if (activeAccountId) {
+        syncEngine.clearPassphrase(activeAccountId);
+      }
+      await Promise.all([storageLocalClear(), clearSessionPassphrases()]);
       cleanup();
       window.location.reload();
     } catch (error) {

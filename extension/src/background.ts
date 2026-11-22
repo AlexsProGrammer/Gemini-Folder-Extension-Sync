@@ -1,6 +1,7 @@
 import type {
   EncryptedSyncEnvelope,
   RemoteSyncBlob,
+  SessionPassphrasePayload,
   SyncApiResponse,
   SyncCheckPermissionMessage,
   SyncMessage,
@@ -8,10 +9,22 @@ import type {
   SyncOpenPermissionPageResult,
   SyncPermissionResult,
   SyncPullMessage,
-  SyncPushMessage
+  SyncPushMessage,
+  SyncSessionClearMessage,
+  SyncSessionGetMessage,
+  SyncSessionGetResult,
+  SyncSessionSetMessage,
+  SyncSessionWriteResult
 } from './shared/types';
 import { RemoteSyncBlobSchema, SyncConfirmationSchema } from './shared/schemas';
-import { errorMessage, errorName, webext } from './shared/webext';
+import {
+  errorMessage,
+  errorName,
+  storageSessionGet,
+  storageSessionRemove,
+  storageSessionSet,
+  webext
+} from './shared/webext';
 
 /**
  * The background service worker owns only privileged cross-origin network
@@ -32,6 +45,16 @@ const SYNC_FETCH_TIMEOUT_MS = 10_000;
 const PULL_RETRY_DELAYS_MS = [400, 1200] as const;
 const RETRYABLE_PULL_STATUSES = new Set([502, 503, 504]);
 const ACCOUNT_ID_RE = /^[0-9a-f]{64}$/;
+const SYNC_SESSION_PASSPHRASE_KEY = 'gemini_sync_session_passphrases';
+const MAX_PASSPHRASE_LENGTH = 4096;
+const MAX_PASSPHRASE_ACCOUNTS = 64;
+
+/**
+ * Fallback used only when `storage.session` is unavailable in the background
+ * context; primary persistence is `storage.session` so passphrases survive
+ * MV3 service worker sleep/wake cycles.
+ */
+let fallbackSessionPassphrases: SessionPassphrasePayload | null = null;
 
 type SyncHandlerResponse = SyncApiResponse<unknown>;
 type SyncHandlerFailure = Extract<SyncHandlerResponse, { success: false }>;
@@ -50,6 +73,21 @@ function isCheckPermissionMessage(message: unknown): message is SyncCheckPermiss
 function isOpenPermissionPageMessage(message: unknown): message is SyncOpenPermissionPageMessage {
   if (!message || typeof message !== 'object') return false;
   return (message as { action?: unknown }).action === 'SYNC_OPEN_PERMISSION_PAGE';
+}
+
+function isSessionGetMessage(message: unknown): message is SyncSessionGetMessage {
+  if (!message || typeof message !== 'object') return false;
+  return (message as { action?: unknown }).action === 'SYNC_SESSION_GET';
+}
+
+function isSessionSetMessage(message: unknown): message is SyncSessionSetMessage {
+  if (!message || typeof message !== 'object') return false;
+  return (message as { action?: unknown }).action === 'SYNC_SESSION_SET';
+}
+
+function isSessionClearMessage(message: unknown): message is SyncSessionClearMessage {
+  if (!message || typeof message !== 'object') return false;
+  return (message as { action?: unknown }).action === 'SYNC_SESSION_CLEAR';
 }
 
 function getExtensionOrigin(): string | null {
@@ -401,16 +439,106 @@ async function webextPermissions(): Promise<{
   return null;
 }
 
+function sanitizeSessionPayload(raw: unknown): SessionPassphrasePayload | null {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null;
+  const candidate = raw as { globalPassphrase?: unknown; accountPassphrases?: unknown };
+
+  if (candidate.globalPassphrase !== undefined) {
+    if (typeof candidate.globalPassphrase !== 'string' || candidate.globalPassphrase.length > MAX_PASSPHRASE_LENGTH) {
+      return null;
+    }
+  }
+
+  const accountPassphrases: Record<string, string> = {};
+  if (candidate.accountPassphrases !== undefined) {
+    if (!candidate.accountPassphrases || typeof candidate.accountPassphrases !== 'object' || Array.isArray(candidate.accountPassphrases)) {
+      return null;
+    }
+    const entries = Object.entries(candidate.accountPassphrases as Record<string, unknown>);
+    if (entries.length > MAX_PASSPHRASE_ACCOUNTS) {
+      return null;
+    }
+    for (const [accountId, value] of entries) {
+      if (typeof value !== 'string' || value.length > MAX_PASSPHRASE_LENGTH) {
+        return null;
+      }
+      accountPassphrases[accountId] = value;
+    }
+  }
+
+  return {
+    ...(typeof candidate.globalPassphrase === 'string' && candidate.globalPassphrase
+      ? { globalPassphrase: candidate.globalPassphrase }
+      : {}),
+    accountPassphrases
+  };
+}
+
+async function handleSessionGet(): Promise<SyncSessionGetResult> {
+  const result = await storageSessionGet<Record<string, unknown>>([SYNC_SESSION_PASSPHRASE_KEY]);
+  if (result === null) {
+    return { ok: true, data: fallbackSessionPassphrases };
+  }
+  const raw = result[SYNC_SESSION_PASSPHRASE_KEY];
+  return { ok: true, data: raw ? sanitizeSessionPayload(raw) : null };
+}
+
+async function handleSessionSet(message: SyncSessionSetMessage): Promise<SyncSessionWriteResult> {
+  const sanitized = sanitizeSessionPayload(message.payload);
+  if (!sanitized) {
+    return { ok: false, error: 'Invalid session passphrase payload.' };
+  }
+  const persistedInSession = await storageSessionSet({ [SYNC_SESSION_PASSPHRASE_KEY]: sanitized });
+  if (persistedInSession) {
+    fallbackSessionPassphrases = null;
+    return { ok: true, persistedInSession: true };
+  }
+  fallbackSessionPassphrases = sanitized;
+  return { ok: true, persistedInSession: false };
+}
+
+async function handleSessionClear(): Promise<SyncSessionWriteResult> {
+  fallbackSessionPassphrases = null;
+  await storageSessionRemove(SYNC_SESSION_PASSPHRASE_KEY);
+  return { ok: true, persistedInSession: true };
+}
+
 webext.runtime.onMessage.addListener((
   message: SyncMessage,
   sender: chrome.runtime.MessageSender,
   sendResponse: (
-    response: SyncApiResponse<unknown> | SyncPermissionResult | SyncOpenPermissionPageResult
+    response:
+      | SyncApiResponse<unknown>
+      | SyncPermissionResult
+      | SyncOpenPermissionPageResult
+      | SyncSessionGetResult
+      | SyncSessionWriteResult
   ) => void
 ) => {
   if (!isAuthorizedSender(sender)) {
     sendResponse({ success: false, error: 'forbidden', message: 'Unauthorized message sender.' });
     return false;
+  }
+
+  if (isSessionGetMessage(message)) {
+    handleSessionGet()
+      .then((result) => sendResponse(result))
+      .catch((error: Error) => sendResponse({ ok: false, error: error.message }));
+    return true;
+  }
+
+  if (isSessionSetMessage(message)) {
+    handleSessionSet(message)
+      .then((result) => sendResponse(result))
+      .catch((error: Error) => sendResponse({ ok: false, error: error.message }));
+    return true;
+  }
+
+  if (isSessionClearMessage(message)) {
+    handleSessionClear()
+      .then((result) => sendResponse(result))
+      .catch((error: Error) => sendResponse({ ok: false, error: error.message }));
+    return true;
   }
 
   if (isCheckPermissionMessage(message)) {
