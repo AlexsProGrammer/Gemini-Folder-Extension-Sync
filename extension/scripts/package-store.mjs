@@ -10,18 +10,25 @@ function run(command, args, cwd = root) {
   if (result.status !== 0) throw new Error(`${command} exited with status ${result.status}`);
 }
 
-run(process.execPath, [resolve(root, 'scripts/build.mjs')]);
-const dist = resolve(root, 'dist');
+run(process.execPath, [resolve(root, 'scripts/build.mjs'), '--target=chrome']);
+const dist = resolve(root, 'dist/chrome');
 const manifest = JSON.parse(await readFile(resolve(dist, 'manifest.json'), 'utf8'));
 if (!/^\d+(?:\.\d+){0,3}$/.test(manifest.version)) throw new Error('Invalid extension version');
+if (manifest.background?.service_worker !== 'background.js') {
+  throw new Error('Expected Chrome manifest background.service_worker to be "background.js"');
+}
+if (manifest.browser_specific_settings) {
+  throw new Error('Unexpected browser_specific_settings in Chrome manifest');
+}
 const stamp = new Date().toISOString().replace(/[-:]/g, '').replace(/\.\d+Z$/, 'Z');
 const output = resolve(root, `release/store-upload-${manifest.version}-${stamp}`);
 const unpacked = resolve(output, 'unpacked');
 const archive = resolve(output, `gemini-projects-${manifest.version}-webstore-${stamp}.zip`);
 
-// 仅打包清单实际引用的资源，排除 source map、历史脚本和开发文档。
-const files = new Set(['manifest.json']);
+// Package only manifest-referenced resources and dynamic extension pages, excluding source maps and dev files.
+const files = new Set(['manifest.json', 'grant-permission.html', 'grant-permission.js']);
 if (manifest.background?.service_worker) files.add(manifest.background.service_worker);
+for (const script of manifest.background?.scripts ?? []) files.add(script);
 for (const script of manifest.content_scripts ?? []) {
   for (const file of [...(script.js ?? []), ...(script.css ?? [])]) files.add(file);
 }

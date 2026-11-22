@@ -3,8 +3,8 @@ $ErrorActionPreference = "Stop"
 $root = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
 Set-Location $root
 
-Write-Host "[1/5] Building extension..."
-npm run build | Out-Host
+Write-Host "[1/5] Building Firefox extension..."
+npm run build:firefox | Out-Host
 
 $timestamp = Get-Date -Format "yyyyMMdd-HHmmss"
 $releaseRoot = Join-Path $root "release"
@@ -16,32 +16,33 @@ $manifestPath = Join-Path $unpackedDir "manifest.json"
 Write-Host "[2/5] Preparing release folder..."
 New-Item -ItemType Directory -Path $unpackedDir -Force | Out-Null
 
-Write-Host "[3/5] Copying dist files..."
-Copy-Item -Path (Join-Path $root "dist\*") -Destination $unpackedDir -Recurse -Force
+Write-Host "[3/5] Copying dist/firefox files..."
+Copy-Item -Path (Join-Path $root "dist\firefox\*") -Destination $unpackedDir -Recurse -Force
+Get-ChildItem -Path $unpackedDir -Filter "*.map" -Recurse | Remove-Item -Force
+Get-ChildItem -Path $unpackedDir -Filter "*.js" -Recurse | ForEach-Object {
+  $content = Get-Content -Raw -Path $_.FullName -Encoding UTF8
+  $stripped = [System.Text.RegularExpressions.Regex]::Replace($content, '(?m)^//# sourceMappingURL=.*(?:\r?\n|$)', '')
+  [System.IO.File]::WriteAllText($_.FullName, $stripped, [System.Text.UTF8Encoding]::new($false))
+}
 
 if (!(Test-Path $manifestPath)) {
   throw "manifest.json not found in $unpackedDir"
 }
 
-Write-Host "[4/5] Adapting manifest for Firefox..."
-$manifest = Get-Content -Raw -Path $manifestPath | ConvertFrom-Json
-
-# Firefox currently accepts service_worker but does not require "type: module" here.
-if ($manifest.background -and $manifest.background.type) {
-  $manifest.background.PSObject.Properties.Remove("type")
+Write-Host "[4/5] Validating Firefox manifest and extension pages..."
+foreach ($requiredFile in @("grant-permission.html", "grant-permission.js")) {
+  if (!(Test-Path (Join-Path $unpackedDir $requiredFile))) {
+    throw "$requiredFile not found in $unpackedDir"
+  }
 }
 
-$manifest | Add-Member -NotePropertyName browser_specific_settings -NotePropertyValue @{
-  gecko = @{
-    id = "gemini-projects@linyushuo0818.github"
-    strict_min_version = "142.0"
-    data_collection_permissions = @{
-      required = @("none")
-    }
-  }
-} -Force
-
-$manifest | ConvertTo-Json -Depth 50 | Set-Content -Path $manifestPath -Encoding UTF8
+$manifest = Get-Content -Raw -Path $manifestPath | ConvertFrom-Json
+if ($manifest.browser_specific_settings.gecko.id -ne "gemini-folder-sync@pro-grammer.de") {
+  throw "Unexpected browser_specific_settings.gecko.id: $($manifest.browser_specific_settings.gecko.id)"
+}
+if (!$manifest.background -or !$manifest.background.scripts -or $manifest.background.scripts.Count -eq 0) {
+  throw "Expected Firefox manifest background.scripts to be populated"
+}
 
 Write-Host "[5/5] Creating zip..."
 Compress-Archive -Path (Join-Path $unpackedDir "*") -DestinationPath $zipPath -Force
