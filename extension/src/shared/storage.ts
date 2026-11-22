@@ -296,22 +296,31 @@ async function migrateLegacyDataUnlocked(accountHash: string): Promise<Workspace
   });
 
   const prompts = legacyPrompts.prompts.map(toPromptTemplate);
+  const legacyChats = legacyState ? normalizeChatIndex(legacyState.chatIndex) : {};
+  const hasMigratedData =
+    legacyProjects.length > 0 ||
+    prompts.length > 0 ||
+    Object.keys(legacyChats).length > 0;
+  const initialVersion = hasMigratedData ? 2 : 1;
 
   const payload = normalizeWorkspacePayload({
     schemaVersion: WORKSPACE_SCHEMA_VERSION,
     accountId: accountHash,
-    version: 1,
+    version: initialVersion,
     updatedAt: Date.now(),
     projects,
     prompts,
     ...(legacyPrompts.tagMeta ? { tagMeta: legacyPrompts.tagMeta } : {}),
     // Chat assignments and sidebar preferences from the legacy unpartitioned
     // store follow their projects into the claiming account's partition.
-    chats: legacyState ? normalizeChatIndex(legacyState.chatIndex) : {},
+    chats: legacyChats,
     uiPrefs: legacyState ? normalizeUiPrefs(legacyState.uiPrefs) : undefined
   }, accountHash);
 
   await writeWorkspaceEnvelope(accountHash, payload);
+  if (hasMigratedData) {
+    await markSyncDirty(accountHash, initialVersion);
+  }
   await storageLocalSet({
     [getLegacyMigrationFlagKey(accountHash)]: {
       migratedAt: Date.now(),

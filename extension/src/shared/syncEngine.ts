@@ -24,6 +24,7 @@ import { promptFingerprint } from './promptFingerprint';
 import { errorMessage, errorName } from './webext';
 import type {
   ChatRef,
+  EncryptedSyncEnvelope,
   PromptTemplate,
   Project,
   SyncConflictDetail,
@@ -151,6 +152,40 @@ function workspaceHasContent(state: WorkspacePayload): boolean {
     Object.keys(state.projects ?? {}).length > 0 ||
     Object.keys(state.chats ?? {}).length > 0 ||
     (state.prompts ?? []).length > 0
+  );
+}
+
+function canonicalizeValue(value: unknown): unknown {
+  if (Array.isArray(value)) {
+    return value.map(canonicalizeValue);
+  }
+  if (value && typeof value === 'object') {
+    const sorted: Record<string, unknown> = {};
+    for (const key of Object.keys(value as Record<string, unknown>).sort()) {
+      const entry = (value as Record<string, unknown>)[key];
+      if (entry !== undefined) {
+        sorted[key] = canonicalizeValue(entry);
+      }
+    }
+    return sorted;
+  }
+  return value;
+}
+
+function areWorkspacesEquivalent(a: WorkspacePayload, b: WorkspacePayload): boolean {
+  const normalize = (w: WorkspacePayload) => ({
+    schemaVersion: w.schemaVersion,
+    accountId: w.accountId,
+    version: w.version,
+    updatedAt: w.updatedAt,
+    projects: w.projects ?? {},
+    prompts: w.prompts ?? [],
+    tagMeta: w.tagMeta ?? {},
+    chats: w.chats ?? {}
+  });
+  return (
+    JSON.stringify(canonicalizeValue(normalize(a))) ===
+    JSON.stringify(canonicalizeValue(normalize(b)))
   );
 }
 
@@ -487,36 +522,39 @@ export class SyncEngine {
         return;
       }
       const { ciphertext, iv } = await encryptWorkspace(localState, key);
-
-      debugLog(`runPush: sending payload (version: ${localState.version}, baseVersion: ${meta.lastSyncedVersion}, updatedAt: ${localState.updatedAt})`);
-      const response = await requestRemotePush(config, accountHash, {
+      const envelope: EncryptedSyncEnvelope = {
         version: localState.version,
         baseVersion: meta.lastSyncedVersion,
         ciphertext,
         iv,
         updatedAt: localState.updatedAt
-      });
+      };
+
+      debugLog(`runPush: sending payload (version: ${localState.version}, baseVersion: ${meta.lastSyncedVersion}, updatedAt: ${localState.updatedAt})`);
+      const response = await requestRemotePush(config, accountHash, envelope);
       debugLog('runPush: response received:', JSON.stringify(response));
 
       if (response.success) {
-        this.pushRetryAttempts.delete(accountHash);
-        this.pausedAccounts.delete(accountHash);
         const pushedVersion = 'data' in response ? response.data.version : localState.version;
-        const { stillDirty } = await reconcileSyncMetaAfterPush(
-          accountHash,
-          pushedVersion,
-          response.etag
-        );
-        if (stillDirty) {
-          this.schedulePush(accountHash);
-          this.setStatus(accountHash, 'syncing');
-        } else {
-          this.setStatus(accountHash, 'synced');
-        }
+        await this.finalizeSuccessfulPush(accountHash, pushedVersion, response.etag);
         return;
       }
 
       if (response.error === 'conflict' && response.serverState) {
+        if (
+          response.serverState.version === envelope.version &&
+          response.serverState.updatedAt === envelope.updatedAt &&
+          response.serverState.iv === envelope.iv &&
+          response.serverState.ciphertext === envelope.ciphertext
+        ) {
+          debugLog('runPush: 409 matched exact pushed envelope; treating as idempotent success');
+          await this.finalizeSuccessfulPush(
+            accountHash,
+            envelope.version,
+            `"v${envelope.version}-${envelope.updatedAt}"`
+          );
+          return;
+        }
         debugWarn('runPush: conflict detected; server state is newer');
         this.pushRetryAttempts.delete(accountHash);
         try {
@@ -525,6 +563,19 @@ export class SyncEngine {
             response.serverState.iv,
             key
           );
+          if (
+            remoteState.version === localState.version &&
+            remoteState.updatedAt === localState.updatedAt &&
+            areWorkspacesEquivalent(localState, remoteState)
+          ) {
+            debugLog('runPush: 409 matched equivalent workspace payload; treating as idempotent success');
+            await this.finalizeSuccessfulPush(
+              accountHash,
+              remoteState.version,
+              `"v${remoteState.version}-${remoteState.updatedAt}"`
+            );
+            return;
+          }
           await this.handleConflict(accountHash, localState, remoteState);
         } catch (error) {
           console.warn('[gemini-projects] conflict payload decryption failed', error);
@@ -558,6 +609,26 @@ export class SyncEngine {
         errorMessage(error)
       );
       this.schedulePushRetry(accountHash);
+    }
+  }
+
+  private async finalizeSuccessfulPush(
+    accountHash: string,
+    pushedVersion: number,
+    etag?: string
+  ): Promise<void> {
+    this.pushRetryAttempts.delete(accountHash);
+    this.pausedAccounts.delete(accountHash);
+    const { stillDirty } = await reconcileSyncMetaAfterPush(
+      accountHash,
+      pushedVersion,
+      etag
+    );
+    if (stillDirty) {
+      this.schedulePush(accountHash);
+      this.setStatus(accountHash, 'syncing');
+    } else {
+      this.setStatus(accountHash, 'synced');
     }
   }
 
@@ -688,15 +759,13 @@ export class SyncEngine {
           if (meta.dirty) {
             return { kind: 'conflict' as const, localState };
           }
-          // Local-first guard: a remote payload without any content (fresh,
-          // reset or mis-bound server partition) must never wipe a populated
-          // local workspace — that is how a briefly unreachable/empty server
-          // turned into an empty sidebar with no way back. Keep the locally
-          // saved folders/projects and re-seed the server from this device
-          // instead. (Intentional "delete everything" still propagates: the
-          // re-seed push then conflicts and the conflict modal decides.)
+          // Local-first guard: a remote payload without any content (e.g.
+          // intentional deletion on another device or an unexpected server
+          // reset) must never silently wipe a populated local workspace.
+          // Raise an explicit conflict so the user chooses whether to keep
+          // local data or adopt the empty remote state.
           if (!workspaceHasContent(remoteState) && workspaceHasContent(localState)) {
-            return { kind: 'keep_local_empty_remote' as const };
+            return { kind: 'conflict' as const, localState };
           }
           debugLog('runPull: remote is newer; adopting remote state');
           await putWorkspace(accountHash, remoteState);
@@ -717,6 +786,24 @@ export class SyncEngine {
           return { kind: 'conflict' as const, localState };
         }
 
+        if (meta.lastSyncedVersion === 0 && workspaceHasContent(remoteState)) {
+          const localHasProjectsOrChats =
+            Object.keys(localState.projects ?? {}).length > 0 ||
+            Object.keys(localState.chats ?? {}).length > 0;
+          if (localHasProjectsOrChats) {
+            return { kind: 'conflict' as const, localState };
+          }
+          debugLog('runPull: initial sync at equal version; adopting remote state');
+          await putWorkspace(accountHash, remoteState);
+          await setSyncMeta(accountHash, {
+            lastSyncedVersion: remoteState.version,
+            dirty: false,
+            localVersion: remoteState.version,
+            ...(nextEtag ? { etag: nextEtag } : {})
+          });
+          return { kind: 'adopted' as const };
+        }
+
         if (meta.lastSyncedVersion !== remoteState.version || (nextEtag && meta.etag !== nextEtag)) {
           await setSyncMeta(accountHash, {
             lastSyncedVersion: remoteState.version,
@@ -731,12 +818,6 @@ export class SyncEngine {
       if (outcome.kind === 'conflict') {
         debugWarn('runPull: conflicting local and remote state; raising conflict');
         await this.handleConflict(accountHash, outcome.localState, remoteState);
-        return;
-      }
-      if (outcome.kind === 'keep_local_empty_remote') {
-        debugWarn('runPull: remote is newer but carries no content; keeping local data and re-seeding the server');
-        this.schedulePush(accountHash);
-        this.setStatus(accountHash, 'synced', 'Server state was empty; kept the locally saved data.');
         return;
       }
       if (outcome.kind === 'adopted') {
