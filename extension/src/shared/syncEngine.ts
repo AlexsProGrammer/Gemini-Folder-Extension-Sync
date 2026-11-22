@@ -1,7 +1,8 @@
 import {
   decryptWorkspace,
   encryptWorkspace,
-  deriveWorkspaceKey
+  deriveWorkspaceKey,
+  PayloadTooLargeError
 } from './crypto';
 import {
   debugLog,
@@ -203,6 +204,52 @@ export class SyncEngine {
   private pendingRepush = new Set<string>();
   private inFlightPulls = new Map<string, Promise<void>>();
   private online = isOnline();
+  private coordChannel: BroadcastChannel | null = null;
+
+  constructor() {
+    if (typeof BroadcastChannel === 'function') {
+      try {
+        this.coordChannel = new BroadcastChannel('gp-sync-coord');
+        this.coordChannel.onmessage = (event) => {
+          const msg = event.data as { type?: string; detail?: SyncStatusDetail } | null;
+          if (msg?.type === 'status' && msg.detail?.accountId && msg.detail?.status) {
+            this.applyRemoteStatus(msg.detail);
+          }
+        };
+      } catch {
+        this.coordChannel = null;
+      }
+    }
+  }
+
+  private applyRemoteStatus(detail: SyncStatusDetail): void {
+    this.statuses.set(detail.accountId, detail.status);
+    if (detail.message) {
+      this.statusMessages.set(detail.accountId, detail.message);
+    } else {
+      this.statusMessages.delete(detail.accountId);
+    }
+    dispatchWindowEvent(SYNC_STATUS_EVENT, detail);
+  }
+
+  private withSyncLock<T>(
+    accountHash: string,
+    ifAvailable: boolean,
+    fn: () => Promise<T>
+  ): Promise<T | undefined> {
+    const lockManager = typeof navigator !== 'undefined' ? navigator.locks : undefined;
+    if (!lockManager || typeof lockManager.request !== 'function') {
+      return fn();
+    }
+    return lockManager.request(
+      `gp_sync_${accountHash}`,
+      { ifAvailable },
+      (lock) => {
+        if (!lock) return undefined;
+        return fn();
+      }
+    ) as Promise<T | undefined>;
+  }
 
   /**
    * Derives the AES-GCM-256 workspace key for the account from a passphrase
@@ -357,12 +404,14 @@ export class SyncEngine {
       return;
     }
 
-    const task = this.runPush(accountHash).finally(() => {
-      this.inFlightPushes.delete(accountHash);
-      if (this.pendingRepush.delete(accountHash)) {
-        this.schedulePush(accountHash);
-      }
-    });
+    const task = this.withSyncLock(accountHash, false, () => this.runPush(accountHash))
+      .then(() => undefined)
+      .finally(() => {
+        this.inFlightPushes.delete(accountHash);
+        if (this.pendingRepush.delete(accountHash)) {
+          this.schedulePush(accountHash);
+        }
+      });
     this.inFlightPushes.set(accountHash, task);
     await task;
   }
@@ -427,6 +476,11 @@ export class SyncEngine {
         getWorkspace(accountHash),
         getSyncMeta(accountHash)
       ]);
+      if (!meta.dirty && localState.version <= meta.lastSyncedVersion) {
+        debugLog('runPush: workspace already synced by another tab; skipping redundant push');
+        this.setStatus(accountHash, 'synced');
+        return;
+      }
       const { ciphertext, iv } = await encryptWorkspace(localState, key);
 
       debugLog(`runPush: sending payload (version: ${localState.version}, baseVersion: ${meta.lastSyncedVersion}, updatedAt: ${localState.updatedAt})`);
@@ -481,6 +535,10 @@ export class SyncEngine {
         true
       );
     } catch (error) {
+      if (error instanceof PayloadTooLargeError || errorName(error) === 'PayloadTooLargeError') {
+        this.handleErrorOutcome(accountHash, 'payload_too_large', 413, errorMessage(error), undefined, true);
+        return;
+      }
       debugWarn('runPush: push failed (exception)', error);
       this.setStatus(
         accountHash,
@@ -512,9 +570,12 @@ export class SyncEngine {
       return existingPull;
     }
 
-    const task = this.runPull(accountHash).finally(() => {
-      this.inFlightPulls.delete(accountHash);
-    });
+    const ifAvailable = !options?.force;
+    const task = this.withSyncLock(accountHash, ifAvailable, () => this.runPull(accountHash))
+      .then(() => undefined)
+      .finally(() => {
+        this.inFlightPulls.delete(accountHash);
+      });
     this.inFlightPulls.set(accountHash, task);
     await task;
   }
@@ -532,13 +593,17 @@ export class SyncEngine {
     this.setStatus(accountHash, 'syncing');
 
     try {
-      const response = await requestRemotePull(config, accountHash);
+      const [preMeta, localExists] = await Promise.all([
+        getSyncMeta(accountHash),
+        hasWorkspace(accountHash)
+      ]);
+      const ifNoneMatch = localExists && preMeta.etag ? preMeta.etag : undefined;
+      const response = await requestRemotePull(config, accountHash, ifNoneMatch);
       debugLog('runPull: response received:', JSON.stringify(response));
 
       if (!response.success) {
         if (response.error === 'not_found') {
           // Server has no state yet: seed it from the local workspace.
-          const localExists = await hasWorkspace(accountHash);
           debugLog(`runPull: 404 not_found; local workspace exists: ${localExists}. ${localExists ? 'Scheduling initial push (seed).' : 'Nothing to seed.'}`);
           if (localExists) {
             this.schedulePush(accountHash);
@@ -556,6 +621,24 @@ export class SyncEngine {
           response.retryAfterSeconds,
           false
         );
+        return;
+      }
+
+      if ('notModified' in response && response.notModified) {
+        debugLog('runPull: 304 Not Modified; skipping decryption');
+        if (response.etag && response.etag !== preMeta.etag) {
+          await setSyncMeta(accountHash, { ...preMeta, etag: response.etag });
+        }
+        if (preMeta.dirty) {
+          this.schedulePush(accountHash);
+        } else {
+          this.setStatus(accountHash, 'synced');
+        }
+        return;
+      }
+
+      if (!('data' in response)) {
+        this.setStatus(accountHash, 'error', 'Malformed remote sync response.');
         return;
       }
 
@@ -581,6 +664,7 @@ export class SyncEngine {
         getWorkspace(accountHash),
         getSyncMeta(accountHash)
       ]);
+      const nextEtag = response.etag ?? meta.etag;
       debugLog(`runPull: version comparison — remote: ${remoteState.version}, local: ${localState.version}, dirty: ${meta.dirty}`);
 
       if (remoteState.version > localState.version) {
@@ -606,7 +690,8 @@ export class SyncEngine {
         await putWorkspace(accountHash, remoteState);
         await setSyncMeta(accountHash, {
           lastSyncedVersion: remoteState.version,
-          dirty: false
+          dirty: false,
+          ...(nextEtag ? { etag: nextEtag } : {})
         });
         dispatchWindowEvent(WORKSPACE_UPDATED_EVENT, { accountId: accountHash });
         this.setStatus(accountHash, 'synced');
@@ -625,10 +710,11 @@ export class SyncEngine {
         return;
       }
 
-      if (meta.lastSyncedVersion !== remoteState.version) {
+      if (meta.lastSyncedVersion !== remoteState.version || (nextEtag && meta.etag !== nextEtag)) {
         await setSyncMeta(accountHash, {
           lastSyncedVersion: remoteState.version,
-          dirty: false
+          dirty: false,
+          ...(nextEtag ? { etag: nextEtag } : {})
         });
       }
       debugLog('runPull: versions in sync');
@@ -716,6 +802,11 @@ export class SyncEngine {
     }
     const detail: SyncStatusDetail = { accountId, status, ...(message ? { message } : {}) };
     dispatchWindowEvent(SYNC_STATUS_EVENT, detail);
+    try {
+      this.coordChannel?.postMessage({ type: 'status', detail });
+    } catch {
+      // BroadcastChannel closed or unavailable.
+    }
   }
 }
 

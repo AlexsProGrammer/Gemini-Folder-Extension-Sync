@@ -9,7 +9,7 @@ import {
   storageSessionSet
 } from './webext';
 import { normalizeChatIndex, parseWorkspace } from './schemas';
-import { getRawIdentifierForHash } from './account';
+import { getRawIdentifierForHash, normalizeCanonicalChatUrl } from './account';
 import { isLocalVaultEnvelope, openWorkspaceEnvelope, sealWorkspaceEnvelope, VaultLockedError, type VaultMeta } from './vault';
 
 export const STORAGE_KEY = 'gemini_projects_v1';
@@ -51,7 +51,8 @@ export async function getSyncMeta(accountHash: string): Promise<SyncMeta> {
       typeof candidate.lastSyncedVersion === 'number' && Number.isFinite(candidate.lastSyncedVersion)
         ? candidate.lastSyncedVersion
         : 0,
-    dirty: candidate.dirty === true
+    dirty: candidate.dirty === true,
+    ...(typeof candidate.etag === 'string' && candidate.etag ? { etag: candidate.etag } : {})
   };
 }
 
@@ -59,7 +60,8 @@ export async function setSyncMeta(accountHash: string, meta: SyncMeta): Promise<
   await storageLocalSet({
     [getSyncMetaKey(accountHash)]: {
       lastSyncedVersion: meta.lastSyncedVersion,
-      dirty: meta.dirty
+      dirty: meta.dirty,
+      ...(typeof meta.etag === 'string' && meta.etag ? { etag: meta.etag } : {})
     }
   });
 }
@@ -394,13 +396,51 @@ async function writeWorkspaceEnvelope(accountHash: string, payload: WorkspacePay
   await debugStep('seal:persist', () => storageLocalSet({ [getWorkspaceKey(accountHash)]: envelope }));
 }
 
+export function getLocalUiPrefsKey(accountHash: string): string {
+  return `gp_ui_prefs_${accountHash}`;
+}
+
+export async function getLocalUiPrefs(accountHash: string): Promise<UiPrefs | null> {
+  const key = getLocalUiPrefsKey(accountHash);
+  const result = await storageLocalGet<Record<string, unknown>>([key]);
+  const raw = result[key];
+  if (!raw || typeof raw !== 'object') return null;
+  return normalizeUiPrefs(raw);
+}
+
+export async function setLocalUiPrefs(accountHash: string, prefs: Partial<UiPrefs>): Promise<UiPrefs> {
+  const existing = await getLocalUiPrefs(accountHash);
+  const next = normalizeUiPrefs({ ...(existing ?? {}), ...prefs });
+  await storageLocalSet({ [getLocalUiPrefsKey(accountHash)]: next });
+  return next;
+}
+
+/**
+ * Drops unassigned, unpinned chats from persisted workspace state and
+ * normalizes `lastUrl` to an account-index-independent canonical path.
+ */
+function pruneWorkspaceChats(chats: Record<string, ChatRef> | undefined): Record<string, ChatRef> {
+  const pruned: Record<string, ChatRef> = {};
+  if (!chats || typeof chats !== 'object') return pruned;
+  Object.entries(chats).forEach(([conversationId, chat]) => {
+    if (!chat) return;
+    if (!chat.projectId && chat.isPinned !== true) return;
+    pruned[conversationId] = {
+      ...chat,
+      lastUrl: normalizeCanonicalChatUrl(chat.lastUrl, chat.conversationId)
+    };
+  });
+  return pruned;
+}
+
 export async function saveWorkspace(accountHash: string, data: WorkspacePayload): Promise<void> {
   const next: WorkspacePayload = {
     ...data,
     schemaVersion: WORKSPACE_SCHEMA_VERSION,
     accountId: accountHash,
     version: (typeof data.version === 'number' ? data.version : 0) + 1,
-    updatedAt: Date.now()
+    updatedAt: Date.now(),
+    chats: pruneWorkspaceChats(data.chats)
   };
   const validated = normalizeWorkspacePayload(next, accountHash);
   await writeWorkspaceEnvelope(accountHash, validated);
@@ -837,7 +877,11 @@ export function deleteWorkspaceProject(
     Object.keys(chats).forEach((conversationId) => {
       const chat = chats[conversationId];
       if (chat.projectId && doomed.has(chat.projectId)) {
-        chats[conversationId] = { ...chat, projectId: null };
+        if (chat.isPinned) {
+          chats[conversationId] = { ...chat, projectId: null };
+        } else {
+          delete chats[conversationId];
+        }
       }
     });
 
@@ -855,14 +899,18 @@ export function moveWorkspaceChat(
     const workspace = await getWorkspaceUnlocked(accountHash, true);
     const chats = workspace.chats ?? (workspace.chats = {});
     const existing = chats[conversationId];
-    chats[conversationId] = {
-      conversationId,
-      title: existing?.title ?? '',
-      isPinned: existing?.isPinned ?? false,
-      projectId,
-      updatedAt: Date.now(),
-      lastUrl: existing?.lastUrl
-    };
+    if (projectId === null && existing?.isPinned !== true) {
+      delete chats[conversationId];
+    } else {
+      chats[conversationId] = {
+        conversationId,
+        title: existing?.title ?? '',
+        isPinned: existing?.isPinned ?? false,
+        projectId,
+        updatedAt: Date.now(),
+        lastUrl: normalizeCanonicalChatUrl(existing?.lastUrl, conversationId)
+      };
+    }
     await saveWorkspace(accountHash, workspace);
     return workspaceToStoredState(workspace);
   });
@@ -877,17 +925,21 @@ export function setWorkspaceChatPinned(
     const workspace = await getWorkspaceUnlocked(accountHash, true);
     const chats = workspace.chats ?? (workspace.chats = {});
     const existing = chats[conversationId];
-    // A chat can be pinned before it ever gets a workspace record (e.g. pinned
-    // in Gemini's sidebar and then moved into a project): create the record so
-    // the pin state survives instead of being silently dropped.
-    chats[conversationId] = {
-      conversationId,
-      title: existing?.title ?? '',
-      isPinned,
-      projectId: existing?.projectId ?? null,
-      updatedAt: Date.now(),
-      lastUrl: existing?.lastUrl
-    };
+    if (!isPinned && !existing?.projectId) {
+      delete chats[conversationId];
+    } else {
+      // A chat can be pinned before it ever gets a workspace record (e.g. pinned
+      // in Gemini's sidebar and then moved into a project): create the record so
+      // the pin state survives instead of being silently dropped.
+      chats[conversationId] = {
+        conversationId,
+        title: existing?.title ?? '',
+        isPinned,
+        projectId: existing?.projectId ?? null,
+        updatedAt: Date.now(),
+        lastUrl: normalizeCanonicalChatUrl(existing?.lastUrl, conversationId)
+      };
+    }
     await saveWorkspace(accountHash, workspace);
     return workspaceToStoredState(workspace);
   });
@@ -902,13 +954,19 @@ export function upsertWorkspaceChatRefs(
     const index = workspace.chats ?? (workspace.chats = {});
     chats.forEach((chat) => {
       const existing = index[chat.conversationId];
+      const nextProjectId = chat.projectId ?? existing?.projectId ?? null;
+      const nextPinned = typeof chat.isPinned === 'boolean' ? chat.isPinned : (existing?.isPinned ?? false);
+      if (!nextProjectId && !nextPinned) {
+        delete index[chat.conversationId];
+        return;
+      }
       index[chat.conversationId] = {
         conversationId: chat.conversationId,
         title: chat.title || existing?.title || '',
-        isPinned: typeof chat.isPinned === 'boolean' ? chat.isPinned : (existing?.isPinned ?? false),
-        projectId: chat.projectId ?? existing?.projectId ?? null,
+        isPinned: nextPinned,
+        projectId: nextProjectId,
         updatedAt: chat.updatedAt ?? existing?.updatedAt ?? Date.now(),
-        lastUrl: chat.lastUrl ?? existing?.lastUrl
+        lastUrl: normalizeCanonicalChatUrl(chat.lastUrl ?? existing?.lastUrl, chat.conversationId)
       };
     });
     await saveWorkspace(accountHash, workspace);

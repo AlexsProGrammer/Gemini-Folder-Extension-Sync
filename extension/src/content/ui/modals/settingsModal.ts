@@ -793,7 +793,7 @@ export function openSettingsModal(activeAccountId: string, activeAccountLabel: s
     try {
       if (activeAccountId) {
         const pullProbe = await requestRemotePull({ serverUrl, apiKey }, activeAccountId);
-        if (pullProbe.success) {
+        if (pullProbe.success && 'data' in pullProbe) {
           const candidateKey = await deriveWorkspaceKey(passphrase, activeAccountId);
           const valid = await testPassphrase(pullProbe.data.ciphertext, pullProbe.data.iv, candidateKey);
           if (!valid) {

@@ -1,18 +1,24 @@
 import { ChatRef, Project, RuntimeState, StoredState, SyncStatus } from '../shared/types';
-import { withActiveAccountScope } from '../shared/account';
-import { debugStep, errorMessage, errorName, errorStack, storageLocalGet, storageLocalSet } from '../shared/webext';
+import { normalizeCanonicalChatUrl, withActiveAccountScope } from '../shared/account';
+import { debugStep, errorMessage, errorName, errorStack, storageLocalGet, storageLocalSet, webext } from '../shared/webext';
 import {
   createDefaultFeatureSettings,
   deleteWorkspaceProject,
   FEATURE_SETTINGS_CHANGED_EVENT,
   getFeatureSettings,
+  getLocalUiPrefs,
+  getLocalUiPrefsKey,
+  getSyncSettings,
   getWorkspace,
+  getWorkspaceKey,
   initDebugLoggingFlag,
   moveWorkspaceChat,
   onWorkspaceSaved,
+  setLocalUiPrefs,
   setWorkspaceChatPinned,
   setWorkspaceProjectPinned,
-  updateWorkspaceUiPrefs,
+  SYNC_SESSION_PASSPHRASE_KEY,
+  SYNC_SETTINGS_KEY,
   upsertWorkspaceChatRefs,
   upsertWorkspaceProject,
   workspaceToStoredState
@@ -23,7 +29,6 @@ import {
   SYNC_STATUS_EVENT,
   WORKSPACE_UPDATED_EVENT
 } from '../shared/syncEngine';
-import { getSyncSettings } from '../shared/storage';
 import {
   ACCOUNT_CHANGED_EVENT,
   AccountChangeDetail,
@@ -225,6 +230,44 @@ function initWorkspaceSync(): void {
 
   window.addEventListener('gemini-workspace:vault-locked', () => {
     applyVaultLockedNotice();
+  });
+
+  webext.storage?.onChanged?.addListener((
+    changes: Record<string, unknown>,
+    area: string
+  ) => {
+    const accountHash = getActiveAccountHash();
+    if (!accountHash) return;
+
+    if (area === 'local') {
+      if (changes[getWorkspaceKey(accountHash)]) {
+        loadInitialState()
+          .catch(() => undefined)
+          .then(() => {
+            applyNativeChatVisibility();
+            renderPanelIfChanged(true);
+          });
+      }
+      if (changes[getLocalUiPrefsKey(accountHash)]) {
+        getLocalUiPrefs(accountHash)
+          .then((prefs) => {
+            if (!prefs) return;
+            state.uiPrefs = {
+              projectsCollapsed: prefs.projectsCollapsed === true,
+              foldersCollapsed: prefs.foldersCollapsed === true
+            };
+            renderPanelIfChanged(true);
+          })
+          .catch(() => undefined);
+      }
+      if (changes[SYNC_SETTINGS_KEY]) {
+        syncEngine.clearPassphrase(accountHash);
+        void ensureSyncUnlocked(accountHash);
+      }
+    } else if (area === 'session' && changes[SYNC_SESSION_PASSPHRASE_KEY]) {
+      syncEngine.clearPassphrase(accountHash);
+      void ensureSyncUnlocked(accountHash);
+    }
   });
 }
 
@@ -566,8 +609,15 @@ function initProjectInstructionInjection(): void {
 async function loadInitialState() {
   const loadWorkspace = async () => {
     const accountHash = await debugStep('load:resolve-account', () => resolveActiveAccountHash());
-    const workspace = await debugStep('load:get-workspace', () => getWorkspace(accountHash));
-    debugStep('load:apply-state', () => applyStoredState(workspaceToStoredState(workspace)));
+    const [workspace, localUiPrefs] = await Promise.all([
+      debugStep('load:get-workspace', () => getWorkspace(accountHash)),
+      getLocalUiPrefs(accountHash).catch(() => null)
+    ]);
+    const stored = workspaceToStoredState(workspace);
+    if (localUiPrefs) {
+      stored.uiPrefs = localUiPrefs;
+    }
+    debugStep('load:apply-state', () => applyStoredState(stored));
   };
 
   try {
@@ -937,7 +987,7 @@ function syncNativeChatsFromDom() {
 
     const existing = state.chatIndex.get(conversationId);
     const title = normalizeTitle(link.textContent || row.textContent || existing?.title || '');
-    const lastUrl = link.href || existing?.lastUrl || withActiveAccountScope(`/app/${conversationId}`);
+    const lastUrl = normalizeCanonicalChatUrl(link.href || existing?.lastUrl, conversationId);
     if (!title && existing?.title) continue;
 
     updates.push({
@@ -954,26 +1004,32 @@ function syncNativeChatsFromDom() {
 
   if (!updates.length) return;
 
-  let changed = false;
+  const persistedUpdates: ChatRef[] = [];
   for (const chat of updates) {
     const existing = state.chatIndex.get(chat.conversationId);
-    if (
-      existing?.title !== chat.title ||
-      existing?.lastUrl !== chat.lastUrl ||
-      existing?.projectId !== chat.projectId
-    ) {
-      changed = true;
-    }
-    state.chatIndex.set(chat.conversationId, {
+    const nextChat: ChatRef = {
       ...chat,
       projectId: existing?.projectId ?? chat.projectId,
       updatedAt: existing?.updatedAt ?? Date.now()
-    });
+    };
+    state.chatIndex.set(chat.conversationId, nextChat);
+
+    if (nextChat.projectId != null || nextChat.isPinned === true) {
+      if (
+        !existing ||
+        existing.title !== nextChat.title ||
+        existing.isPinned !== nextChat.isPinned ||
+        existing.projectId !== nextChat.projectId ||
+        existing.lastUrl !== nextChat.lastUrl
+      ) {
+        persistedUpdates.push(nextChat);
+      }
+    }
   }
 
-  if (changed) {
+  if (persistedUpdates.length > 0) {
     resolveActiveAccountHash()
-      .then((accountHash) => upsertWorkspaceChatRefs(accountHash, updates))
+      .then((accountHash) => upsertWorkspaceChatRefs(accountHash, persistedUpdates))
       .then((next) => applyStoredState(next))
       .catch(() => undefined);
   }
@@ -1257,7 +1313,7 @@ function handleToggleCollapse(section: 'projects' | 'folders', collapsed: boolea
     state.uiPrefs.foldersCollapsed = collapsed;
   }
   resolveActiveAccountHash()
-    .then((accountHash) => updateWorkspaceUiPrefs(accountHash, { [section === 'projects' ? 'projectsCollapsed' : 'foldersCollapsed']: collapsed }))
+    .then((accountHash) => setLocalUiPrefs(accountHash, { [section === 'projects' ? 'projectsCollapsed' : 'foldersCollapsed']: collapsed }))
     .catch((error) => console.warn('[gemini-projects] ui prefs persist failed', error));
   renderPanelIfChanged(true);
 }
@@ -1311,7 +1367,7 @@ async function ensureChatKnown(conversationId: string) {
       isPinned: existing?.isPinned ?? false,
       projectId: existing?.projectId ?? null,
       updatedAt: Date.now(),
-      lastUrl: existing?.lastUrl || window.location.pathname
+      lastUrl: normalizeCanonicalChatUrl(existing?.lastUrl || window.location.pathname, conversationId)
     };
     state.chatIndex.set(conversationId, chat);
     const accountHash = await resolveActiveAccountHash();
@@ -1326,7 +1382,7 @@ async function ensureChatKnown(conversationId: string) {
     isPinned: existing?.isPinned ?? false,
     projectId: existing?.projectId ?? null,
     updatedAt: Date.now(),
-    lastUrl: link.href
+    lastUrl: normalizeCanonicalChatUrl(link.href, conversationId)
   };
   state.chatIndex.set(conversationId, chat);
   const accountHash = await resolveActiveAccountHash();

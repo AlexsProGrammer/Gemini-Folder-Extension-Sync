@@ -6,7 +6,7 @@ import {
   updateWorkspacePrompts
 } from '../../shared/storage';
 import { PromptTemplate, TagMeta, WorkspacePayload } from '../../shared/types';
-import { webext } from '../../shared/webext';
+import { webext, storageLocalGet, storageLocalSet } from '../../shared/webext';
 import { ACCOUNT_CHANGED_EVENT, getActiveAccountHash, resolveActiveAccountHash } from '../accountWatcher';
 
 function uuidv4() {
@@ -296,8 +296,26 @@ class PromptStore {
 
     private async loadFromStorage(): Promise<PromptsData> {
         const accountHash = await this.ensureAccountHash();
-        const workspace = await getWorkspace(accountHash);
+        const usageKey = `gp_prompt_usage_${accountHash}`;
+        const [workspace, usageResult] = await Promise.all([
+            getWorkspace(accountHash),
+            storageLocalGet<Record<string, unknown>>([usageKey]).catch(() => ({} as Record<string, unknown>))
+        ]);
         let data = this.toPromptsData(workspace);
+        const usageMap = usageResult[usageKey];
+        if (usageMap && typeof usageMap === 'object') {
+            Object.entries(usageMap as Record<string, unknown>).forEach(([id, entry]) => {
+                const prompt = data.prompts[id];
+                if (!prompt || !entry || typeof entry !== 'object') return;
+                const rec = entry as { usageCount?: unknown; lastUsedAt?: unknown };
+                if (typeof rec.usageCount === 'number' && rec.usageCount > prompt.usageCount) {
+                    prompt.usageCount = rec.usageCount;
+                }
+                if (typeof rec.lastUsedAt === 'number' && rec.lastUsedAt > prompt.lastUsedAt) {
+                    prompt.lastUsedAt = rec.lastUsedAt;
+                }
+            });
+        }
 
         // First activation under the workspace schema: seed the library once.
         // version === 1 marks a workspace that saveWorkspace has never revised.
@@ -407,7 +425,26 @@ class PromptStore {
             data.prompts[id].usageCount++;
             data.prompts[id].lastUsedAt = Date.now();
             this.cache = data;
-            await this.writeWorkspace(data);
+            // Persist usage stats locally without bumping workspace.version or triggering a full sync push.
+            try {
+                const accountHash = await this.ensureAccountHash();
+                const usageKey = `gp_prompt_usage_${accountHash}`;
+                const result = await storageLocalGet<Record<string, unknown>>([usageKey]);
+                const existing = (result[usageKey] && typeof result[usageKey] === 'object'
+                    ? result[usageKey]
+                    : {}) as Record<string, { usageCount: number; lastUsedAt: number }>;
+                await storageLocalSet({
+                    [usageKey]: {
+                        ...existing,
+                        [id]: {
+                            usageCount: data.prompts[id].usageCount,
+                            lastUsedAt: data.prompts[id].lastUsedAt
+                        }
+                    }
+                });
+            } catch {
+                // Local usage persistence failure is non-fatal.
+            }
         }
     }
 

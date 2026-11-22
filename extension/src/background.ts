@@ -211,7 +211,8 @@ async function mapFetchException(error: unknown, origin: string): Promise<SyncHa
 async function handleSyncPull(
   accountId: string,
   serverUrl: string,
-  apiKey: string
+  apiKey: string,
+  ifNoneMatch?: string
 ): Promise<SyncHandlerResponse> {
   const target = validateSyncEndpoint(serverUrl, accountId);
   if (!target) {
@@ -221,14 +222,24 @@ async function handleSyncPull(
     return permissionDeniedResponse();
   }
 
+  const headers: Record<string, string> = {
+    'Authorization': `Bearer ${apiKey}`
+  };
+  if (ifNoneMatch) {
+    headers['If-None-Match'] = ifNoneMatch;
+  }
+
   for (let attempt = 0; attempt <= PULL_RETRY_DELAYS_MS.length; attempt++) {
     try {
       const response = await fetchWithTimeout(target.endpoint, {
         method: 'GET',
-        headers: {
-          'Authorization': `Bearer ${apiKey}`
-        }
+        headers
       });
+
+      if (response.status === 304) {
+        const etag = response.headers?.get('ETag') ?? ifNoneMatch;
+        return { success: true, notModified: true, ...(etag ? { etag } : {}) };
+      }
 
       if (response.status === 200) {
         const body = await parseJsonResponse(response);
@@ -236,7 +247,8 @@ async function handleSyncPull(
         if (!parsed.success) {
           return { success: false, error: 'network_error', status: 200, message: 'Malformed sync blob.' };
         }
-        return { success: true, data: parsed.data as RemoteSyncBlob };
+        const etag = response.headers?.get('ETag') ?? undefined;
+        return { success: true, data: parsed.data as RemoteSyncBlob, ...(etag ? { etag } : {}) };
       }
 
       if (RETRYABLE_PULL_STATUSES.has(response.status) && attempt < PULL_RETRY_DELAYS_MS.length) {
@@ -305,7 +317,7 @@ async function handleSyncPush(message: SyncPushMessage): Promise<SyncHandlerResp
 
 function handleSyncMessage(message: SyncPullMessage | SyncPushMessage): Promise<SyncHandlerResponse> {
   if (message.action === 'SYNC_PULL') {
-    return handleSyncPull(message.accountId, message.serverUrl, message.apiKey);
+    return handleSyncPull(message.accountId, message.serverUrl, message.apiKey, message.ifNoneMatch);
   }
   return handleSyncPush(message);
 }

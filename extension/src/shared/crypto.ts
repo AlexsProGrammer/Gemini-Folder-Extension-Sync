@@ -11,6 +11,98 @@ const PBKDF2_ITERATIONS = 310_000;
 const AES_GCM_KEY_LENGTH = 256;
 /** 96-bit initialization vector, the recommended size for AES-GCM. */
 const IV_BYTE_LENGTH = 12;
+/** 1-byte plaintext envelope format markers for pre-encryption compression. */
+const PAYLOAD_FORMAT_RAW = 0x00;
+const PAYLOAD_FORMAT_GZIP = 0x01;
+/** Client-side guard before hitting the 10 MB backend body limit. */
+export const MAX_SYNC_CIPHERTEXT_BYTES = 9_500_000;
+
+export class PayloadTooLargeError extends Error {
+  constructor(bytes: number) {
+    const mb = (bytes / (1024 * 1024)).toFixed(2);
+    super(`Sync payload is too large (${mb} MB). Remove unused items or large notes before syncing.`);
+    this.name = 'PayloadTooLargeError';
+  }
+}
+
+async function readStreamToUint8Array(stream: ReadableStream<Uint8Array>): Promise<Uint8Array> {
+  const reader = stream.getReader();
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    if (value && value.byteLength > 0) {
+      const local = new Uint8Array(Array.from(value));
+      chunks.push(local);
+      total += local.byteLength;
+    }
+  }
+  const result = new Uint8Array(total);
+  let offset = 0;
+  for (const chunk of chunks) {
+    result.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return result;
+}
+
+async function compressPayloadBytes(jsonBytes: Uint8Array): Promise<Uint8Array> {
+  if (typeof CompressionStream === 'function') {
+    try {
+      const cs = new CompressionStream('gzip');
+      const writer = cs.writable.getWriter();
+      const writePromise = writer.write(jsonBytes as unknown as BufferSource).then(() => writer.close());
+      const [compressed] = await Promise.all([readStreamToUint8Array(cs.readable), writePromise]);
+      if (compressed.byteLength + 1 < jsonBytes.byteLength) {
+        const out = new Uint8Array(compressed.byteLength + 1);
+        out[0] = PAYLOAD_FORMAT_GZIP;
+        out.set(compressed, 1);
+        return out;
+      }
+    } catch {
+      // Fall back to uncompressed envelope if CompressionStream fails.
+    }
+  }
+  const out = new Uint8Array(jsonBytes.byteLength + 1);
+  out[0] = PAYLOAD_FORMAT_RAW;
+  out.set(jsonBytes, 1);
+  return out;
+}
+
+async function decompressPayloadBytes(rawBuffer: ArrayBuffer): Promise<string> {
+  // Copy out of any Firefox Xray-wrapped ArrayBuffer into current compartment first.
+  const bytes = new Uint8Array(Array.from(new Uint8Array(rawBuffer)));
+  if (bytes.byteLength === 0) {
+    throw new Error('Decrypted payload is empty.');
+  }
+
+  const marker = bytes[0];
+  let jsonBytes: Uint8Array;
+
+  if (marker === PAYLOAD_FORMAT_GZIP) {
+    if (typeof DecompressionStream !== 'function') {
+      throw new Error('DecompressionStream is unavailable to read gzip sync payload.');
+    }
+    const ds = new DecompressionStream('gzip');
+    const writer = ds.writable.getWriter();
+    const compressed = bytes.slice(1);
+    const writePromise = writer.write(compressed as unknown as BufferSource).then(() => writer.close());
+    [jsonBytes] = await Promise.all([readStreamToUint8Array(ds.readable), writePromise]);
+  } else if (marker === PAYLOAD_FORMAT_RAW) {
+    jsonBytes = bytes.slice(1);
+  } else if (marker === 0x1f && bytes[1] === 0x8b && typeof DecompressionStream === 'function') {
+    const ds = new DecompressionStream('gzip');
+    const writer = ds.writable.getWriter();
+    const writePromise = writer.write(bytes as unknown as BufferSource).then(() => writer.close());
+    [jsonBytes] = await Promise.all([readStreamToUint8Array(ds.readable), writePromise]);
+  } else {
+    // Legacy uncompressed UTF-8 JSON (starts with '{' = 0x7b).
+    jsonBytes = bytes;
+  }
+
+  return new TextDecoder().decode(jsonBytes);
+}
 
 function getSubtle(): SubtleCrypto {
   const subtle = globalThis.crypto?.subtle;
@@ -90,13 +182,24 @@ export async function encryptWorkspace(
 ): Promise<{ ciphertext: string; iv: string }> {
   const subtle = getSubtle();
   const iv = crypto.getRandomValues(new Uint8Array(IV_BYTE_LENGTH));
-  const plaintext = new TextEncoder().encode(JSON.stringify(payload)) as unknown as BufferSource;
+  const jsonBytes = new TextEncoder().encode(JSON.stringify(payload));
+  const plaintext = await compressPayloadBytes(jsonBytes);
 
   try {
-    const buffer = await subtle.encrypt({ name: 'AES-GCM', iv: iv as unknown as BufferSource }, key, plaintext);
-    debugLog(`encryptWorkspace: success (payload size: ${plaintext.byteLength} bytes, version: ${payload.version})`);
+    const buffer = await subtle.encrypt(
+      { name: 'AES-GCM', iv: iv as unknown as BufferSource },
+      key,
+      plaintext as unknown as BufferSource
+    );
+    const ciphertext = bytesToBase64(new Uint8Array(buffer));
+    if (ciphertext.length > MAX_SYNC_CIPHERTEXT_BYTES) {
+      throw new PayloadTooLargeError(ciphertext.length);
+    }
+    debugLog(
+      `encryptWorkspace: success (raw: ${jsonBytes.byteLength}B, packed: ${plaintext.byteLength}B, b64: ${ciphertext.length}B, version: ${payload.version})`
+    );
     return {
-      ciphertext: bytesToBase64(new Uint8Array(buffer)),
+      ciphertext,
       iv: bytesToBase64(iv)
     };
   } catch (error) {
@@ -124,7 +227,7 @@ export async function decryptWorkspace(
       base64ToBytes(ciphertextB64) as unknown as BufferSource
     );
 
-    const json = new TextDecoder().decode(buffer);
+    const json = await decompressPayloadBytes(buffer);
     const raw = JSON.parse(json) as unknown;
     debugLog('decryptWorkspace: success (payload decrypted and validated)');
     return parseWorkspace(raw);

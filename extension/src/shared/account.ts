@@ -159,6 +159,26 @@ export function withActiveAccountScope(href: string): string {
   return `${prefix}${href.startsWith('/') ? '' : '/'}${href}`;
 }
 
+/**
+ * Strips any origin and `/u/<n>` account-index prefix from a Gemini chat URL
+ * so synced `lastUrl` values remain account-index-independent across devices
+ * (preventing cross-device `/u/0` <-> `/u/1` sync ping-pong loops).
+ */
+export function normalizeCanonicalChatUrl(rawUrl: string | undefined, conversationId: string): string {
+  const fallback = `/app/${conversationId}`;
+  if (!rawUrl) return fallback;
+  try {
+    const parsed = new URL(rawUrl, 'https://gemini.google.com');
+    const stripped = parsed.pathname.replace(ACCOUNT_INDEX_PATTERN, '');
+    if (stripped.startsWith('/app/') || stripped.startsWith('/gem/')) {
+      return stripped;
+    }
+    return fallback;
+  } catch {
+    return fallback;
+  }
+}
+
 function extractEmailFromText(text: string): string | null {
   if (!text) return null;
   const match = text.match(EMAIL_PATTERN);

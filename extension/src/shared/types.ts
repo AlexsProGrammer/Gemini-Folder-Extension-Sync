@@ -179,6 +179,7 @@ export interface EncryptedSyncEnvelope {
 export interface SyncMeta {
   lastSyncedVersion: number;
   dirty: boolean;
+  etag?: string;
 }
 
 /** Full server-side blob row (GET /api/v1/sync/:accountId response). */
@@ -191,6 +192,7 @@ export interface SyncPullMessage {
   accountId: string;
   serverUrl: string;
   apiKey: string;
+  ifNoneMatch?: string;
 }
 
 export interface SyncPushMessage {
@@ -241,7 +243,8 @@ export type SyncErrorKind =
   | 'network_error';
 
 export type SyncApiResponse<T> =
-  | { success: true; data: T }
+  | { success: true; data: T; etag?: string; notModified?: false }
+  | { success: true; notModified: true; etag?: string }
   | {
       success: false;
       error: SyncErrorKind;

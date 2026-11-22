@@ -134,13 +134,15 @@ export async function openServerHostPermissionPage(serverUrl: string): Promise<S
 
 export async function requestRemotePull(
   config: SyncConfig,
-  accountId: string
+  accountId: string,
+  ifNoneMatch?: string
 ): Promise<SyncApiResponse<RemoteSyncBlob>> {
   const message: SyncPullMessage = {
     action: 'SYNC_PULL',
     accountId,
     serverUrl: config.serverUrl,
-    apiKey: config.apiKey
+    apiKey: config.apiKey,
+    ...(ifNoneMatch ? { ifNoneMatch } : {})
   };
 
   try {
@@ -150,11 +152,25 @@ export async function requestRemotePull(
     }
 
     if (response.success) {
+      if ('notModified' in response && response.notModified) {
+        return {
+          success: true,
+          notModified: true,
+          ...(response.etag ? { etag: response.etag } : {})
+        };
+      }
+      if (!('data' in response)) {
+        return { success: false, error: 'network_error', message: 'Malformed remote sync response.' };
+      }
       const validated = RemoteSyncBlobSchema.safeParse(response.data);
       if (!validated.success) {
         return { success: false, error: 'network_error', message: 'Malformed remote sync blob.' };
       }
-      return { success: true, data: validated.data as RemoteSyncBlob };
+      return {
+        success: true,
+        data: validated.data as RemoteSyncBlob,
+        ...(response.etag ? { etag: response.etag } : {})
+      };
     }
     return response;
   } catch (error) {
