@@ -236,6 +236,9 @@ function countProjects(payload: WorkspacePayload): number {
 }
 
 function countChats(payload: WorkspacePayload): number {
+  if (payload.chats) {
+    return Object.values(payload.chats).filter((chat) => Boolean(chat.projectId)).length;
+  }
   return Object.values(payload.projects ?? {}).reduce(
     (sum, project) => sum + (project.chatIds?.length ?? 0),
     0
@@ -348,6 +351,10 @@ export function openConflictModal(
   let touchResumeTimer: number | null = null;
 
   function cleanup(): void {
+    if (intervalId !== null) {
+      window.clearInterval(intervalId);
+      intervalId = null;
+    }
     document.removeEventListener('keydown', onKeyDown);
     window.removeEventListener('pagehide', cleanup);
     if (touchResumeTimer !== null) window.clearTimeout(touchResumeTimer);
@@ -377,7 +384,7 @@ export function openConflictModal(
   }
 
   function tick(): void {
-    if (paused) return;
+    if (paused || document.hidden) return;
     remaining = Math.max(0, remaining - COUNTDOWN_TICK_MS / 1000);
     renderCountdown();
     if (remaining <= 0) finish(newestChoice);

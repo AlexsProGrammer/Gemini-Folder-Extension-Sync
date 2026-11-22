@@ -1,3 +1,4 @@
+import { deriveWorkspaceKey, testPassphrase } from '../../../shared/crypto';
 import { ensureServerHostPermission, openServerHostPermissionPage, requestRemotePull } from '../../../shared/syncClient';
 import { syncEngine } from '../../../shared/syncEngine';
 import { getFeatureSettings, getSyncSettings, saveFeatureSettings, saveSyncSettings } from '../../../shared/storage';
@@ -720,6 +721,14 @@ export function openSettingsModal(activeAccountId: string, activeAccountLabel: s
         showTestResult('API key is not authorized for this account (403).', 'error');
       } else if (response.error === 'permission_denied') {
         showTestResult(response.message || 'Host permission for sync server is not granted.', 'error');
+      } else if (response.error === 'rate_limited') {
+        showTestResult(response.message || 'Rate limited by sync server (429).', 'error');
+      } else if (response.error === 'payload_too_large') {
+        showTestResult(response.message || 'Sync payload exceeds server size limit (413).', 'error');
+      } else if (response.error === 'server_error') {
+        showTestResult(response.message || `Sync server error (${response.status ?? 500}).`, 'error');
+      } else if (response.error === 'timeout') {
+        showTestResult(response.message || 'Sync server request timed out.', 'error');
       } else {
         showTestResult(`Server unreachable${response.message ? ` (${response.message})` : '.'}`, 'error');
       }
@@ -782,6 +791,18 @@ export function openSettingsModal(activeAccountId: string, activeAccountLabel: s
 
     saveButton.disabled = true;
     try {
+      if (activeAccountId) {
+        const pullProbe = await requestRemotePull({ serverUrl, apiKey }, activeAccountId);
+        if (pullProbe.success) {
+          const candidateKey = await deriveWorkspaceKey(passphrase, activeAccountId);
+          const valid = await testPassphrase(pullProbe.data.ciphertext, pullProbe.data.iv, candidateKey);
+          if (!valid) {
+            setSyncError('Wrong encryption passphrase for existing server data. Please enter the passphrase used on your other device.');
+            saveButton.disabled = false;
+            return;
+          }
+        }
+      }
       await saveSyncSettings(nextSettings);
       const derived = await syncEngine.setPassphrase(activeAccountId, passphrase);
       if (!derived) {
@@ -789,8 +810,9 @@ export function openSettingsModal(activeAccountId: string, activeAccountLabel: s
         saveButton.disabled = false;
         return;
       }
+      syncEngine.clearCircuitBreaker(activeAccountId);
       cleanup();
-      void syncEngine.pull(activeAccountId).catch((error) =>
+      void syncEngine.pull(activeAccountId, { force: true }).catch((error) =>
         console.warn('[gemini-projects] pull after settings save failed', error)
       );
     } catch (error) {

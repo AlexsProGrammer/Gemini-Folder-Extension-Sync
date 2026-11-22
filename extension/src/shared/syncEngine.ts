@@ -7,19 +7,22 @@ import {
   debugLog,
   debugWarn,
   getSyncConfig,
+  getSyncMeta,
   getWorkspace,
   hasWorkspace,
   putWorkspace,
+  setSyncMeta,
   WORKSPACE_SCHEMA_VERSION
 } from './storage';
 import { requestRemotePull, requestRemotePush } from './syncClient';
 import { promptFingerprint } from './promptFingerprint';
-import { errorMessage } from './webext';
+import { errorMessage, errorName } from './webext';
 import type {
   ChatRef,
   PromptTemplate,
   Project,
   SyncConflictDetail,
+  SyncErrorKind,
   SyncResolution,
   SyncStatus,
   SyncStatusDetail,
@@ -145,11 +148,57 @@ function workspaceHasContent(state: WorkspacePayload): boolean {
   );
 }
 
+const AUTH_CIRCUIT_BREAKER_ERRORS = new Set<SyncErrorKind>([
+  'unauthorized',
+  'forbidden',
+  'permission_denied',
+  'decryption_failed'
+]);
+
+const TRANSIENT_PUSH_ERRORS = new Set<SyncErrorKind>([
+  'network_error',
+  'timeout',
+  'server_error',
+  'rate_limited'
+]);
+
+const MAX_PUSH_RETRIES = 3;
+
+function formatSyncErrorMessage(error: SyncErrorKind, status?: number, message?: string): string {
+  switch (error) {
+    case 'unauthorized':
+      return 'Invalid API key (401). Re-enter your key in sync settings.';
+    case 'forbidden':
+      return 'API key is not authorized for this account (403). Check the key binding on the server.';
+    case 'permission_denied':
+      return message ?? 'Host permission for sync server is not granted. Open Sync settings to grant access.';
+    case 'rate_limited':
+      return message ?? 'Rate limited by sync server (429).';
+    case 'payload_too_large':
+      return message ?? 'Sync payload exceeds server size limit (413).';
+    case 'server_error':
+      return message ?? `Sync server error (${status ?? 500}).`;
+    case 'timeout':
+      return message ?? 'Sync server request timed out.';
+    case 'decryption_failed':
+      return 'Wrong encryption passphrase — update it in Sync settings.';
+    case 'network_error':
+      return message ?? 'Server unreachable.';
+    default:
+      return message ?? `Sync failed (${error}).`;
+  }
+}
+
 export class SyncEngine {
   /** Ephemeral CryptoKey cache, keyed by account hash. Never persisted. */
   private keys = new Map<string, CryptoKey>();
   private statuses = new Map<string, SyncStatus>();
+  private statusMessages = new Map<string, string>();
+  private pausedAccounts = new Set<string>();
+  private unresolvedConflicts = new Map<string, SyncConflictDetail>();
   private pushTimers = new Map<string, number>();
+  private pushRetryTimers = new Map<string, number>();
+  private pushRetryAttempts = new Map<string, number>();
   private inFlightPushes = new Map<string, Promise<void>>();
   private pendingRepush = new Set<string>();
   private inFlightPulls = new Map<string, Promise<void>>();
@@ -164,6 +213,7 @@ export class SyncEngine {
     try {
       const key = await deriveWorkspaceKey(passphrase, accountId);
       this.keys.set(accountId, key);
+      this.clearCircuitBreaker(accountId);
       return true;
     } catch (error) {
       console.warn('[gemini-projects] key derivation failed', error);
@@ -176,12 +226,26 @@ export class SyncEngine {
     this.keys.delete(accountId);
   }
 
+  clearCircuitBreaker(accountId: string): void {
+    this.pausedAccounts.delete(accountId);
+    this.pushRetryAttempts.delete(accountId);
+    this.clearPushRetryTimer(accountId);
+  }
+
   hasKey(accountId: string): boolean {
     return this.keys.has(accountId);
   }
 
   getSyncStatus(accountId: string): SyncStatus {
     return this.statuses.get(accountId) ?? 'idle';
+  }
+
+  getSyncStatusMessage(accountId: string): string | undefined {
+    return this.statusMessages.get(accountId);
+  }
+
+  getUnresolvedConflict(accountId: string): SyncConflictDetail | undefined {
+    return this.unresolvedConflicts.get(accountId);
   }
 
   /** Updates connectivity state; going offline freezes all pending network work. */
@@ -200,7 +264,10 @@ export class SyncEngine {
    * here; rapid modifications within 750ms coalesce into a single remote push.
    */
   schedulePush(accountHash: string): void {
-    if (!accountHash) return;
+    if (!accountHash || this.pausedAccounts.has(accountHash)) return;
+
+    this.clearPushRetryTimer(accountHash);
+    this.pushRetryAttempts.delete(accountHash);
 
     const existingTimer = this.pushTimers.get(accountHash);
     if (existingTimer !== undefined) {
@@ -214,6 +281,58 @@ export class SyncEngine {
     this.pushTimers.set(accountHash, timer);
   }
 
+  /** Immediately executes a push for the given account (canceling any pending debounce/retry timers). */
+  async pushNow(accountHash: string): Promise<void> {
+    if (!accountHash) return;
+    const existingTimer = this.pushTimers.get(accountHash);
+    if (existingTimer !== undefined) {
+      window.clearTimeout(existingTimer);
+      this.pushTimers.delete(accountHash);
+    }
+    this.clearPushRetryTimer(accountHash);
+    await this.executePush(accountHash);
+  }
+
+  /** Schedules a push if local dirty edits remain unsynced and the account is not paused/conflicted. */
+  async pushIfDirty(accountHash: string): Promise<void> {
+    if (!accountHash || !this.online || !this.keys.has(accountHash) || this.pausedAccounts.has(accountHash)) {
+      return;
+    }
+    const status = this.getSyncStatus(accountHash);
+    if (status === 'conflict' || status === 'error') return;
+    const meta = await getSyncMeta(accountHash);
+    if (meta.dirty) {
+      this.schedulePush(accountHash);
+    }
+  }
+
+  private clearPushRetryTimer(accountHash: string): void {
+    const timer = this.pushRetryTimers.get(accountHash);
+    if (timer !== undefined) {
+      window.clearTimeout(timer);
+      this.pushRetryTimers.delete(accountHash);
+    }
+  }
+
+  private schedulePushRetry(accountHash: string, retryAfterSeconds?: number): void {
+    if (!this.online || this.pausedAccounts.has(accountHash)) return;
+    const attempt = this.pushRetryAttempts.get(accountHash) ?? 0;
+    if (attempt >= MAX_PUSH_RETRIES) return;
+
+    this.pushRetryAttempts.set(accountHash, attempt + 1);
+    const backoffMs = Math.min(60_000, 2000 * (2 ** attempt));
+    const delayMs = retryAfterSeconds !== undefined
+      ? Math.min(120_000, Math.max(backoffMs, retryAfterSeconds * 1000))
+      : backoffMs;
+
+    this.clearPushRetryTimer(accountHash);
+    const timer = window.setTimeout(() => {
+      this.pushRetryTimers.delete(accountHash);
+      void this.executePush(accountHash);
+    }, delayMs);
+    this.pushRetryTimers.set(accountHash, timer);
+  }
+
   /**
    * Executes every pending debounced push immediately. Mobile browsers freeze
    * or discard page timers when the tab is backgrounded, so the pagehide /
@@ -221,6 +340,7 @@ export class SyncEngine {
    */
   async flushPendingPushes(): Promise<void> {
     const pending = Array.from(this.pushTimers.keys());
+    this.pushTimers.forEach((timer) => window.clearTimeout(timer));
     this.pushTimers.clear();
     const tasks = pending.map((accountHash) => this.executePush(accountHash));
     await Promise.all([
@@ -245,6 +365,36 @@ export class SyncEngine {
     });
     this.inFlightPushes.set(accountHash, task);
     await task;
+  }
+
+  private handleErrorOutcome(
+    accountHash: string,
+    error: SyncErrorKind,
+    status?: number,
+    message?: string,
+    retryAfterSeconds?: number,
+    isPush = false
+  ): void {
+    const formatted = formatSyncErrorMessage(error, status, message);
+    if (AUTH_CIRCUIT_BREAKER_ERRORS.has(error)) {
+      this.pausedAccounts.add(accountHash);
+      this.setStatus(accountHash, 'error', formatted);
+      return;
+    }
+    if (isPush && TRANSIENT_PUSH_ERRORS.has(error)) {
+      this.setStatus(accountHash, this.online ? 'error' : 'offline', formatted);
+      this.schedulePushRetry(accountHash, retryAfterSeconds);
+      return;
+    }
+    if (!isPush && (error === 'network_error' || error === 'timeout')) {
+      this.setStatus(
+        accountHash,
+        this.online ? 'error' : 'offline',
+        `Server unreachable — using the locally saved data. (${formatted})`
+      );
+      return;
+    }
+    this.setStatus(accountHash, 'error', formatted);
   }
 
   private async runPush(accountHash: string): Promise<void> {
@@ -273,12 +423,16 @@ export class SyncEngine {
     );
 
     try {
-      const localState = await getWorkspace(accountHash);
+      const [localState, meta] = await Promise.all([
+        getWorkspace(accountHash),
+        getSyncMeta(accountHash)
+      ]);
       const { ciphertext, iv } = await encryptWorkspace(localState, key);
 
-      debugLog(`runPush: sending payload (version: ${localState.version}, updatedAt: ${localState.updatedAt})`);
+      debugLog(`runPush: sending payload (version: ${localState.version}, baseVersion: ${meta.lastSyncedVersion}, updatedAt: ${localState.updatedAt})`);
       const response = await requestRemotePush(config, accountHash, {
         version: localState.version,
+        baseVersion: meta.lastSyncedVersion,
         ciphertext,
         iv,
         updatedAt: localState.updatedAt
@@ -286,12 +440,19 @@ export class SyncEngine {
       debugLog('runPush: response received:', JSON.stringify(response));
 
       if (response.success) {
+        this.pushRetryAttempts.delete(accountHash);
+        this.pausedAccounts.delete(accountHash);
+        await setSyncMeta(accountHash, {
+          lastSyncedVersion: localState.version,
+          dirty: false
+        });
         this.setStatus(accountHash, 'synced');
         return;
       }
 
       if (response.error === 'conflict' && response.serverState) {
         debugWarn('runPush: conflict detected; server state is newer');
+        this.pushRetryAttempts.delete(accountHash);
         try {
           const remoteState = await decryptWorkspace(
             response.serverState.ciphertext,
@@ -301,21 +462,24 @@ export class SyncEngine {
           await this.handleConflict(accountHash, localState, remoteState);
         } catch (error) {
           console.warn('[gemini-projects] conflict payload decryption failed', error);
-          this.setStatus(accountHash, 'error', 'Conflicting remote state could not be decrypted.');
+          if (errorName(error) === 'OperationError') {
+            this.handleErrorOutcome(accountHash, 'decryption_failed');
+          } else {
+            this.setStatus(accountHash, 'error', 'Conflicting remote state could not be decrypted.');
+          }
         }
         return;
       }
 
-      debugWarn('runPush: push failed with error:', response.error, response.message);
-      if (response.error === 'unauthorized') {
-        this.setStatus(accountHash, 'error', 'Invalid API key (401). Re-enter your key in sync settings.');
-        return;
-      }
-      if (response.error === 'forbidden') {
-        this.setStatus(accountHash, 'error', 'API key is not authorized for this account (403). Check the key binding on the server.');
-        return;
-      }
-      this.setStatus(accountHash, 'error', response.message ?? `Push failed (${response.error}).`);
+      debugWarn('runPush: push failed with error:', response.error, response.status, response.message);
+      this.handleErrorOutcome(
+        accountHash,
+        response.error,
+        response.status,
+        response.message,
+        response.retryAfterSeconds,
+        true
+      );
     } catch (error) {
       debugWarn('runPush: push failed (exception)', error);
       this.setStatus(
@@ -323,6 +487,7 @@ export class SyncEngine {
         this.online ? 'error' : 'offline',
         errorMessage(error)
       );
+      this.schedulePushRetry(accountHash);
     }
   }
 
@@ -330,8 +495,11 @@ export class SyncEngine {
    * Auto-pull: fetches the remote envelope, decrypts it and reconciles
    * version ordering. Aborts gracefully when offline or no key is unlocked.
    */
-  async pull(accountHash: string): Promise<void> {
+  async pull(accountHash: string, options?: { force?: boolean }): Promise<void> {
     if (!accountHash) return;
+    if (!options?.force && this.pausedAccounts.has(accountHash)) {
+      return;
+    }
     if (!this.online) {
       this.setStatus(accountHash, 'offline');
       return;
@@ -379,27 +547,15 @@ export class SyncEngine {
           }
           return;
         }
-        debugWarn('runPull: pull failed:', response.error, response.message);
-        if (response.error === 'unauthorized') {
-          this.setStatus(accountHash, 'error', 'Invalid API key (401). Re-enter your key in sync settings.');
-          return;
-        }
-        if (response.error === 'forbidden') {
-          this.setStatus(accountHash, 'error', 'API key is not authorized for this account (403). Check the key binding on the server.');
-          return;
-        }
-        if (response.error === 'network_error') {
-          // Server unreachable (or any transport failure): the local workspace
-          // stays authoritative, so the sidebar keeps rendering the locally
-          // saved folders/projects until the server responds again.
-          this.setStatus(
-            accountHash,
-            this.online ? 'error' : 'offline',
-            `Server unreachable — using the locally saved data.${response.message ? ` (${response.message})` : ''}`
-          );
-          return;
-        }
-        this.setStatus(accountHash, 'error', response.message ?? `Pull failed (${response.error}).`);
+        debugWarn('runPull: pull failed:', response.error, response.status, response.message);
+        this.handleErrorOutcome(
+          accountHash,
+          response.error,
+          response.status,
+          response.message,
+          response.retryAfterSeconds,
+          false
+        );
         return;
       }
 
@@ -410,11 +566,29 @@ export class SyncEngine {
         return;
       }
 
-      const remoteState = await decryptWorkspace(response.data.ciphertext, response.data.iv, key);
-      const localState = await getWorkspace(accountHash);
-      debugLog(`runPull: version comparison — remote: ${remoteState.version}, local: ${localState.version}`);
+      let remoteState: WorkspacePayload;
+      try {
+        remoteState = await decryptWorkspace(response.data.ciphertext, response.data.iv, key);
+      } catch (error) {
+        if (errorName(error) === 'OperationError') {
+          this.handleErrorOutcome(accountHash, 'decryption_failed');
+          return;
+        }
+        throw error;
+      }
+
+      const [localState, meta] = await Promise.all([
+        getWorkspace(accountHash),
+        getSyncMeta(accountHash)
+      ]);
+      debugLog(`runPull: version comparison — remote: ${remoteState.version}, local: ${localState.version}, dirty: ${meta.dirty}`);
 
       if (remoteState.version > localState.version) {
+        if (meta.dirty) {
+          debugWarn('runPull: remote is newer while local has unsynced edits; raising conflict');
+          await this.handleConflict(accountHash, localState, remoteState);
+          return;
+        }
         // Local-first guard: a remote payload without any content (fresh,
         // reset or mis-bound server partition) must never wipe a populated
         // local workspace — that is how a briefly unreachable/empty server
@@ -430,6 +604,10 @@ export class SyncEngine {
         }
         debugLog('runPull: remote is newer; adopting remote state');
         await putWorkspace(accountHash, remoteState);
+        await setSyncMeta(accountHash, {
+          lastSyncedVersion: remoteState.version,
+          dirty: false
+        });
         dispatchWindowEvent(WORKSPACE_UPDATED_EVENT, { accountId: accountHash });
         this.setStatus(accountHash, 'synced');
         return;
@@ -441,6 +619,18 @@ export class SyncEngine {
         return;
       }
 
+      if (meta.dirty) {
+        debugWarn('runPull: equal versions with local dirty edits; raising conflict');
+        await this.handleConflict(accountHash, localState, remoteState);
+        return;
+      }
+
+      if (meta.lastSyncedVersion !== remoteState.version) {
+        await setSyncMeta(accountHash, {
+          lastSyncedVersion: remoteState.version,
+          dirty: false
+        });
+      }
       debugLog('runPull: versions in sync');
       this.setStatus(accountHash, 'synced');
     } catch (error) {
@@ -464,8 +654,14 @@ export class SyncEngine {
     conflict: SyncConflictDetail,
     accountHash: string
   ): Promise<void> {
+    this.unresolvedConflicts.delete(accountHash);
+
     if (resolution === 'keep_remote') {
       await putWorkspace(accountHash, conflict.remoteState);
+      await setSyncMeta(accountHash, {
+        lastSyncedVersion: conflict.remoteState.version,
+        dirty: false
+      });
       dispatchWindowEvent(WORKSPACE_UPDATED_EVENT, { accountId: accountHash });
       this.setStatus(accountHash, 'synced');
       return;
@@ -474,16 +670,25 @@ export class SyncEngine {
     if (resolution === 'keep_local') {
       const next: WorkspacePayload = {
         ...conflict.localState,
-        version: conflict.remoteState.version + 1,
+        version: Math.max(conflict.localState.version, conflict.remoteState.version) + 1,
         updatedAt: Date.now()
       };
       await putWorkspace(accountHash, next);
+      await setSyncMeta(accountHash, {
+        lastSyncedVersion: conflict.remoteState.version,
+        dirty: true
+      });
       await this.executePush(accountHash);
       return;
     }
 
     const merged = mergeWorkspaces(conflict.localState, conflict.remoteState, accountHash);
     await putWorkspace(accountHash, merged);
+    await setSyncMeta(accountHash, {
+      lastSyncedVersion: conflict.remoteState.version,
+      dirty: true
+    });
+    dispatchWindowEvent(WORKSPACE_UPDATED_EVENT, { accountId: accountHash });
     await this.executePush(accountHash);
   }
 
@@ -492,6 +697,8 @@ export class SyncEngine {
     localState: WorkspacePayload,
     remoteState: WorkspacePayload
   ): Promise<void> {
+    const conflict: SyncConflictDetail = { localState, remoteState };
+    this.unresolvedConflicts.set(accountHash, conflict);
     this.setStatus(accountHash, 'conflict');
     dispatchWindowEvent<SyncConflictDetail & { accountId: string }>(SYNC_CONFLICT_EVENT, {
       accountId: accountHash,
@@ -502,6 +709,11 @@ export class SyncEngine {
 
   private setStatus(accountId: string, status: SyncStatus, message?: string): void {
     this.statuses.set(accountId, status);
+    if (message) {
+      this.statusMessages.set(accountId, message);
+    } else {
+      this.statusMessages.delete(accountId);
+    }
     const detail: SyncStatusDetail = { accountId, status, ...(message ? { message } : {}) };
     dispatchWindowEvent(SYNC_STATUS_EVENT, detail);
   }
@@ -515,7 +727,7 @@ function mergeWorkspaces(
   return {
     schemaVersion: WORKSPACE_SCHEMA_VERSION,
     accountId: accountHash,
-    version: remoteState.version + 1,
+    version: Math.max(localState.version, remoteState.version) + 1,
     updatedAt: Date.now(),
     projects: mergeProjects(localState.projects, remoteState.projects),
     prompts: mergePromptLibraries(localState.prompts, remoteState.prompts),

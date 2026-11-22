@@ -135,6 +135,7 @@ async function ensureSyncUnlocked(accountHash: string): Promise<void> {
     const derived = await syncEngine.setPassphrase(accountHash, passphrase);
     if (derived) {
       await syncEngine.pull(accountHash);
+      await syncEngine.pushIfDirty(accountHash);
     }
   } catch (error) {
     console.warn('[gemini-projects] sync unlock failed', error);
@@ -215,9 +216,11 @@ function initWorkspaceSync(): void {
 
   window.addEventListener(SYNC_STATUS_EVENT, (event) => {
     const detail = (event as CustomEvent).detail as { accountId?: string; status?: string; message?: string };
-    if (detail?.status) {
-      panel?.updateSyncStatus(detail.status as SyncStatus);
+    const activeAccountHash = getActiveAccountHash();
+    if (!detail?.status || !activeAccountHash || detail.accountId !== activeAccountHash) {
+      return;
     }
+    panel?.updateSyncStatus(detail.status as SyncStatus, detail.message);
   });
 
   window.addEventListener('gemini-workspace:vault-locked', () => {
@@ -229,7 +232,8 @@ function initWorkspaceSync(): void {
 function refreshSyncStatusBadge(): void {
   const accountHash = getActiveAccountHash();
   const status = accountHash ? syncEngine.getSyncStatus(accountHash) : 'unconfigured';
-  panel?.updateSyncStatus(status);
+  const message = accountHash ? syncEngine.getSyncStatusMessage(accountHash) : undefined;
+  panel?.updateSyncStatus(status, message);
 }
 
 async function bootstrap() {

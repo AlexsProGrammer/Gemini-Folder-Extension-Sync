@@ -1,4 +1,4 @@
-import { ChatRef, Project, PromptTemplate, StoredState, SyncConfig, SyncSettings, TagMeta, UiPrefs, WorkspacePayload } from './types';
+import { ChatRef, Project, PromptTemplate, StoredState, SyncConfig, SyncMeta, SyncSettings, TagMeta, UiPrefs, WorkspacePayload } from './types';
 import {
   debugStep,
   errorName,
@@ -32,6 +32,43 @@ export const LEGACY_MIGRATION_GATE_KEY = 'gemini_workspace_legacy_migrated';
 
 export function getWorkspaceKey(accountHash: string): string {
   return `workspace_${accountHash}`;
+}
+
+export function getSyncMetaKey(accountHash: string): string {
+  return `sync_meta_${accountHash}`;
+}
+
+export async function getSyncMeta(accountHash: string): Promise<SyncMeta> {
+  const key = getSyncMetaKey(accountHash);
+  const result = await storageLocalGet<Record<string, unknown>>([key]);
+  const raw = result[key];
+  if (!raw || typeof raw !== 'object') {
+    return { lastSyncedVersion: 0, dirty: false };
+  }
+  const candidate = raw as Partial<SyncMeta>;
+  return {
+    lastSyncedVersion:
+      typeof candidate.lastSyncedVersion === 'number' && Number.isFinite(candidate.lastSyncedVersion)
+        ? candidate.lastSyncedVersion
+        : 0,
+    dirty: candidate.dirty === true
+  };
+}
+
+export async function setSyncMeta(accountHash: string, meta: SyncMeta): Promise<void> {
+  await storageLocalSet({
+    [getSyncMetaKey(accountHash)]: {
+      lastSyncedVersion: meta.lastSyncedVersion,
+      dirty: meta.dirty
+    }
+  });
+}
+
+export async function markSyncDirty(accountHash: string): Promise<void> {
+  const current = await getSyncMeta(accountHash);
+  if (!current.dirty) {
+    await setSyncMeta(accountHash, { ...current, dirty: true });
+  }
 }
 
 export function getLegacyMigrationFlagKey(accountHash: string): string {
@@ -367,6 +404,7 @@ export async function saveWorkspace(accountHash: string, data: WorkspacePayload)
   };
   const validated = normalizeWorkspacePayload(next, accountHash);
   await writeWorkspaceEnvelope(accountHash, validated);
+  await markSyncDirty(accountHash);
   notifyWorkspaceSaved(accountHash);
 }
 

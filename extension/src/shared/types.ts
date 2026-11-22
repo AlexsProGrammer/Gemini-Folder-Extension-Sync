@@ -169,9 +169,16 @@ export interface SyncSettings {
 /** Encrypted envelope pushed to / received from the server. */
 export interface EncryptedSyncEnvelope {
   version: number;
+  baseVersion?: number;
   ciphertext: string;
   iv: string;
   updatedAt: number;
+}
+
+/** Per-account local sync tracking metadata stored in storage.local. */
+export interface SyncMeta {
+  lastSyncedVersion: number;
+  dirty: boolean;
 }
 
 /** Full server-side blob row (GET /api/v1/sync/:accountId response). */
@@ -230,6 +237,7 @@ export type SyncErrorKind =
   | 'payload_too_large'
   | 'server_error'
   | 'timeout'
+  | 'decryption_failed'
   | 'network_error';
 
 export type SyncApiResponse<T> =

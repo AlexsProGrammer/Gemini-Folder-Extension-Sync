@@ -76,6 +76,7 @@ export type WorkspacePayloadSchemaOutput = z.infer<typeof WorkspacePayloadSchema
 /** Encrypted envelope accepted by the backend POST /api/v1/sync/:accountId. */
 export const EncryptedSyncEnvelopeSchema = z.object({
   version: z.number().int().min(1),
+  baseVersion: z.number().int().min(0).optional(),
   ciphertext: z.string().min(1),
   iv: z.string().min(1),
   updatedAt: z.number().int().min(1)

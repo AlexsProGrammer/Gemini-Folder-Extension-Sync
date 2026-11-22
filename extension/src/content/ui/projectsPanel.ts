@@ -1,8 +1,8 @@
-import { ChatRef, Project, ProjectIcon, RuntimeState, SyncStatus, WorkspacePayload } from '../../shared/types';
+import { ChatRef, Project, ProjectIcon, RuntimeState, SyncConflictDetail, SyncStatus, WorkspacePayload } from '../../shared/types';
 import { resolveAccountRawIdentifier, withActiveAccountScope } from '../../shared/account';
 import { isMobileEnvironment } from '../../shared/env';
 import { getActiveAccountHash } from '../accountWatcher';
-import { getWorkspace, getSyncConfig, updateProjectMetadata } from '../../shared/storage';
+import { getSyncMeta, getWorkspace, getSyncConfig, updateProjectMetadata } from '../../shared/storage';
 import { SYNC_CONFLICT_EVENT, syncEngine } from '../../shared/syncEngine';
 import {
   ICON_OPTIONS,
@@ -129,10 +129,25 @@ export function createProjectsPanel(options: ProjectsPanelOptions) {
   // Initialize theme observer
   attachThemeObserver(panelRoot, overlayLayer);
 
+  function openConflictResolutionModal(accountId: string, conflict: SyncConflictDetail): void {
+    openConflictModal(conflict, (choice) => {
+      void syncEngine
+        .resolveConflictResolution(choice, conflict, accountId)
+        .catch((error) => console.warn('[gemini-projects] conflict resolution failed', error));
+    });
+  }
+
   // Settings badge: the single combined badge (sync state dot + gear icon)
   // that opens the tabbed Sync/Settings modal, plus the conflict resolver.
   function openSettings() {
     const activeAccountId = getActiveAccountHash() ?? '';
+    if (lastSyncStatus === 'conflict' && activeAccountId) {
+      const unresolved = syncEngine.getUnresolvedConflict(activeAccountId);
+      if (unresolved) {
+        openConflictResolutionModal(activeAccountId, unresolved);
+        return;
+      }
+    }
     const activeAccountLabel = resolveAccountRawIdentifier();
     openSettingsModal(activeAccountId, activeAccountLabel);
   }
@@ -143,15 +158,30 @@ export function createProjectsPanel(options: ProjectsPanelOptions) {
   const settingsBadge = createSettingsBadge(openSettings, lastSyncStatus === 'unconfigured' ? initialSyncStatus : lastSyncStatus);
 
   // Manual sync badge: icon-only button beside settings that runs an immediate
-  // pull + push for the active account. Toasts on successful completion.
+  // pull (and push only if dirty edits remain). Toasts on successful completion.
   let manualSyncInFlight = false;
-  const syncNowBadge = createSyncNowBadge(() => {
+  const syncNowBadge = createSyncNowBadge(async () => {
     const accountHash = getActiveAccountHash();
-    if (!accountHash) return;
+    if (!accountHash || manualSyncInFlight) return;
     manualSyncInFlight = true;
     syncNowBadge.setSyncing(true);
-    void syncEngine.pull(accountHash).catch((error) => console.warn('[gemini-projects] manual pull failed', error));
-    syncEngine.schedulePush(accountHash);
+    try {
+      await syncEngine.pull(accountHash, { force: true });
+      const status = syncEngine.getSyncStatus(accountHash);
+      if (status !== 'error' && status !== 'conflict' && status !== 'offline') {
+        const meta = await getSyncMeta(accountHash);
+        if (meta.dirty) {
+          await syncEngine.pushNow(accountHash);
+        }
+      }
+    } catch (error) {
+      console.warn('[gemini-projects] manual sync failed', error);
+    } finally {
+      if (syncEngine.getSyncStatus(accountHash) !== 'syncing') {
+        syncNowBadge.setSyncing(false);
+        manualSyncInFlight = false;
+      }
+    }
   }) as SyncNowBadgeElement;
   syncNowBadge.classList.toggle('syncing', lastSyncStatus === 'syncing');
   // Hide the sync-now button until a server URL and API key are configured.
@@ -171,9 +201,9 @@ export function createProjectsPanel(options: ProjectsPanelOptions) {
   promptStore.subscribe(() => promptsBadge.updateCount(promptStore.getAll().length));
   void promptStore.refresh().catch(() => undefined);
 
-  function updateSyncStatus(status: SyncStatus): void {
+  function updateSyncStatus(status: SyncStatus, message?: string): void {
     lastSyncStatus = status;
-    settingsBadge.updateStatus(status);
+    settingsBadge.updateStatus(status, message);
     if (status === 'syncing') {
       syncNowBadge.setSyncing(true);
     } else {
@@ -200,24 +230,10 @@ export function createProjectsPanel(options: ProjectsPanelOptions) {
         | { accountId?: string; localState?: unknown; remoteState?: unknown }
         | undefined;
       if (!detail || !detail.localState || !detail.remoteState) return;
-      openConflictModal(
-        {
-          localState: detail.localState as WorkspacePayload,
-          remoteState: detail.remoteState as WorkspacePayload
-        },
-        (choice) => {
-          void syncEngine
-            .resolveConflictResolution(
-              choice,
-              {
-                localState: detail.localState as WorkspacePayload,
-                remoteState: detail.remoteState as WorkspacePayload
-              },
-              detail.accountId ?? ''
-            )
-            .catch((error) => console.warn('[gemini-projects] conflict resolution failed', error));
-        }
-      );
+      openConflictResolutionModal(detail.accountId ?? '', {
+        localState: detail.localState as WorkspacePayload,
+        remoteState: detail.remoteState as WorkspacePayload
+      });
     });
   }
 

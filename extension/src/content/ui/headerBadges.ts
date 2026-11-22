@@ -6,7 +6,7 @@ export type PromptsBadgeElement = HTMLElement & {
 };
 
 export type SettingsBadgeElement = HTMLElement & {
-  updateStatus: (status: SyncStatus) => void;
+  updateStatus: (status: SyncStatus, message?: string) => void;
 };
 
 /**
@@ -55,10 +55,14 @@ export function createSettingsBadge(
     onClick();
   });
 
-  function apply(status: SyncStatus): void {
+  function apply(status: SyncStatus, message?: string): void {
     badge.classList.remove(...STATUS_DOT_CLASSES);
     badge.classList.add(`dot-${status}`);
-    badge.title = STATUS_TOOLTIPS[status] ?? STATUS_TOOLTIPS.unconfigured;
+    const baseTooltip = STATUS_TOOLTIPS[status] ?? STATUS_TOOLTIPS.unconfigured;
+    badge.title =
+      (status === 'error' || status === 'offline') && message
+        ? `${message} — Click to review settings.`
+        : baseTooltip;
     badge.setAttribute('aria-label', `Open settings (sync status: ${status})`);
   }
 
