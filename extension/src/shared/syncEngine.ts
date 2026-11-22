@@ -324,6 +324,11 @@ export class SyncEngine {
     return this.keys.has(accountId);
   }
 
+  setLockedState(accountHash: string): void {
+    if (!accountHash || this.keys.has(accountHash)) return;
+    this.setStatus(accountHash, 'locked', 'Sync is locked — click to enter your encryption passphrase.');
+  }
+
   getSyncStatus(accountId: string): SyncStatus {
     return this.statuses.get(accountId) ?? 'idle';
   }

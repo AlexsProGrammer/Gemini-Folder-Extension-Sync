@@ -308,7 +308,7 @@ export type SyncApiResponse<T> =
  * Sync engine state
  * ------------------------------------------------------------------ */
 
-export type SyncStatus = 'idle' | 'unconfigured' | 'syncing' | 'synced' | 'conflict' | 'error' | 'offline';
+export type SyncStatus = 'idle' | 'unconfigured' | 'locked' | 'syncing' | 'synced' | 'conflict' | 'error' | 'offline';
 
 export type SyncResolution = 'keep_local' | 'keep_remote' | 'merge';
 

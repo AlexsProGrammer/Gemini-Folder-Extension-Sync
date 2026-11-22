@@ -151,7 +151,12 @@ async function ensureSyncUnlocked(accountHash: string): Promise<boolean> {
       const passphrase = settings.useGlobalPassphrase
         ? settings.globalPassphrase
         : settings.accountPassphrases[accountHash];
-      if (!passphrase) return false;
+      if (!passphrase) {
+        if (settings.serverUrl && settings.apiKey) {
+          syncEngine.setLockedState(accountHash);
+        }
+        return false;
+      }
       const derived = await syncEngine.setPassphrase(accountHash, passphrase);
       if (derived) {
         await syncEngine.pull(accountHash);

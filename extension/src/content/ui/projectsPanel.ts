@@ -165,8 +165,10 @@ export function createProjectsPanel(options: ProjectsPanelOptions) {
         openConflictResolutionModal(activeAccountId, unresolved);
         return;
       }
-      void syncEngine.pull(activeAccountId, { force: true });
-      return;
+      if (syncEngine.hasKey(activeAccountId) && syncEngine.getSyncStatus(activeAccountId) !== 'offline') {
+        void syncEngine.pull(activeAccountId, { force: true });
+        return;
+      }
     }
     const activeAccountLabel = resolveAccountRawIdentifier();
     openSettingsModal(activeAccountId, activeAccountLabel);
@@ -183,6 +185,11 @@ export function createProjectsPanel(options: ProjectsPanelOptions) {
   const syncNowBadge = createSyncNowBadge(async () => {
     const accountHash = getActiveAccountHash();
     if (!accountHash || manualSyncInFlight) return;
+    if (!syncEngine.hasKey(accountHash)) {
+      showToast('Sync is locked — enter your passphrase in Sync settings.');
+      openSettings();
+      return;
+    }
     manualSyncInFlight = true;
     syncNowBadge.setSyncing(true);
     try {
@@ -1478,6 +1485,10 @@ function ensurePanelRoot(shadow: ShadowRoot): HTMLElement {
         background: #9aa0a6;
       }
 
+      .gp-settings-badge.dot-locked .gp-status-dot {
+        background: #f9ab00;
+      }
+
       .gp-settings-badge.dot-conflict .gp-status-dot,
       .gp-settings-badge.dot-error .gp-status-dot {
         background: #b3261e;
@@ -1489,6 +1500,10 @@ function ensurePanelRoot(shadow: ShadowRoot): HTMLElement {
 
       :host(.dark) .gp-settings-badge.dot-syncing .gp-status-dot {
         background: #8ab4f8;
+      }
+
+      :host(.dark) .gp-settings-badge.dot-locked .gp-status-dot {
+        background: #fdd663;
       }
 
       :host(.dark) .gp-settings-badge.dot-conflict .gp-status-dot,

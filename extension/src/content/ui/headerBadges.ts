@@ -15,6 +15,7 @@ export type SettingsBadgeElement = HTMLElement & {
 const STATUS_TOOLTIPS: Record<SyncStatus, string> = {
   unconfigured: 'Sync is not configured. Click to open settings.',
   idle: 'Sync is not configured. Click to open settings.',
+  locked: 'Sync is locked. Click to enter your encryption passphrase.',
   synced: 'Workspace is in sync. Click to open settings.',
   syncing: 'Synchronizing with the server…',
   offline: 'You are offline. Changes will sync when you reconnect.',
@@ -25,6 +26,7 @@ const STATUS_TOOLTIPS: Record<SyncStatus, string> = {
 const STATUS_DOT_CLASSES = [
   'dot-unconfigured',
   'dot-idle',
+  'dot-locked',
   'dot-synced',
   'dot-syncing',
   'dot-offline',
@@ -60,9 +62,11 @@ export function createSettingsBadge(
     badge.classList.add(`dot-${status}`);
     const baseTooltip = STATUS_TOOLTIPS[status] ?? STATUS_TOOLTIPS.unconfigured;
     badge.title =
-      (status === 'error' || status === 'offline') && message
-        ? `${message} — Click to review settings.`
-        : baseTooltip;
+      status === 'locked' && message
+        ? message
+        : (status === 'error' || status === 'offline') && message
+          ? `${message} — Click to review settings.`
+          : baseTooltip;
     badge.setAttribute('aria-label', `Open settings (sync status: ${status})`);
   }
 
