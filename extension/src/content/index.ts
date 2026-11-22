@@ -1027,6 +1027,7 @@ function ensurePanel() {
     // between Chat and Spark while preserving the outer bard-sidenav node.
     // A new host always needs an initial render even when state is unchanged.
     lastRenderKey = '';
+    refreshSyncStatusBadge();
   }
 
   if (!chatMenuHandle || chatMenuOverlayShadow !== overlayShadow) {

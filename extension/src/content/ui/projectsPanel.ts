@@ -159,13 +159,14 @@ export function createProjectsPanel(options: ProjectsPanelOptions) {
   // that opens the tabbed Sync/Settings modal, plus the conflict resolver.
   function openSettings() {
     const activeAccountId = getActiveAccountHash() ?? '';
-    if (lastSyncStatus === 'conflict' && activeAccountId) {
+    const liveStatus = activeAccountId ? syncEngine.getSyncStatus(activeAccountId) : 'unconfigured';
+    if (liveStatus === 'conflict' && activeAccountId) {
       const unresolved = syncEngine.getUnresolvedConflict(activeAccountId);
       if (unresolved) {
         openConflictResolutionModal(activeAccountId, unresolved);
         return;
       }
-      if (syncEngine.hasKey(activeAccountId) && syncEngine.getSyncStatus(activeAccountId) !== 'offline') {
+      if (syncEngine.hasKey(activeAccountId)) {
         void syncEngine.pull(activeAccountId, { force: true });
         return;
       }
@@ -174,10 +175,18 @@ export function createProjectsPanel(options: ProjectsPanelOptions) {
     openSettingsModal(activeAccountId, activeAccountLabel);
   }
 
-  const initialSyncStatus: SyncStatus = getActiveAccountHash()
-    ? syncEngine.getSyncStatus(getActiveAccountHash() ?? '')
+  const initialAccountHash = getActiveAccountHash();
+  const initialSyncStatus: SyncStatus = initialAccountHash
+    ? syncEngine.getSyncStatus(initialAccountHash)
     : 'unconfigured';
-  const settingsBadge = createSettingsBadge(openSettings, lastSyncStatus === 'unconfigured' ? initialSyncStatus : lastSyncStatus);
+  const initialSyncMessage = initialAccountHash
+    ? syncEngine.getSyncStatusMessage(initialAccountHash)
+    : undefined;
+  lastSyncStatus = initialSyncStatus;
+  const settingsBadge = createSettingsBadge(openSettings, initialSyncStatus);
+  if (initialSyncMessage) {
+    settingsBadge.updateStatus(initialSyncStatus, initialSyncMessage);
+  }
 
   // Manual sync badge: icon-only button beside settings that runs an immediate
   // pull (and push only if dirty edits remain). Toasts on successful completion.
@@ -210,9 +219,10 @@ export function createProjectsPanel(options: ProjectsPanelOptions) {
       }
     }
   }) as SyncNowBadgeElement;
-  syncNowBadge.classList.toggle('syncing', lastSyncStatus === 'syncing');
+  syncNowBadge.classList.toggle('syncing', initialSyncStatus === 'syncing');
   // Hide the sync-now button until a server URL and API key are configured.
-  syncNowBadge.style.display = 'none';
+  syncNowBadge.style.display =
+    initialSyncStatus !== 'idle' && initialSyncStatus !== 'unconfigured' ? '' : 'none';
   void getSyncConfig().then((config) => {
     if (config && config.serverUrl && config.apiKey) {
       syncNowBadge.style.display = '';
