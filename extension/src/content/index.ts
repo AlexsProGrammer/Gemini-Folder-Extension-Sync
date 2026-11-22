@@ -1,6 +1,6 @@
-import { ChatRef, Project, RuntimeState, StoredState, SyncStatus } from '../shared/types';
+import { ChatRef, Project, RuntimeState, StoredState, SyncMeta, SyncStatus } from '../shared/types';
 import { normalizeCanonicalChatUrl, withActiveAccountScope } from '../shared/account';
-import { errorMessage, errorName, errorStack, storageLocalGet, storageLocalSet, webext } from '../shared/webext';
+import { errorMessage, errorName, errorStack, sanitizeStorageValue, storageLocalGet, storageLocalSet, webext } from '../shared/webext';
 import {
   createDefaultFeatureSettings,
   deleteWorkspaceProject,
@@ -10,6 +10,7 @@ import {
   getFeatureSettings,
   getLocalUiPrefs,
   getLocalUiPrefsKey,
+  getSyncMetaKey,
   getSyncSettings,
   getWorkspace,
   getWorkspaceKey,
@@ -309,6 +310,13 @@ function initWorkspaceSync(): void {
         if (!isOwnSyncSettingsChange(change?.newValue)) {
           syncEngine.clearPassphrase(accountHash);
           void ensureSyncUnlocked(accountHash);
+        }
+      }
+      if (changes[getSyncMetaKey(accountHash)]) {
+        const change = changes[getSyncMetaKey(accountHash)] as { newValue?: unknown } | undefined;
+        const rawMeta = sanitizeStorageValue(change?.newValue);
+        if (rawMeta && typeof rawMeta === 'object') {
+          syncEngine.reconcileExternalSyncMeta(accountHash, rawMeta as Partial<SyncMeta>);
         }
       }
     }

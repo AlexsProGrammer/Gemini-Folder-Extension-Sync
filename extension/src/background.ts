@@ -625,8 +625,10 @@ async function handleSerializedDirectPush(message: SyncPushMessage): Promise<Syn
         clearTimeout(queued.timer);
         queued.timer = null;
       }
-      void drainPendingPush(accountId);
-      return { success: true, superseded: true, data: { version: queued.message.data.version } };
+      return new Promise<SyncHandlerResponse>((resolve) => {
+        queued.resolvers.push(resolve);
+        void drainPendingPush(accountId);
+      });
     }
     pendingPushes.delete(accountId);
     resolveSupersededEntry(queued, message.data.version);

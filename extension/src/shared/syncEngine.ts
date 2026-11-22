@@ -35,6 +35,7 @@ import type {
   Project,
   SyncConflictDetail,
   SyncErrorKind,
+  SyncMeta,
   SyncResolution,
   SyncStatus,
   SyncStatusDetail,
@@ -348,6 +349,35 @@ export class SyncEngine {
 
   getUnresolvedConflict(accountId: string): SyncConflictDetail | undefined {
     return this.unresolvedConflicts.get(accountId);
+  }
+
+  /**
+   * Reconciles a tab stuck in `'syncing'` (e.g. after its push was superseded
+   * by another tab that subsequently closed, or by a background-recovered push)
+   * once `sync_meta_${accountHash}` records a clean committed state.
+   */
+  reconcileExternalSyncMeta(accountHash: string, meta: Partial<SyncMeta>): void {
+    if (!accountHash) return;
+    if (this.getSyncStatus(accountHash) !== 'syncing') return;
+    if (
+      this.inFlightPushes.has(accountHash) ||
+      this.inFlightPulls.has(accountHash) ||
+      (this.activeEnqueueSeqs.get(accountHash)?.size ?? 0) > 0 ||
+      this.pushTimers.has(accountHash)
+    ) {
+      return;
+    }
+    const lastSynced =
+      typeof meta.lastSyncedVersion === 'number' && Number.isFinite(meta.lastSyncedVersion)
+        ? meta.lastSyncedVersion
+        : 0;
+    const localVersion =
+      typeof meta.localVersion === 'number' && Number.isFinite(meta.localVersion)
+        ? meta.localVersion
+        : undefined;
+    if (meta.dirty === false && lastSynced > 0 && (localVersion === undefined || lastSynced >= localVersion)) {
+      this.setStatus(accountHash, 'synced');
+    }
   }
 
   /** Updates connectivity state; going offline freezes all pending network work. */
