@@ -156,10 +156,16 @@ export function initComposerObserver(callbacks: ComposerObserverCallbacks): Comp
         lastHandledComposer = null;
         return;
       }
-      lastHandledComposer = composer;
+      const activeConversationId = getConversationId(window.location.href);
       if (hasUserTurnsInChat()) {
-        callbacks.onOngoingChatComposerReady?.(composer, getConversationId(window.location.href));
+        lastHandledComposer = composer;
+        callbacks.onOngoingChatComposerReady?.(composer, activeConversationId);
+      } else if (activeConversationId) {
+        // Existing conversation whose transcript has not finished rendering yet
+        // (e.g. mid-stream reload): leave `lastHandledComposer` unset so
+        // `onOngoingChatComposerReady` can fire once user turns mount.
       } else {
+        lastHandledComposer = composer;
         callbacks.onNewChatReady(composer);
       }
     }, FIRE_DELAY_MS);

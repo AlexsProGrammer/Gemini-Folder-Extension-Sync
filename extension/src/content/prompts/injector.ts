@@ -667,6 +667,7 @@ function createAndInjectButton(container: HTMLElement, sibling: Element) {
  * ------------------------------------------------------------------ */
 
 import {
+    PROJECT_INSTRUCTIONS_END_MARKER,
     PROJECT_INSTRUCTIONS_MARKER,
     composerContainsInstructions,
     composerIsEmpty,
@@ -775,7 +776,7 @@ function renderInstructionPill(
     root.insertBefore(pill, composer);
 }
 
-function removeInstructionPill(): void {
+export function removeInstructionPill(): void {
     findInstructionPill()?.remove();
 }
 
@@ -785,10 +786,21 @@ function stripInstructionsBlock(composer: HTMLElement): void {
     const start = full.indexOf(PROJECT_INSTRUCTIONS_MARKER);
     if (start === -1) return;
 
-    const newlineClose = full.indexOf('\n]', start);
-    const close = newlineClose >= 0
-        ? newlineClose + 2
-        : full.indexOf(']', start + PROJECT_INSTRUCTIONS_MARKER.length) + 1;
+    const sentinelClose = full.indexOf(`\n${PROJECT_INSTRUCTIONS_END_MARKER}`, start);
+    let close = -1;
+    if (sentinelClose >= 0) {
+        close = sentinelClose + 1 + PROJECT_INSTRUCTIONS_END_MARKER.length;
+    } else {
+        const inlineSentinelClose = full.indexOf(PROJECT_INSTRUCTIONS_END_MARKER, start);
+        if (inlineSentinelClose >= 0) {
+            close = inlineSentinelClose + PROJECT_INSTRUCTIONS_END_MARKER.length;
+        } else {
+            const newlineClose = full.indexOf('\n]', start);
+            close = newlineClose >= 0
+                ? newlineClose + 2
+                : full.indexOf(']', start + PROJECT_INSTRUCTIONS_MARKER.length) + 1;
+        }
+    }
     const end = close > start ? close : full.length;
 
     const before = full.slice(0, start).replace(/\s+$/, '');

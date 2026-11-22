@@ -1,4 +1,4 @@
-﻿const PROJECTS_HOST_ID = 'gemini-projects-host';
+const PROJECTS_HOST_ID = 'gemini-projects-host';
 const OVERLAY_HOST_ID = 'gemini-projects-overlay';
 const GEMS_SECTION_LABELS_EN = ['Gem', 'Gems'];
 const CHATS_SECTION_LABELS_EN = ['Chats', 'Recent', 'Recents', 'Recent chats'];
@@ -78,7 +78,7 @@ function isVisibleElement(element: HTMLElement): boolean {
 function isGeminiSidebarRoot(element: HTMLElement): boolean {
   const tag = element.tagName.toLowerCase();
   const ariaLabel = normalizeText(element.getAttribute('aria-label'));
-  return tag === 'bard-sidenav' || ariaLabel === 'side navigation';
+  return tag === 'bard-sidenav' || tag === 'side-nav' || ariaLabel === 'side navigation';
 }
 
 function hasConversationLinks(root: ParentNode): boolean {
@@ -122,8 +122,17 @@ export function findSidebarRoot(): HTMLElement | null {
   const chatLabels = mergeLabels(labels.chatsPrimary, labels.chatsFallback);
 
   for (const candidate of candidates) {
+    if (
+      candidate.querySelector('infinite-scroller, .chat-history') ||
+      hasConversationLinks(candidate)
+    ) {
+      return candidate;
+    }
+  }
+
+  for (const candidate of candidates) {
     const text = candidate.textContent || '';
-    if ((includesAnyLabel(text, gemLabels) && includesAnyLabel(text, chatLabels)) || hasConversationLinks(candidate)) {
+    if (includesAnyLabel(text, gemLabels) && includesAnyLabel(text, chatLabels)) {
       return candidate;
     }
   }
@@ -185,7 +194,11 @@ function isPrimaryNavAction(normalizedText: string): boolean {
 
 function findSidebarByLandmarks(): HTMLElement | null {
   const landmarkLabels = mergeLabels(SIDEBAR_LANDMARK_LABELS_EN, SIDEBAR_LANDMARK_LABELS_ZH);
-  const elements = Array.from(document.body.querySelectorAll<HTMLElement>('body *')).filter((element) => {
+  const elements = Array.from(
+    document.querySelectorAll<HTMLElement>(
+      'nav, aside, section, [role="navigation"], [role="complementary"], [class*="sidenav"]'
+    )
+  ).filter((element) => {
     const rect = element.getBoundingClientRect();
     if (!isVisibleElement(element)) return false;
     if (rect.left > 80) return false;
@@ -213,16 +226,24 @@ export function findGemsSection(root: HTMLElement): HTMLElement | null {
 }
 
 export function findChatsSection(root: HTMLElement): HTMLElement | null {
+  // Prefer stable structural anchors first so non-EN/ZH locales do not depend
+  // on text-label heuristics.
+  const chatHistory = root.querySelector<HTMLElement>('.chat-history');
+  if (chatHistory && isVisibleElement(chatHistory)) {
+    return chatHistory;
+  }
+
+  const scroller = root.querySelector<HTMLElement>('infinite-scroller');
+  if (scroller && isVisibleElement(scroller) && hasConversationLinks(scroller)) {
+    return scroller;
+  }
+
   const labels = getSectionLabelGroups();
   const byText = findSectionByTexts(root, labels.chatsPrimary) || findSectionByTexts(root, labels.chatsFallback);
   if (byText) {
     return byText;
   }
 
-  // Newer Gemini builds keep an empty chat-history region in the sidebar even
-  // before any conversation links have rendered. Prefer that stable structural
-  // anchor so "Search chats" is never mistaken for the history section.
-  const chatHistory = root.querySelector<HTMLElement>('.chat-history');
   if (chatHistory) {
     return chatHistory;
   }
@@ -482,6 +503,10 @@ function extractIdFromPath(pathname: string): string | null {
   if (appIndex >= 0 && parts.length > appIndex + 1) {
     return parts[appIndex + 1];
   }
+  const gemIndex = parts.indexOf('gem');
+  if (gemIndex >= 0 && parts.length > gemIndex + 2) {
+    return parts[gemIndex + 2];
+  }
   return null;
 }
 
@@ -493,13 +518,14 @@ export function getConversationId(input?: string | Element | null): string | nul
   if (typeof input === 'string') {
     try {
       const url = new URL(input, window.location.origin);
+      if (url.origin !== window.location.origin && url.origin !== 'https://gemini.google.com') {
+        return null;
+      }
       return (
         extractIdFromPath(url.pathname) ||
         url.searchParams.get('conversationId') ||
         url.searchParams.get('conversation_id') ||
-        url.searchParams.get('id') ||
-        url.searchParams.get('cid') ||
-        (url.hash ? url.hash.replace('#', '') : null)
+        null
       );
     } catch {
       return null;

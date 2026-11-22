@@ -1,4 +1,4 @@
-import { storageLocalGet, storageLocalSet } from '../../shared/webext';
+import { storageLocalGet, storageLocalSet, webext } from '../../shared/webext';
 import { getConversationId } from '../dom/anchors';
 import { onSpaNavigation } from '../dom/spaNavigation';
 
@@ -61,6 +61,7 @@ interface ResponseCandidate {
   root: HTMLElement;
   content: HTMLElement;
   key: string;
+  isEphemeral: boolean;
 }
 
 interface RuntimeState {
@@ -71,6 +72,14 @@ interface RuntimeState {
   foldState: Set<string>;
   observedRoots: Set<HTMLElement>;
   contentByRoot: WeakMap<HTMLElement, HTMLElement>;
+  lastLengthByRoot: WeakMap<HTMLElement, number>;
+  ephemeralKeyByRoot: WeakMap<HTMLElement, string>;
+  ephemeralFoldedRoots: WeakSet<HTMLElement>;
+  nextEphemeralId: number;
+  currentConversationId: string | null;
+  pendingAddedKeys: Set<string>;
+  pendingRemovedKeys: Set<string>;
+  storageListenerAttached: boolean;
   observer: MutationObserver | null;
   observedTarget: HTMLElement | null;
   scanTimerId: number | null;
@@ -89,6 +98,14 @@ const runtime: RuntimeState = {
   foldState: new Set<string>(),
   observedRoots: new Set<HTMLElement>(),
   contentByRoot: new WeakMap<HTMLElement, HTMLElement>(),
+  lastLengthByRoot: new WeakMap<HTMLElement, number>(),
+  ephemeralKeyByRoot: new WeakMap<HTMLElement, string>(),
+  ephemeralFoldedRoots: new WeakSet<HTMLElement>(),
+  nextEphemeralId: 1,
+  currentConversationId: null,
+  pendingAddedKeys: new Set<string>(),
+  pendingRemovedKeys: new Set<string>(),
+  storageListenerAttached: false,
   observer: null,
   observedTarget: null,
   scanTimerId: null,
@@ -153,10 +170,42 @@ function startObservers(): void {
     return;
   }
 
+  runtime.currentConversationId = getConversationId(window.location.href);
   attachObserverTarget();
 
+  if (!runtime.storageListenerAttached) {
+    runtime.storageListenerAttached = true;
+    webext.storage?.onChanged?.addListener((changes: Record<string, { newValue?: unknown }>, areaName: string) => {
+      if (areaName !== 'local' || !changes?.[FOLDS_KEY] || runtime.tripped) {
+        return;
+      }
+      const nextRaw = changes[FOLDS_KEY]?.newValue;
+      if (nextRaw && typeof nextRaw === 'object') {
+        const keys = Object.keys(nextRaw as Record<string, unknown>).filter(Boolean);
+        runtime.foldState = new Set<string>(keys);
+        trimFoldState();
+      } else {
+        runtime.foldState = new Set<string>();
+      }
+      scheduleScan();
+    });
+  }
+
   window.addEventListener('resize', onPassiveSignal, { passive: true });
-  runtime.unsubscribeSpa = onSpaNavigation(() => {
+  runtime.unsubscribeSpa = onSpaNavigation((href) => {
+    const nextConversationId = getConversationId(href);
+    if (nextConversationId !== runtime.currentConversationId) {
+      const wasHome = runtime.currentConversationId === null;
+      runtime.currentConversationId = nextConversationId;
+      if (!wasHome) {
+        // Clear outgoing conversation's UI and ephemeral state immediately so
+        // outgoing nodes are never stamped with the incoming conversation ID.
+        removeInjectedUi();
+        runtime.ephemeralFoldedRoots = new WeakSet<HTMLElement>();
+      }
+      runtime.lastLengthByRoot = new WeakMap<HTMLElement, number>();
+      runtime.ephemeralKeyByRoot = new WeakMap<HTMLElement, string>();
+    }
     attachObserverTarget();
     scheduleScan();
   });
@@ -201,7 +250,21 @@ function renderResponseFolding(): void {
 
     candidate.root.classList.add(ROOT_CLASS);
     const button = ensureToggleButton(candidate.root);
-    const collapsed = runtime.foldState.has(candidate.key);
+    let collapsed: boolean;
+    if (candidate.isEphemeral) {
+      collapsed = runtime.ephemeralFoldedRoots.has(candidate.root);
+    } else {
+      if (runtime.ephemeralFoldedRoots.has(candidate.root)) {
+        runtime.ephemeralFoldedRoots.delete(candidate.root);
+        if (getConversationId(window.location.href)) {
+          rememberFoldedKey(candidate.key);
+          runtime.pendingAddedKeys.add(candidate.key);
+          runtime.pendingRemovedKeys.delete(candidate.key);
+          schedulePersist();
+        }
+      }
+      collapsed = runtime.foldState.has(candidate.key);
+    }
     applyCollapsedState(candidate.content, button, collapsed);
   }
 
@@ -254,16 +317,49 @@ function collectCandidates(): ResponseCandidate[] {
       continue;
     }
 
+    const conversationId = getConversationId(window.location.href);
+    const stableById = findStableId(root) || findStableId(content);
+    if (stableById && conversationId) {
+      candidates.push({
+        root,
+        content,
+        key: `${conversationId}::id:${stableById}`,
+        isEphemeral: false
+      });
+      continue;
+    }
+
+    const textLen = normalizeText(content.textContent || '').length;
+    const prevLen = runtime.lastLengthByRoot.get(root);
+    runtime.lastLengthByRoot.set(root, textLen);
+
+    const streaming = prevLen === undefined || prevLen !== textLen || isGeminiStreaming(root);
+    if (streaming || !conversationId) {
+      let ephemeralKey = runtime.ephemeralKeyByRoot.get(root);
+      if (!ephemeralKey) {
+        ephemeralKey = `ephemeral:${runtime.nextEphemeralId}`;
+        runtime.nextEphemeralId += 1;
+        runtime.ephemeralKeyByRoot.set(root, ephemeralKey);
+      }
+      candidates.push({
+        root,
+        content,
+        key: ephemeralKey,
+        isEphemeral: true
+      });
+      continue;
+    }
+
     const stableKey = deriveStableResponseKey(root, content);
     if (!stableKey) {
       continue;
     }
 
-    const conversationId = getConversationId(window.location.href) || 'gemini-home';
     candidates.push({
       root,
       content,
-      key: `${conversationId}::${stableKey}`
+      key: `${conversationId}::${stableKey}`,
+      isEphemeral: false
     });
   }
 
@@ -339,10 +435,24 @@ function ensureToggleButton(root: HTMLElement): HTMLButtonElement {
         }
 
         const nextCollapsed = !content.classList.contains(COLLAPSED_CLASS);
+        if (key.startsWith('ephemeral:') || !getConversationId(window.location.href)) {
+          if (nextCollapsed) {
+            runtime.ephemeralFoldedRoots.add(root);
+          } else {
+            runtime.ephemeralFoldedRoots.delete(root);
+          }
+          applyCollapsedState(content, button as HTMLButtonElement, nextCollapsed);
+          return;
+        }
+
         if (nextCollapsed) {
           rememberFoldedKey(key);
+          runtime.pendingAddedKeys.add(key);
+          runtime.pendingRemovedKeys.delete(key);
         } else {
           runtime.foldState.delete(key);
+          runtime.pendingRemovedKeys.add(key);
+          runtime.pendingAddedKeys.delete(key);
         }
         applyCollapsedState(content, button as HTMLButtonElement, nextCollapsed);
         schedulePersist();
@@ -431,6 +541,18 @@ function looksStableId(value: string | null): boolean {
   return value.length >= 6 && !/\s/.test(value);
 }
 
+function isGeminiStreaming(root: HTMLElement): boolean {
+  if (root.getAttribute('aria-busy') === 'true' || root.querySelector('[aria-busy="true"]')) {
+    return true;
+  }
+  const main = root.closest('main, [role="main"]') || document;
+  return Boolean(
+    main.querySelector(
+      'button[aria-label*="Stop" i], button[data-test-id*="stop"], mat-icon[fonticon="stop"]'
+    )
+  );
+}
+
 function isUsableNode(node: HTMLElement): boolean {
   if (!node.isConnected) return false;
   if (!node.closest('main, [role="main"]')) return false;
@@ -446,17 +568,20 @@ function isUserContent(node: HTMLElement): boolean {
   return USER_ROOT_SELECTORS.some((selector) => !!node.closest(selector));
 }
 
-function rememberFoldedKey(key: string): void {
-  if (runtime.foldState.has(key)) {
-    runtime.foldState.delete(key);
-  }
-  runtime.foldState.add(key);
-
+function trimFoldState(): void {
   while (runtime.foldState.size > runtime.maxRemembered) {
     const oldest = runtime.foldState.values().next().value as string | undefined;
     if (!oldest) break;
     runtime.foldState.delete(oldest);
   }
+}
+
+function rememberFoldedKey(key: string): void {
+  if (runtime.foldState.has(key)) {
+    runtime.foldState.delete(key);
+  }
+  runtime.foldState.add(key);
+  trimFoldState();
 }
 
 async function loadFoldState(): Promise<void> {
@@ -470,12 +595,7 @@ async function loadFoldState(): Promise<void> {
 
     const keys = Object.keys(raw as Record<string, unknown>).filter(Boolean);
     runtime.foldState = new Set<string>(keys);
-
-    while (runtime.foldState.size > runtime.maxRemembered) {
-      const oldest = runtime.foldState.values().next().value as string | undefined;
-      if (!oldest) break;
-      runtime.foldState.delete(oldest);
-    }
+    trimFoldState();
   } catch {
     runtime.foldState = new Set<string>();
   }
@@ -488,8 +608,32 @@ function schedulePersist(): void {
   runtime.persistTimerId = window.setTimeout(() => {
     runtime.persistTimerId = null;
     void guardedAsync('persist', async () => {
+      const added = Array.from(runtime.pendingAddedKeys);
+      const removed = Array.from(runtime.pendingRemovedKeys);
+      runtime.pendingAddedKeys.clear();
+      runtime.pendingRemovedKeys.clear();
+
+      const result = await storageLocalGet<Record<string, unknown>>(FOLDS_KEY);
+      const latestRaw = result?.[FOLDS_KEY];
+      const merged = new Set<string>(
+        latestRaw && typeof latestRaw === 'object'
+          ? Object.keys(latestRaw as Record<string, unknown>).filter(Boolean)
+          : []
+      );
+      for (const key of removed) merged.delete(key);
+      for (const key of added) {
+        if (merged.has(key)) merged.delete(key);
+        merged.add(key);
+      }
+      while (merged.size > runtime.maxRemembered) {
+        const oldest = merged.values().next().value as string | undefined;
+        if (!oldest) break;
+        merged.delete(oldest);
+      }
+      runtime.foldState = merged;
+
       const payload: FoldMap = {};
-      runtime.foldState.forEach((key) => {
+      merged.forEach((key) => {
         payload[key] = 1;
       });
       await storageLocalSet({ [FOLDS_KEY]: payload });

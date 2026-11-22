@@ -1,4 +1,5 @@
 import { ChatRef, Project, ProjectIcon, RuntimeState, SyncConflictDetail, SyncStatus, WorkspacePayload } from '../../shared/types';
+import { sanitizeGeminiUrl } from '../../shared/schemas';
 import { resolveAccountRawIdentifier, withActiveAccountScope } from '../../shared/account';
 import { isMobileEnvironment } from '../../shared/env';
 import { getActiveAccountHash } from '../accountWatcher';
@@ -777,9 +778,13 @@ export function renderProjectsSection(
             .map(
               (chat) => {
                 const isMissing = nativeChatsReady && !nativeConversationIds.has(chat.conversationId);
+                const safeHref =
+                  sanitizeGeminiUrl(chat.lastUrl) ||
+                  sanitizeGeminiUrl(withActiveAccountScope(`/app/${encodeURIComponent(chat.conversationId)}`)) ||
+                  '/app';
                 return `
-                        <div class="gp-chat-row ${isMissing ? 'missing' : ''}" draggable="true" data-gp-chat-id="${chat.conversationId}" data-gp-project-id="${project.id}">
-                          <a class="gp-chat-link" href="${escapeHtml(chat.lastUrl || withActiveAccountScope(`/app/${chat.conversationId}`))}">
+                        <div class="gp-chat-row ${isMissing ? 'missing' : ''}" draggable="true" data-gp-chat-id="${escapeAttr(chat.conversationId)}" data-gp-project-id="${escapeAttr(project.id)}">
+                          <a class="gp-chat-link" href="${escapeAttr(safeHref)}">
                             <span class="gp-chat-color" aria-hidden="true"></span>
                             <span class="gp-chat-title">${escapeHtml(chat.title || 'Untitled chat')}</span>
                             ${isMissing ? '<span class="gp-chat-missing">Missing</span>' : ''}
@@ -820,7 +825,7 @@ export function renderProjectsSection(
       : '<span class="gp-twist-spacer" aria-hidden="true"></span>';
 
     return `
-        <div class="gp-project" data-gp-project-id="${project.id}" style="--gp-project-color: ${escapeAttr(accentColor)};">
+        <div class="gp-project" data-gp-project-id="${escapeAttr(project.id)}" style="--gp-project-color: ${escapeAttr(accentColor)};">
           <div class="gp-row gp-project-row ${isExpanded ? 'active' : ''}" data-gp-action="toggle-project" data-gp-droppable="true">
             ${twistMarkup}
             ${iconMarkup}
@@ -3303,8 +3308,10 @@ function navigateToProjectChat(conversationId: string, fallbackHref: string) {
   // A stored href can predate the account-scope handling and point at the
   // bare `/app/...` path; re-apply the current `/u/<n>/` prefix so opening a
   // chat never reloads into the browser profile's default Google account.
-  const targetUrl = new URL(withActiveAccountScope(fallbackHref), window.location.origin).href;
-  if (before === targetUrl) {
+  const safeFallback = sanitizeGeminiUrl(fallbackHref) ?? `/app/${encodeURIComponent(conversationId)}`;
+  const scopedUrl = withActiveAccountScope(safeFallback);
+  const targetUrl = sanitizeGeminiUrl(new URL(scopedUrl, window.location.origin).href);
+  if (!targetUrl || before === targetUrl) {
     return;
   }
 

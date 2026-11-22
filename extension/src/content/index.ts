@@ -58,6 +58,7 @@ import {
   configureInstructionsButton,
   injectProjectInstructions,
   prependProjectInstructions,
+  removeInstructionPill,
   setInstructionsButtonVisible
 } from './prompts/injector';
 import { installSidebarInspector } from './sidebarInspector';
@@ -106,6 +107,8 @@ let chatMenuOverlayShadow: ShadowRoot | null = null;
 let activeProjectId: string | null = null;
 /** Project awaiting auto-assignment for a freshly created chat. */
 let pendingNewChatProjectId: string | null = null;
+/** Snapshot of conversation IDs that already existed before "New chat in project". */
+let pendingNewChatPreExistingIds: Set<string> | null = null;
 let composerObserver: { stop: () => void } | null = null;
 
 /**
@@ -492,7 +495,13 @@ function initProjectInstructionInjection(): void {
   // page load; restore the pending project so injection still fires afterwards.
   try {
     const pending = sessionStorage.getItem(PENDING_NEW_CHAT_KEY);
-    if (pending) pendingNewChatProjectId = pending;
+    if (pending) {
+      pendingNewChatProjectId = pending;
+      pendingNewChatPreExistingIds = new Set([
+        ...state.chatIndex.keys(),
+        ...state.nativeConversationIds
+      ]);
+    }
   } catch {
     // sessionStorage unavailable — rely on the in-memory value only.
   }
@@ -581,6 +590,7 @@ function initProjectInstructionInjection(): void {
       })();
     },
     onConversationChanged: (conversationId, previousConversationId) => {
+      removeInstructionPill();
       // Per-conversation instruction dismissal: reset when moving to another
       // conversation, but carry a fresh-chat removal over to the brand-new
       // conversation created by that chat's first send.
@@ -593,29 +603,42 @@ function initProjectInstructionInjection(): void {
       }
       if (pendingNewChatProjectId && conversationId) {
         const projectId = pendingNewChatProjectId;
+        const preExistingIds = pendingNewChatPreExistingIds;
         pendingNewChatProjectId = null;
+        pendingNewChatPreExistingIds = null;
         try {
           sessionStorage.removeItem(PENDING_NEW_CHAT_KEY);
         } catch {
           // sessionStorage unavailable — in-memory value already cleared.
         }
-        if (state.chatIndex.has(conversationId)) {
+        const wasPreExisting = preExistingIds
+          ? preExistingIds.has(conversationId)
+          : state.chatIndex.has(conversationId);
+        if (wasPreExisting) {
           // The user opened an existing conversation instead of sending the new
           // chat. Cancel the pending assignment rather than capturing it.
+          const existingChat = state.chatIndex.get(conversationId);
+          activeProjectId = existingChat?.projectId ?? null;
+          panel?.setActiveProject(activeProjectId);
+          refreshInstructionsButton();
           return;
         }
+        activeProjectId = projectId;
+        panel?.setActiveProject(projectId);
         handleMoveChat(conversationId, projectId).catch((error) =>
           console.warn('[gemini-projects] auto-assign new chat failed', error)
         );
         panel?.showToast('New chat added to project');
+        refreshInstructionsButton();
         return;
       }
       if (conversationId) {
         const chat = state.chatIndex.get(conversationId);
-        if (chat?.projectId) {
-          activeProjectId = chat.projectId;
-          panel?.setActiveProject(chat.projectId);
-        }
+        activeProjectId = chat?.projectId ?? null;
+        panel?.setActiveProject(activeProjectId);
+      } else if (!pendingNewChatProjectId) {
+        activeProjectId = null;
+        panel?.setActiveProject(null);
       }
       refreshInstructionsButton();
     }
@@ -1311,6 +1334,10 @@ async function handleMoveProject(projectId: string, targetParentId: string | nul
 /** Creates a brand-new chat inside a project; the conversation is auto-assigned. */
 function handleNewChatInProject(projectId: string): void {
   pendingNewChatProjectId = projectId;
+  pendingNewChatPreExistingIds = new Set([
+    ...state.chatIndex.keys(),
+    ...state.nativeConversationIds
+  ]);
   try {
     sessionStorage.setItem(PENDING_NEW_CHAT_KEY, projectId);
   } catch {
@@ -1445,7 +1472,7 @@ function findNativeLinkByConversationId(conversationId: string): HTMLAnchorEleme
 function normalizeTitle(value: string): string {
   return value
     .replace(/\s+/g, ' ')
-    .replace(/\s*(?:Pinned|宸茬疆椤秥缃《)\s*$/i, '')
+    .replace(/\s*(?:Pinned|已置顶|置顶)\s*$/i, '')
     .trim();
 }
 

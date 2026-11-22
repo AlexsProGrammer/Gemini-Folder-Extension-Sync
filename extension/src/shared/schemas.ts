@@ -185,6 +185,32 @@ function normalizePromptRecord(raw: unknown, index: number): PromptTemplate {
   };
 }
 
+/**
+ * Sanitizes a Gemini chat URL, allowing only relative paths starting with `/`
+ * (excluding protocol-relative `//` or `/\`) or absolute URLs on
+ * `https://gemini.google.com`. Rejects `javascript:`, `data:`, and external origins.
+ */
+export function sanitizeGeminiUrl(raw: string | undefined): string | undefined {
+  if (typeof raw !== 'string') return undefined;
+  const trimmed = raw.trim();
+  if (!trimmed) return undefined;
+  if (trimmed.startsWith('/')) {
+    if (trimmed.startsWith('//') || trimmed.startsWith('/\\')) return undefined;
+    try {
+      const resolved = new URL(trimmed, 'https://gemini.google.com');
+      return resolved.origin === 'https://gemini.google.com' ? trimmed : undefined;
+    } catch {
+      return undefined;
+    }
+  }
+  try {
+    const url = new URL(trimmed);
+    return url.origin === 'https://gemini.google.com' ? url.href : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 /** Normalizes a raw chat index into validated ChatRefs (own-prop reads only). */
 export function normalizeChatIndex(raw: unknown): Record<string, ChatRef> {
   const rawChatIndex = isRecordLike(raw) ? raw : {};
@@ -200,7 +226,7 @@ export function normalizeChatIndex(raw: unknown): Record<string, ChatRef> {
       .replace(/\s*(?:[-–—|·•]?\s*)?(?:已置顶|置顶)(?:\.{3}|…)?\s*$/i, '')
       .trim();
     const isPinned = asBoolean(safeGet(value, 'isPinned'));
-    const lastUrl = asString(safeGet(value, 'lastUrl'));
+    const lastUrl = sanitizeGeminiUrl(asString(safeGet(value, 'lastUrl')));
     const lastSeenAt = asFiniteNumber(safeGet(value, 'lastSeenAt'));
     const chat: ChatRef = {
       conversationId,

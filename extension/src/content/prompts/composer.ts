@@ -26,6 +26,8 @@ export function insertPrompt(text: string): boolean {
 
 /** Marker identifying the injected project-instruction block. */
 export const PROJECT_INSTRUCTIONS_MARKER = '[Project Instructions:';
+/** Closing sentinel for the injected project-instruction block. */
+export const PROJECT_INSTRUCTIONS_END_MARKER = '[/Project Instructions]';
 
 /**
  * Formats a project's system prompt (and optionally its notes) into the
@@ -39,7 +41,7 @@ export function formatProjectInstructionPrefix(systemPrompt: string, notes: stri
     if (prompt) sections.push(prompt);
     if (noteText) sections.push(`---\nProject Notes:\n${noteText}`);
     if (!sections.length) return '';
-    return `${PROJECT_INSTRUCTIONS_MARKER}\n${sections.join('\n\n')}\n]\n\n`;
+    return `${PROJECT_INSTRUCTIONS_MARKER}\n${sections.join('\n\n')}\n${PROJECT_INSTRUCTIONS_END_MARKER}\n\n`;
 }
 
 /** Raw text content of the composer (trimmed). */
