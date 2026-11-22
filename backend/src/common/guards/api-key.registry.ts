@@ -1,5 +1,5 @@
 import { Injectable, Logger } from '@nestjs/common';
-import { createHash } from 'node:crypto';
+import { createHash, timingSafeEqual } from 'node:crypto';
 
 const KEY_ENV_PATTERN = /^API_KEY_([A-Z0-9_]+)$/;
 const ACCOUNTS_ENV_PATTERN = /^API_KEY_([A-Z0-9_]+)_ACCOUNTS$/;
@@ -47,7 +47,13 @@ export class ApiKeyRegistry {
       return null;
     }
     const digest = createHash('sha256').update(token).digest();
-    return this.entriesByDigest.get(digest.toString('hex')) ?? null;
+    let matched: RegistryEntry | null = null;
+    for (const entry of this.entriesByDigest.values()) {
+      if (timingSafeEqual(digest, entry.digest)) {
+        matched = entry;
+      }
+    }
+    return matched;
   }
 
   private registerFromEnvironment(): void {

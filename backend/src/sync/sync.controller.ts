@@ -9,10 +9,12 @@ import {
   Param,
   Post,
   Req,
+  Res,
   UseGuards
 } from '@nestjs/common';
+import type { FastifyReply } from 'fastify';
 import { ApiKeyGuard, type RequestWithApiKey } from '../common/guards/api-key.guard';
-import { syncBlobs, type SyncBlobRow } from '../database/schema';
+import { type SyncBlobRow } from '../database/schema';
 import { PushSyncDto } from './dto/push-sync.dto';
 import { SyncConfirmation, SyncService } from './sync.service';
 
@@ -24,7 +26,11 @@ export class SyncController {
   constructor(@Inject(SyncService) private readonly syncService: SyncService) {}
 
   @Get(':accountId')
-  getBlob(@Param('accountId') accountId: string, @Req() request: RequestWithApiKey): SyncBlobRow {
+  getBlob(
+    @Param('accountId') accountId: string,
+    @Req() request: RequestWithApiKey,
+    @Res({ passthrough: true }) reply: FastifyReply
+  ): SyncBlobRow | undefined {
     this.assertValidAccountId(accountId);
     this.assertAccountAccess(request, accountId);
 
@@ -32,6 +38,15 @@ export class SyncController {
 
     if (!blob) {
       throw new NotFoundException('No synced workspace found for this account.');
+    }
+
+    const etag = `"v${blob.version}-${blob.updatedAt}"`;
+    reply.header('ETag', etag);
+
+    const ifNoneMatch = request.headers?.['if-none-match'];
+    if (ifNoneMatch && this.matchesETag(ifNoneMatch, etag)) {
+      reply.code(304);
+      return;
     }
 
     return blob;
@@ -43,6 +58,14 @@ export class SyncController {
     this.assertAccountAccess(request, accountId);
 
     return this.syncService.upsertBlob(accountId, dto);
+  }
+
+  private matchesETag(ifNoneMatchHeader: string | string[], etag: string): boolean {
+    const raw = Array.isArray(ifNoneMatchHeader) ? ifNoneMatchHeader.join(',') : ifNoneMatchHeader;
+    return raw
+      .split(',')
+      .map((part) => part.trim())
+      .some((candidate) => candidate === '*' || candidate === etag);
   }
 
   private assertValidAccountId(accountId: string): void {

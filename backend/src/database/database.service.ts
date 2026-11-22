@@ -2,7 +2,7 @@ import { Injectable, OnModuleDestroy, OnModuleInit } from '@nestjs/common';
 import Database from 'better-sqlite3';
 import { drizzle, type BetterSQLite3Database } from 'drizzle-orm/better-sqlite3';
 import { migrate } from 'drizzle-orm/better-sqlite3/migrator';
-import { mkdirSync, statSync } from 'node:fs';
+import { existsSync, mkdirSync, statSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import * as schema from './schema';
 
@@ -52,13 +52,14 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
       throw err;
     }
     this.sqlite.pragma('journal_mode = WAL');
+    this.sqlite.pragma('synchronous = NORMAL');
     this.sqlite.pragma('busy_timeout = 5000');
     this.drizzleDb = drizzle(this.sqlite, { schema });
 
-    try {
-      migrate(this.drizzleDb, { migrationsFolder: resolve(process.cwd(), 'drizzle') });
-    } catch (err) {
-      console.warn('[database] drizzle migration failed, using bootstrap SQL instead:', err);
+    const migrationsFolder = resolve(process.cwd(), 'drizzle');
+    if (existsSync(migrationsFolder)) {
+      migrate(this.drizzleDb, { migrationsFolder });
+    } else {
       this.sqlite.exec(BOOTSTRAP_TABLE_SQL);
     }
   }
@@ -68,6 +69,13 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
       throw new Error('Database is not initialized yet.');
     }
     return this.drizzleDb;
+  }
+
+  runImmediateTransaction<T>(fn: () => T): T {
+    if (!this.sqlite) {
+      throw new Error('Database is not initialized yet.');
+    }
+    return this.sqlite.transaction(fn).immediate();
   }
 
   async onModuleDestroy(): Promise<void> {

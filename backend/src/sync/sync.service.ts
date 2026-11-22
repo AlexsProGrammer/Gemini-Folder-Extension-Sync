@@ -31,36 +31,45 @@ export class SyncService {
   }
 
   upsertBlob(accountId: string, dto: PushSyncDto): SyncConfirmation {
-    const existing = this.getBlob(accountId);
+    return this.databaseService.runImmediateTransaction(() => {
+      const existing = this.getBlob(accountId);
 
-    if (existing && existing.version > dto.version) {
-      throw new ConflictException({
-        statusCode: 409,
-        message: 'Version conflict detected',
-        serverState: existing
-      });
-    }
+      if (existing) {
+        const hasConflict =
+          dto.baseVersion !== undefined
+            ? existing.version !== dto.baseVersion || dto.version <= existing.version
+            : existing.version > dto.version;
 
-    this.databaseService.database
-      .insert(syncBlobs)
-      .values({
-        accountId,
-        version: dto.version,
-        ciphertext: dto.ciphertext,
-        iv: dto.iv,
-        updatedAt: dto.updatedAt
-      })
-      .onConflictDoUpdate({
-        target: syncBlobs.accountId,
-        set: {
+        if (hasConflict) {
+          throw new ConflictException({
+            statusCode: 409,
+            message: 'Version conflict detected',
+            serverState: existing
+          });
+        }
+      }
+
+      this.databaseService.database
+        .insert(syncBlobs)
+        .values({
+          accountId,
           version: dto.version,
           ciphertext: dto.ciphertext,
           iv: dto.iv,
           updatedAt: dto.updatedAt
-        }
-      })
-      .run();
+        })
+        .onConflictDoUpdate({
+          target: syncBlobs.accountId,
+          set: {
+            version: dto.version,
+            ciphertext: dto.ciphertext,
+            iv: dto.iv,
+            updatedAt: dto.updatedAt
+          }
+        })
+        .run();
 
-    return { status: 'success', version: dto.version, updatedAt: dto.updatedAt };
+      return { status: 'success', version: dto.version, updatedAt: dto.updatedAt };
+    });
   }
 }

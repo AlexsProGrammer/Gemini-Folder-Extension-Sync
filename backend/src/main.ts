@@ -9,9 +9,37 @@ import { AppModule } from './app.module';
 
 loadEnv();
 
+function parseTrustProxy(raw: string | undefined): boolean | string {
+  const trimmed = raw?.trim();
+  if (!trimmed) {
+    return '127.0.0.1';
+  }
+  const lower = trimmed.toLowerCase();
+  if (lower === 'true') {
+    return true;
+  }
+  if (lower === 'false') {
+    return false;
+  }
+  return trimmed;
+}
+
+function parseCorsOrigin(raw: string | undefined): boolean | string[] {
+  const trimmed = raw?.trim();
+  if (!trimmed) {
+    return false;
+  }
+  const origins = trimmed
+    .split(',')
+    .map((origin) => origin.trim())
+    .filter((origin) => origin.length > 0);
+  return origins.length > 0 ? origins : false;
+}
+
 async function bootstrap(): Promise<void> {
   const adapter = new FastifyAdapter({
     bodyLimit: 10485760,
+    trustProxy: parseTrustProxy(process.env.TRUST_PROXY),
     logger: {
       level: process.env.LOG_LEVEL ?? 'info',
       redact: {
@@ -24,7 +52,7 @@ async function bootstrap(): Promise<void> {
   const app = await NestFactory.create<NestFastifyApplication>(AppModule, adapter);
 
   await app.register(helmet);
-  await app.register(cors, { origin: true });
+  await app.register(cors, { origin: parseCorsOrigin(process.env.CORS_ORIGINS) });
 
   app.useGlobalPipes(
     new ValidationPipe({
@@ -33,7 +61,7 @@ async function bootstrap(): Promise<void> {
     })
   );
 
-  const port = Number(process.env.PORT) || 3000;
+  const port = Number(process.env.PORT) || 3350;
 
   await app.listen(port, '0.0.0.0');
 }

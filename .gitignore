@@ -25,3 +25,4 @@ Thumbs.db
 
 # Kilo Code
 .kilo/
+.audit/
