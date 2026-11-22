@@ -47,11 +47,13 @@ export interface PromptsData {
 }
 
 const TAG_COLOR_NAMES = new Set(TAG_COLORS.map((item) => item.name));
-const DEFAULT_DATA: PromptsData = {
-    prompts: {},
-    tagMeta: {},
-    version: 1,
-};
+function createDefaultPromptsData(): PromptsData {
+    return {
+        prompts: {},
+        tagMeta: {},
+        version: 1,
+    };
+}
 
 // Seed data for first run
 const SEED_PROMPTS: Partial<Prompt>[] = [
@@ -214,9 +216,11 @@ function sanitizePromptsData(data: PromptsData): { data: PromptsData; dirty: boo
 
 class PromptStore {
     private cache: PromptsData | null = null;
+    private cacheAccountHash: string | null = null;
     private listeners: Set<() => void> = new Set();
     private accountHash: string | null = null;
     private accountHashPromise: Promise<string> | null = null;
+    private refreshPromise: Promise<void> | null = null;
     private loadGeneration = 0;
 
     constructor() {
@@ -225,17 +229,22 @@ class PromptStore {
             changes: { [key: string]: { newValue?: unknown } },
             area: string
         ) => {
-            if (area !== 'local' || !this.accountHash) return;
-            const workspaceKey = getWorkspaceKey(this.accountHash);
+            if (area !== 'local') return;
+            const activeHash = this.accountHash ?? getActiveAccountHash();
+            if (!activeHash) return;
+            const workspaceKey = getWorkspaceKey(activeHash);
             if (changes[workspaceKey]) {
-                this.refresh();
+                void this.refresh();
             }
         });
         // Re-partition the library when the active Google account changes.
         window.addEventListener(ACCOUNT_CHANGED_EVENT, () => {
             this.accountHash = null;
             this.accountHashPromise = null;
-            this.refresh();
+            this.cache = null;
+            this.cacheAccountHash = null;
+            this.notify();
+            void this.refresh();
         });
     }
 
@@ -295,7 +304,7 @@ class PromptStore {
         };
     }
 
-    private async loadFromStorage(): Promise<PromptsData> {
+    private async loadFromStorage(): Promise<{ accountHash: string; data: PromptsData }> {
         const accountHash = await this.ensureAccountHash();
         const usageKey = `gp_prompt_usage_${accountHash}`;
         const [workspace, usageResult] = await Promise.all([
@@ -321,36 +330,66 @@ class PromptStore {
         // First activation under the workspace schema: seed the library once
         // without bumping workspace.version or marking sync dirty.
         if (Object.keys(data.prompts).length === 0 && workspace.version === 1) {
-            data = this.seed(data);
+            data = sanitizePromptsData(this.seed(data)).data;
             await seedWorkspacePrompts(accountHash, toPromptTemplates(data), data.tagMeta);
         } else {
             const { data: sanitized, dirty } = sanitizePromptsData(data);
             data = sanitized;
             if (dirty) {
-                await this.writeWorkspace(data);
+                await this.writeWorkspace(accountHash, data);
             }
         }
-        return data;
+        return { accountHash, data };
     }
 
-    private async writeWorkspace(data: PromptsData): Promise<void> {
-        const accountHash = await this.ensureAccountHash();
+    private async writeWorkspace(accountHash: string, data: PromptsData): Promise<void> {
         await updateWorkspacePrompts(accountHash, toPromptTemplates(data), data.tagMeta);
     }
 
-    public async refresh() {
+    private async ensureLoaded(): Promise<{ accountHash: string; data: PromptsData }> {
+        if (this.refreshPromise) {
+            await this.refreshPromise;
+        }
+        const accountHash = await this.ensureAccountHash();
+        if (!this.cache || this.cacheAccountHash !== accountHash) {
+            await this.refresh();
+        }
+        if (!this.cache || this.cacheAccountHash !== accountHash) {
+            throw new Error('Prompt library is unavailable for the active account.');
+        }
+        return { accountHash, data: this.cache };
+    }
+
+    public async refresh(): Promise<void> {
         const generation = ++this.loadGeneration;
-        try {
-            const data = await this.loadFromStorage();
-            if (generation !== this.loadGeneration) return;
-            this.cache = data;
-        } catch (error) {
-            console.warn('[gemini-projects] prompt store refresh failed', error);
+        const run = (async () => {
+            try {
+                const result = await this.loadFromStorage();
+                if (generation !== this.loadGeneration) return;
+                this.cache = result.data;
+                this.cacheAccountHash = result.accountHash;
+            } catch (error) {
+                console.warn('[gemini-projects] prompt store refresh failed', error);
+                if (generation === this.loadGeneration) {
+                    if (this.cacheAccountHash === null || this.cacheAccountHash !== this.accountHash) {
+                        this.cache = null;
+                        this.cacheAccountHash = null;
+                    }
+                }
+            }
             if (generation === this.loadGeneration) {
-                this.cache = this.cache ?? this.seed(DEFAULT_DATA);
+                this.notify();
+            }
+        })();
+
+        this.refreshPromise = run;
+        try {
+            await run;
+        } finally {
+            if (this.refreshPromise === run) {
+                this.refreshPromise = null;
             }
         }
-        this.notify();
     }
 
     public getAll(): Prompt[] {
@@ -368,8 +407,7 @@ class PromptStore {
     }
 
     public async save(prompt: Partial<Prompt> & { title: string; content: string }) {
-        if (!this.cache) await this.refresh();
-        const data = this.cache!;
+        const { accountHash, data } = await this.ensureLoaded();
         const now = Date.now();
         const normalizedTags = normalizePromptTags(prompt.tags || []);
 
@@ -406,29 +444,29 @@ class PromptStore {
             }
         });
         this.cache = data;
-        await this.writeWorkspace(data);
+        this.cacheAccountHash = accountHash;
+        await this.writeWorkspace(accountHash, data);
     }
 
     public async delete(id: string) {
-        if (!this.cache) await this.refresh();
-        const data = this.cache!;
+        const { accountHash, data } = await this.ensureLoaded();
         if (data.prompts[id]) {
             delete data.prompts[id];
             this.cache = data;
-            await this.writeWorkspace(data);
+            this.cacheAccountHash = accountHash;
+            await this.writeWorkspace(accountHash, data);
         }
     }
 
     public async trackUsage(id: string) {
-        if (!this.cache) await this.refresh();
-        const data = this.cache!;
-        if (data.prompts[id]) {
-            data.prompts[id].usageCount++;
-            data.prompts[id].lastUsedAt = Date.now();
-            this.cache = data;
-            // Persist usage stats locally without bumping workspace.version or triggering a full sync push.
-            try {
-                const accountHash = await this.ensureAccountHash();
+        // Persist usage stats locally without bumping workspace.version or triggering a full sync push.
+        try {
+            const { accountHash, data } = await this.ensureLoaded();
+            if (data.prompts[id]) {
+                data.prompts[id].usageCount++;
+                data.prompts[id].lastUsedAt = Date.now();
+                this.cache = data;
+                this.cacheAccountHash = accountHash;
                 const usageKey = `gp_prompt_usage_${accountHash}`;
                 const result = await storageLocalGet<Record<string, unknown>>([usageKey]);
                 const existing = (result[usageKey] && typeof result[usageKey] === 'object'
@@ -443,19 +481,19 @@ class PromptStore {
                         }
                     }
                 });
-            } catch {
-                // Local usage persistence failure is non-fatal.
             }
+        } catch {
+            // Local usage persistence failure is non-fatal.
         }
     }
 
     public async toggleFavorite(id: string) {
-        if (!this.cache) await this.refresh();
-        const data = this.cache!;
+        const { accountHash, data } = await this.ensureLoaded();
         if (data.prompts[id]) {
             data.prompts[id].isFavorite = !data.prompts[id].isFavorite;
             this.cache = data;
-            await this.writeWorkspace(data);
+            this.cacheAccountHash = accountHash;
+            await this.writeWorkspace(accountHash, data);
         }
     }
 
@@ -508,8 +546,7 @@ class PromptStore {
     public async ensureTagColor(tagName: string): Promise<string> {
         const normalizedTag = normalizeTagName(tagName);
         if (!normalizedTag) return 'gray';
-        if (!this.cache) await this.refresh();
-        const data = this.cache!;
+        const { accountHash, data } = await this.ensureLoaded();
 
         if (!data.tagMeta) data.tagMeta = {};
 
@@ -517,7 +554,8 @@ class PromptStore {
             const color = this.getRandomColor();
             data.tagMeta[normalizedTag] = { name: normalizedTag, color };
             this.cache = data;
-            await this.writeWorkspace(data);
+            this.cacheAccountHash = accountHash;
+            await this.writeWorkspace(accountHash, data);
             return color;
         }
         return data.tagMeta[normalizedTag].color;
@@ -526,13 +564,13 @@ class PromptStore {
     public async setTagColor(tagName: string, color: string) {
         const normalizedTag = normalizeTagName(tagName);
         if (!normalizedTag) return;
-        if (!this.cache) await this.refresh();
-        const data = this.cache!;
+        const { accountHash, data } = await this.ensureLoaded();
         if (!data.tagMeta) data.tagMeta = {};
 
         data.tagMeta[normalizedTag] = { name: normalizedTag, color };
         this.cache = data;
-        await this.writeWorkspace(data);
+        this.cacheAccountHash = accountHash;
+        await this.writeWorkspace(accountHash, data);
     }
 
     public async renameTag(oldName: string, newName: string) {
@@ -541,8 +579,7 @@ class PromptStore {
         if (!oldTag || !nextTag) return;
         if (oldTag === nextTag) return;
 
-        if (!this.cache) await this.refresh();
-        const data = this.cache!;
+        const { accountHash, data } = await this.ensureLoaded();
 
         Object.values(data.prompts).forEach(p => {
             p.tags = normalizePromptTags(p.tags.map((tag) => (tag === oldTag ? nextTag : tag)));
@@ -560,15 +597,15 @@ class PromptStore {
         }
 
         this.cache = data;
-        await this.writeWorkspace(data);
+        this.cacheAccountHash = accountHash;
+        await this.writeWorkspace(accountHash, data);
         this.notify();
     }
 
     public async deleteTagGlobal(tagName: string) {
         const normalizedTag = normalizeTagName(tagName);
         if (!normalizedTag) return;
-        if (!this.cache) await this.refresh();
-        const data = this.cache!;
+        const { accountHash, data } = await this.ensureLoaded();
 
         Object.values(data.prompts).forEach(p => {
             p.tags = p.tags.filter(t => t !== normalizedTag);
@@ -579,7 +616,8 @@ class PromptStore {
         }
 
         this.cache = data;
-        await this.writeWorkspace(data);
+        this.cacheAccountHash = accountHash;
+        await this.writeWorkspace(accountHash, data);
         this.notify();
     }
 }
