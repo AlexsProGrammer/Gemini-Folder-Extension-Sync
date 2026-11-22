@@ -1,7 +1,7 @@
 {
     "manifest_version": 3,
     "name": "Synced Projects for Gemini",
-    "version": "2.1.1",
+    "version": "2.2.0",
     "description": "Projects, folders & a prompt library for Gemini with optional self-hosted encrypted sync to your own server.",
     "permissions": [
         "storage"

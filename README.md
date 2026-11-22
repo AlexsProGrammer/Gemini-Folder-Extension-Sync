@@ -116,13 +116,14 @@ Details and the full key registry behavior: [`backend/README.md`](backend/README
 ## Feature Overview
 
 ### Sync
-- Local-first: every change writes locally instantly; pushes are debounced (750 ms) in the background.
-- Auto-pull on window focus and on network reconnect; version-based optimistic concurrency with `409`-driven conflict flow.
-- **Sync now** button in the panel header forces an immediate push/pull cycle.
-- Per-account passphrases: one master passphrase or a unique one per Google account, switchable in settings.
+- Local-first: every change writes locally instantly; pushes are debounced (750 ms) in the background and serialized with `navigator.locks` to prevent multi-tab or concurrent races.
+- Auto-pull on window focus, visibility change, and network reconnect, coordinated across open Gemini tabs so only one pull/push runs at a time; conditional `GET` (`ETag` / `If-None-Match` `304`) and pre-encryption `gzip` compression minimize bandwidth.
+- `baseVersion`-based optimistic concurrency inside SQLite `IMMEDIATE` transactions with `409`-driven conflict resolution (never silently overwrites concurrent or offline edits).
+- **Sync now** button in the panel header awaits a pull before pushing any pending local changes.
+- Session-first passphrase storage: passphrases live in `storage.session` (cleared when the browser closes) by default, with an explicit opt-in for persistent disk storage; per-account or global passphrases are verified before saving.
 - Multi API keys: one bearer key per person, each restricted to its bound account hashes; the legacy single key still works.
-- Connection tester distinguishes unreachable server / invalid API key (401) / valid server; optional debug logging for diagnosing connectivity.
-- All network traffic is proxied through the extension background worker (bypasses page CORS/CSP) and targeted strictly at your configured server — no telemetry, ever.
+- Actionable error reporting (`401`/`403` circuit breaker, `429` rate-limit backoff, `413` payload size, `5xx`/timeouts, revoked host permissions, wrong passphrase) surfaced in the sync badge tooltip and Test Connection dialog; optional debug logging for diagnosing connectivity.
+- All network traffic is proxied through the extension background worker (bypasses page CORS/CSP) with strict sender/URL/account validation and a dedicated extension-origin permission prompt for Chrome & Firefox MV3 — no telemetry, ever.
 
 ### Workspace UI
 - Collapsible nested subfolders with persistent collapse state per account.

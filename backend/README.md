@@ -82,6 +82,8 @@ The backend reads its entire configuration from `backend/.env`, which is passed 
 PORT=3350                     # listen port (must match the reverse-proxy upstream)
 DB_PATH=/app/data/sync.db     # SQLite file inside the container (bind-mounted ./data)
 LOG_LEVEL=info                # Fastify log level
+TRUST_PROXY=127.0.0.1         # reverse-proxy IP/CIDR or true/false for per-IP rate limiting
+# CORS_ORIGINS=               # optional comma-separated allowlist (disabled by default)
 
 API_KEY=<secret>              # legacy single key; allowed on ALL accounts
 
@@ -103,10 +105,11 @@ Generate all secrets with `openssl rand -base64 32`. Rotating or revoking a key 
 
 ## How It Works
 
-- The extension encrypts the entire workspace (projects, subfolders, system prompts, notes, prompt library) locally with **AES-GCM-256**, using a key derived from your passphrase via **PBKDF2 (310,000 iterations, SHA-256)**.
-- Only `{ ciphertext, iv, version, updatedAt }` ever leaves your browser.
-- The backend stores these blobs in **SQLite (WAL mode)** and enforces **optimistic concurrency**: pushes with a stale `version` are rejected with `409 Conflict` plus the server's current state, letting the client resolve conflicts (newest / merge / keep local / keep remote).
-- All requests authenticate with a `Bearer` API key compared in **constant time** (SHA-256 digest lookup). Multiple per-person keys are supported, each bound to a fixed set of account hashes (or all accounts).
+- The extension compresses and encrypts the entire workspace (projects, subfolders, system prompts, notes, prompt library) locally with **AES-GCM-256**, using a key derived from your passphrase via **PBKDF2 (310,000 iterations, SHA-256)**.
+- Only `{ ciphertext, iv, version, updatedAt, baseVersion? }` ever leaves your browser.
+- The backend stores these blobs in **SQLite (WAL mode, `synchronous = NORMAL`)** and enforces **optimistic concurrency** inside `IMMEDIATE` transactions: pushes with a stale `version` or mismatched `baseVersion` are rejected with `409 Conflict` plus the server's current state, letting the client resolve conflicts (newest / merge / keep local / keep remote).
+- Conditional `GET` via `ETag` / `If-None-Match` returns `304 Not Modified` when the remote blob has not changed.
+- All sync requests authenticate with a `Bearer` API key compared via SHA-256 digest lookup. Multiple per-person keys are supported, each bound to a fixed set of account hashes (or all accounts).
 
 ## Privacy / GDPR
 
@@ -117,14 +120,15 @@ Generate all secrets with `openssl rand -base64 32`. Rotating or revoking a key 
 
 ## API
 
-Base URL: `http://127.0.0.1:3350` locally (your HTTPS domain behind the reverse proxy in production). All routes require `Authorization: Bearer <API_KEY>`.
+Base URL: `http://127.0.0.1:3350` locally (your HTTPS domain behind the reverse proxy in production). All `/api/v1/sync/*` routes require `Authorization: Bearer <API_KEY>`.
 
 | Method | Path | Description |
 | ------ | ---- | ----------- |
-| `GET` | `/api/v1/sync/:accountId` | Fetch the encrypted blob. `404` if the account has never pushed. |
-| `POST` | `/api/v1/sync/:accountId` | Push `{ version, ciphertext, iv, updatedAt }`. Returns `201`/`200` on success, `409` with `serverState` on stale version. |
+| `GET` | `/health` | Unauthenticated loopback health check (`{ status: 'ok' }`). Blocked externally by nginx's `location / { return 404; }`. |
+| `GET` | `/api/v1/sync/:accountId` | Fetch the encrypted blob. Returns `ETag` and `304 Not Modified` when `If-None-Match` matches; `404` if the account has never pushed. |
+| `POST` | `/api/v1/sync/:accountId` | Push `{ version, ciphertext, iv, updatedAt, baseVersion? }` inside a SQLite `IMMEDIATE` transaction. Returns `201`/`200` on success, `409` with `serverState` on stale `version` or mismatched `baseVersion`. |
 
-`accountId` must be a 64-character lowercase hex string (the client's SHA-256 account hash). Keys bound to a subset of accounts get `403` on accounts outside their binding.
+`accountId` must be a 64-character lowercase hex string (the client's SHA-256 account hash). `iv` (max 64 chars) and `ciphertext` (max 10,000,000 chars) must be valid Base64. Keys bound to a subset of accounts get `403` on accounts outside their binding.
 
 ## Run Locally (Node 22+)
 
@@ -174,10 +178,11 @@ backend/
 ├── data/                       # Persistent SQLite WAL volume (chown 1000:1000)
 ├── nginx/gemini-folder-sync.config   # Production reverse proxy (TLS, edge key gate, rate limits)
 └── src/
-    ├── main.ts                 # Fastify bootstrap (10 MB body limit, helmet, CORS)
+    ├── main.ts                 # Fastify bootstrap (10 MB body limit, trustProxy, helmet, CORS)
     ├── app.module.ts
-    ├── common/guards/api-key.guard.ts            # Constant-time Bearer validation
+    ├── health.controller.ts    # Loopback GET /health check
+    ├── common/guards/api-key.guard.ts            # Bearer validation
     ├── common/guards/api-key.registry.ts         # API_KEY_* env scan + per-key account bindings
-    ├── database/               # Drizzle + better-sqlite3 (WAL, busy_timeout 5000)
-    └── sync/                   # Controller, service, DTOs, e2e specs
+    ├── database/               # Drizzle + better-sqlite3 (WAL, synchronous=NORMAL, busy_timeout 5000)
+    └── sync/                   # Controller (ETag/304), service (IMMEDIATE tx), DTOs, e2e specs
 ```

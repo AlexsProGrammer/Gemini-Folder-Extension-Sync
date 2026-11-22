@@ -64,7 +64,7 @@ import {
 import { installSidebarInspector } from './sidebarInspector';
 import { CHAT_DRAG_MIME, createProjectsPanel } from './ui/projectsPanel';
 
-const BUILD_MARKER = '2.1.1';
+const BUILD_MARKER = '2.2.0';
 const HIDDEN_ATTR = 'data-gp-native-hidden';
 const RESCAN_DELAY_MS = 350;
 const PANEL_READY_RETRY_MS = 120;

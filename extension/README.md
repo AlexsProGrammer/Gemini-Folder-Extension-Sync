@@ -85,8 +85,9 @@ Download the latest zip from the [GitHub Releases](https://github.com/linyushuo0
 ## Privacy
 
 - Projects, notes, prompts, and system prompts are stored locally with browser extension storage.
-- When sync is configured, all data is AES-GCM-256 encrypted client-side before leaving the browser; only ciphertext reaches your backend. Your passphrase never leaves the device.
+- When sync is configured, all data is gzip-compressed and AES-GCM-256 encrypted client-side before leaving the browser; only ciphertext reaches your backend. Passphrases are stored in `storage.session` by default (cleared on browser exit) unless you explicitly opt in to persistent disk storage.
 - Account identifiers are SHA-256 hashed locally; raw emails are never stored or transmitted by the extension.
+- Optional host permissions for your self-hosted sync server are requested only when you configure sync (via a user-gesture-safe extension permission page); unused `"tabs"` permissions were removed.
 - The extension does not require a separate account and contacts only the server URL you explicitly configure — no telemetry or third-party calls.
 - Gemini itself still runs on Google's website, so Gemini account activity is governed by Google's own policies.
 
@@ -99,6 +100,13 @@ For local testing, build first and load the folder containing the generated `man
 The Prompt Library uses the color roles, typography scale, and form structure from the [MCP Apps for Claude UI kit](https://www.figma.com/community/file/1597641111449594397/mcp-apps-for-claude): 14px body text, 40px inputs, 36px buttons, and 16px textarea padding. Forms use the Primary surface with separate container, control, and secondary-button border strengths. Fonts use system fallbacks when Google Sans Flex or JetBrains Mono is unavailable; no font files are bundled. Peer headings in the library, prompt editors, and project dialogs share the same 24px sans-serif type with weight 600. The unified sans headings and 28px panel, 16px row, and 12px control corners are project adaptations rather than the kit's default desktop component specifications.
 
 ## Current Version
+
+### v2.2.0 — Security, Performance & Sync Hardening
+
+- **Performance & leak fixes:** Eliminated streaming CPU spikes and slow-tab warnings by debouncing/scoping DOM observers, short-circuiting menu `TreeWalker` scans when no menu is open, caching feature settings, and adding `AbortController`-backed `destroy()` cleanup for the projects panel, workspace drawer, and modals.
+- **Sync reliability & efficiency:** Added `baseVersion` optimistic concurrency and offline `dirty` tracking, cross-tab `storage.onChanged` synchronization + `navigator.locks` coordination, pre-encryption `gzip` compression, conditional `GET` (`304 Not Modified`), canonical `/app/<id>` URLs (preventing `/u/<n>/` sync loops), and actionable error tooltips/retries/circuit breakers.
+- **Security & MV3 permissions:** Moved passphrases to `storage.session` by default (opt-in disk persistence), serialized `storage.local` workspace writes, added `grant-permission.html` for Chrome/Firefox MV3 user-gesture host permission prompts, hardened Shadow DOM attribute escaping and Gemini URL allowlisting, and validated backup imports.
+- **SPA & manifest hygiene:** Added a MAIN-world SPA navigation bridge (`pageBridge.js`), stabilized response folding during streaming, fixed Project Instructions SPA edge cases, removed unused `"tabs"` permission and dead ChatGPT/fold-lite files, and gated debug inspector tooling.
 
 ### Fork additions (this repository)
 
