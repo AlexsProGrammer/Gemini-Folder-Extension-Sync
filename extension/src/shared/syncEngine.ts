@@ -19,7 +19,13 @@ import {
   WORKSPACE_SCHEMA_VERSION
 } from './storage';
 import { breakProjectParentCycles } from './schemas';
-import { requestEnqueuedPush, requestFlushPendingPushes, requestRemotePull, requestRemotePush } from './syncClient';
+import {
+  requestCancelPendingPush,
+  requestEnqueuedPush,
+  requestFlushPendingPushes,
+  requestRemotePull,
+  requestRemotePush
+} from './syncClient';
 import { promptFingerprint } from './promptFingerprint';
 import { errorMessage, errorName } from './webext';
 import type {
@@ -243,6 +249,9 @@ export class SyncEngine {
   private inFlightPushes = new Map<string, Promise<void>>();
   private pendingRepush = new Set<string>();
   private enqueueSeq = new Map<string, number>();
+  private activeEnqueueSeqs = new Map<string, Set<number>>();
+  private pendingEncryptDispatches = new Set<Promise<void>>();
+  private activeEnqueuePromises = new Set<Promise<void>>();
   private inFlightPulls = new Map<string, Promise<void>>();
   private online = isOnline();
   private coordChannel: BroadcastChannel | null = null;
@@ -442,13 +451,23 @@ export class SyncEngine {
     // Dispatch background flush synchronously before any await so unloading tabs
     // signal background.ts to drain already-enqueued encrypted envelopes.
     void requestFlushPendingPushes();
+
+    // Wait for any in-flight snapshot encryption to dispatch SYNC_ENQUEUE_PUSH
+    // (e.g. immediately after backup importData() -> saveWorkspace()), then
+    // trigger a second flush so background.ts drains those immediately too.
+    if (this.pendingEncryptDispatches.size > 0) {
+      await Promise.all(Array.from(this.pendingEncryptDispatches));
+      await requestFlushPendingPushes();
+    }
+
     const pending = Array.from(this.pushTimers.keys());
     this.pushTimers.forEach((timer) => window.clearTimeout(timer));
     this.pushTimers.clear();
     const tasks = pending.map((accountHash) => this.executePush(accountHash));
     await Promise.all([
       ...tasks,
-      ...Array.from(this.inFlightPushes.values())
+      ...Array.from(this.inFlightPushes.values()),
+      ...Array.from(this.activeEnqueuePromises)
     ]);
   }
 
@@ -510,55 +529,99 @@ export class SyncEngine {
     const seq = (this.enqueueSeq.get(accountHash) ?? 0) + 1;
     this.enqueueSeq.set(accountHash, seq);
 
-    const key = this.keys.get(accountHash);
-    if (!key) return;
-    if (!this.online) {
-      this.setStatus(accountHash, 'offline');
-      return;
+    let seqSet = this.activeEnqueueSeqs.get(accountHash);
+    if (!seqSet) {
+      seqSet = new Set<number>();
+      this.activeEnqueueSeqs.set(accountHash, seqSet);
     }
+    seqSet.add(seq);
 
-    const config = await getSyncConfig();
-    if (!config) {
-      this.setStatus(accountHash, 'idle', 'Sync is not configured.');
-      return;
-    }
+    let resolveDispatch!: () => void;
+    const dispatchPromise = new Promise<void>((resolve) => {
+      resolveDispatch = resolve;
+    });
+    this.pendingEncryptDispatches.add(dispatchPromise);
 
+    const markDispatched = () => {
+      if (this.pendingEncryptDispatches.delete(dispatchPromise)) {
+        resolveDispatch();
+      }
+    };
+
+    const removeActiveSeq = () => {
+      const current = this.activeEnqueueSeqs.get(accountHash);
+      if (!current) return;
+      current.delete(seq);
+      if (current.size === 0) {
+        this.activeEnqueueSeqs.delete(accountHash);
+      }
+    };
+
+    const task = (async () => {
+      try {
+        const key = this.keys.get(accountHash);
+        if (!key) return;
+        if (!this.online) {
+          this.setStatus(accountHash, 'offline');
+          return;
+        }
+
+        const config = await getSyncConfig();
+        if (!config) {
+          this.setStatus(accountHash, 'idle', 'Sync is not configured.');
+          return;
+        }
+
+        const meta = await getSyncMeta(accountHash);
+        const { ciphertext, iv } = await encryptWorkspace(snapshot, key);
+        if (this.enqueueSeq.get(accountHash) !== seq) {
+          return;
+        }
+
+        const envelope: EncryptedSyncEnvelope = {
+          version: snapshot.version,
+          baseVersion: meta.lastSyncedVersion,
+          ciphertext,
+          iv,
+          updatedAt: snapshot.updatedAt
+        };
+
+        this.setStatus(accountHash, 'syncing');
+        const responsePromise = requestEnqueuedPush(config, accountHash, envelope, delayMs);
+        markDispatched();
+        const response = await responsePromise;
+        removeActiveSeq();
+
+        if (response.success && 'superseded' in response && response.superseded) {
+          return;
+        }
+
+        await this.withSyncLock(accountHash, false, () =>
+          this.handlePushResponse(accountHash, snapshot, envelope, key, response)
+        );
+      } catch (error) {
+        if (error instanceof PayloadTooLargeError || errorName(error) === 'PayloadTooLargeError') {
+          this.handleErrorOutcome(accountHash, 'payload_too_large', 413, errorMessage(error), undefined, true);
+          return;
+        }
+        debugWarn('enqueueSnapshotPush: failed (exception)', error);
+        this.setStatus(
+          accountHash,
+          this.online ? 'error' : 'offline',
+          errorMessage(error)
+        );
+        this.schedulePushRetry(accountHash);
+      } finally {
+        markDispatched();
+        removeActiveSeq();
+      }
+    })();
+
+    this.activeEnqueuePromises.add(task);
     try {
-      const meta = await getSyncMeta(accountHash);
-      const { ciphertext, iv } = await encryptWorkspace(snapshot, key);
-      if (this.enqueueSeq.get(accountHash) !== seq) {
-        return;
-      }
-
-      const envelope: EncryptedSyncEnvelope = {
-        version: snapshot.version,
-        baseVersion: meta.lastSyncedVersion,
-        ciphertext,
-        iv,
-        updatedAt: snapshot.updatedAt
-      };
-
-      this.setStatus(accountHash, 'syncing');
-      const response = await requestEnqueuedPush(config, accountHash, envelope, delayMs);
-      if (response.success && 'superseded' in response && response.superseded) {
-        return;
-      }
-
-      await this.withSyncLock(accountHash, false, () =>
-        this.handlePushResponse(accountHash, snapshot, envelope, key, response)
-      );
-    } catch (error) {
-      if (error instanceof PayloadTooLargeError || errorName(error) === 'PayloadTooLargeError') {
-        this.handleErrorOutcome(accountHash, 'payload_too_large', 413, errorMessage(error), undefined, true);
-        return;
-      }
-      debugWarn('enqueueSnapshotPush: failed (exception)', error);
-      this.setStatus(
-        accountHash,
-        this.online ? 'error' : 'offline',
-        errorMessage(error)
-      );
-      this.schedulePushRetry(accountHash);
+      await task;
+    } finally {
+      this.activeEnqueuePromises.delete(task);
     }
   }
 
@@ -681,6 +744,9 @@ export class SyncEngine {
       debugLog(`runPush: sending payload (version: ${localState.version}, baseVersion: ${meta.lastSyncedVersion}, updatedAt: ${localState.updatedAt})`);
       const response = await requestRemotePush(config, accountHash, envelope);
       debugLog('runPush: response received:', JSON.stringify(response));
+      if (response.success && 'superseded' in response && response.superseded) {
+        return;
+      }
       await this.handlePushResponse(accountHash, localState, envelope, key, response);
     } catch (error) {
       if (error instanceof PayloadTooLargeError || errorName(error) === 'PayloadTooLargeError') {
@@ -710,7 +776,10 @@ export class SyncEngine {
       etag
     );
     if (stillDirty) {
-      this.schedulePush(accountHash);
+      const hasActiveEnqueue = (this.activeEnqueueSeqs.get(accountHash)?.size ?? 0) > 0;
+      if (!hasActiveEnqueue) {
+        this.schedulePush(accountHash);
+      }
       this.setStatus(accountHash, 'syncing');
     } else {
       this.setStatus(accountHash, 'synced');
@@ -941,6 +1010,16 @@ export class SyncEngine {
     this.unresolvedConflicts.delete(accountHash);
 
     if (resolution === 'keep_remote') {
+      this.enqueueSeq.set(accountHash, (this.enqueueSeq.get(accountHash) ?? 0) + 1);
+      const existingTimer = this.pushTimers.get(accountHash);
+      if (existingTimer !== undefined) {
+        window.clearTimeout(existingTimer);
+        this.pushTimers.delete(accountHash);
+      }
+      this.clearPushRetryTimer(accountHash);
+      this.pendingRepush.delete(accountHash);
+      await requestCancelPendingPush(accountHash);
+
       await withWorkspaceLock(accountHash, async () => {
         await putWorkspace(accountHash, conflict.remoteState);
         await setSyncMeta(accountHash, {
