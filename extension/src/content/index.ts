@@ -790,6 +790,11 @@ function persistCollapsedFolders(accountHash: string | null): void {
   );
 }
 
+function disconnectRootObserver() {
+  rootObserver?.disconnect();
+  rootObserver = null;
+}
+
 function ensureRootObserver() {
   if (rootObserver) return;
   rootObserver = new MutationObserver(() => scheduleRescan());
@@ -797,8 +802,7 @@ function ensureRootObserver() {
 }
 
 function observeDocumentForSidebar() {
-  rootObserver?.disconnect();
-  rootObserver = null;
+  disconnectRootObserver();
   ensureRootObserver();
   scheduleRescan(0);
 }
@@ -903,6 +907,7 @@ function bindSidebarObservers(nextSidebar: HTMLElement) {
 function rescanSidebar() {
   if (isSparkSurface()) {
     cleanupInjectedProjects();
+    disconnectRootObserver();
     return;
   }
 
@@ -917,6 +922,9 @@ function rescanSidebar() {
   }
 
   bindSidebarObservers(nextSidebar);
+  if (sidebarRoot?.isConnected) {
+    disconnectRootObserver();
+  }
 
   if (!isExpandedSidebar(nextSidebar)) {
     cleanupInjectedProjects();
@@ -931,9 +939,8 @@ function rescanSidebar() {
     }
     return;
   }
-  if (sidebarRoot?.isConnected && rootObserver) {
-    rootObserver.disconnect();
-    rootObserver = null;
+  if (sidebarRoot?.isConnected) {
+    disconnectRootObserver();
   }
   pendingPanelRetryCount = 0;
   ensureChatsList();
