@@ -227,6 +227,11 @@ export interface SyncFlushPushMessage {
   accountId?: string;
 }
 
+export interface SyncCancelPushMessage {
+  action: 'SYNC_CANCEL_PUSH';
+  accountId: string;
+}
+
 export interface SyncSessionGetMessage {
   action: 'SYNC_SESSION_GET';
 }
@@ -253,6 +258,7 @@ export type SyncMessage =
   | SyncPushMessage
   | SyncEnqueuePushMessage
   | SyncFlushPushMessage
+  | SyncCancelPushMessage
   | SyncCheckPermissionMessage
   | SyncOpenPermissionPageMessage
   | SyncSessionGetMessage

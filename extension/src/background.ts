@@ -3,6 +3,7 @@ import type {
   RemoteSyncBlob,
   SessionPassphrasePayload,
   SyncApiResponse,
+  SyncCancelPushMessage,
   SyncCheckPermissionMessage,
   SyncEnqueuePushMessage,
   SyncFlushPushMessage,
@@ -82,6 +83,11 @@ function isEnqueuePushMessage(message: unknown): message is SyncEnqueuePushMessa
 function isFlushPushMessage(message: unknown): message is SyncFlushPushMessage {
   if (!message || typeof message !== 'object') return false;
   return (message as { action?: unknown }).action === 'SYNC_FLUSH_PUSH';
+}
+
+function isCancelPushMessage(message: unknown): message is SyncCancelPushMessage {
+  if (!message || typeof message !== 'object') return false;
+  return (message as { action?: unknown }).action === 'SYNC_CANCEL_PUSH';
 }
 
 function isCheckPermissionMessage(message: unknown): message is SyncCheckPermissionMessage {
@@ -442,7 +448,7 @@ function handleSyncMessage(message: SyncPullMessage | SyncPushMessage): Promise<
   if (message.action === 'SYNC_PULL') {
     return handleSyncPull(message.accountId, message.serverUrl, message.apiKey, message.ifNoneMatch);
   }
-  return handleSyncPush(message);
+  return handleSerializedDirectPush(message);
 }
 
 interface PendingPushEntry {
@@ -453,6 +459,190 @@ interface PendingPushEntry {
 
 const pendingPushes = new Map<string, PendingPushEntry>();
 const inFlightAccountPushes = new Map<string, Promise<void>>();
+const inFlightPushVersions = new Map<string, number>();
+const lastCommittedPush = new Map<string, { version: number; baseVersion?: number }>();
+const pendingPushStorageQueues = new Map<string, Promise<void>>();
+
+function serializePendingPushStorage(accountId: string, op: () => Promise<void>): Promise<void> {
+  const prev = pendingPushStorageQueues.get(accountId) ?? Promise.resolve();
+  const next = prev.then(op, op).catch(() => undefined);
+  pendingPushStorageQueues.set(accountId, next);
+  void next.finally(() => {
+    if (pendingPushStorageQueues.get(accountId) === next) {
+      pendingPushStorageQueues.delete(accountId);
+    }
+  });
+  return next;
+}
+
+function shouldClearPersistedPush(response: SyncHandlerResponse): boolean {
+  return (
+    response.success ||
+    response.error === 'unauthorized' ||
+    response.error === 'forbidden' ||
+    response.error === 'conflict' ||
+    response.error === 'payload_too_large' ||
+    response.error === 'permission_denied'
+  );
+}
+
+/**
+ * Advances `baseVersion` only for linear follow-up edits built locally on top
+ * of a push committed by this browser's background worker.
+ */
+function advanceLinearBaseVersion(
+  accountId: string,
+  envelope: EncryptedSyncEnvelope
+): EncryptedSyncEnvelope {
+  const lastCommit = lastCommittedPush.get(accountId);
+  if (
+    lastCommit &&
+    envelope.version > lastCommit.version &&
+    envelope.baseVersion !== undefined &&
+    envelope.baseVersion < lastCommit.version &&
+    (lastCommit.baseVersion === undefined || envelope.baseVersion >= lastCommit.baseVersion)
+  ) {
+    return { ...envelope, baseVersion: lastCommit.version };
+  }
+  return envelope;
+}
+
+function resolveSupersededEntry(entry: PendingPushEntry, version: number): void {
+  if (entry.timer !== null) {
+    clearTimeout(entry.timer);
+    entry.timer = null;
+  }
+  for (const resolve of entry.resolvers) {
+    try {
+      resolve({ success: true, superseded: true, data: { version } });
+    } catch {
+      // Ignore closed caller
+    }
+  }
+}
+
+function persistPendingPushEntry(accountId: string, entry: PendingPushEntry): void {
+  void serializePendingPushStorage(accountId, async () => {
+    const current = pendingPushes.get(accountId);
+    if (current && current !== entry) return;
+    try {
+      await storageLocalSet({
+        [`${PENDING_PUSH_KEY_PREFIX}${accountId}`]: {
+          accountId,
+          serverUrl: entry.message.serverUrl,
+          data: entry.message.data,
+          queuedAt: Date.now()
+        }
+      });
+    } catch (error) {
+      console.warn('[gemini-projects] failed to persist pending push', error);
+    }
+  });
+}
+
+function extractPushedVersion(response: SyncHandlerResponse, fallbackVersion: number): number {
+  if (
+    'data' in response &&
+    response.data &&
+    typeof (response.data as { version?: unknown }).version === 'number'
+  ) {
+    return (response.data as { version: number }).version;
+  }
+  return fallbackVersion;
+}
+
+function reconcileCommittedPush(
+  accountId: string,
+  pushedVersion: number,
+  baseVersion: number | undefined
+): void {
+  lastCommittedPush.set(accountId, { version: pushedVersion, baseVersion });
+  const queued = pendingPushes.get(accountId);
+  if (!queued) return;
+  if (queued.message.data.version <= pushedVersion) {
+    pendingPushes.delete(accountId);
+    resolveSupersededEntry(queued, pushedVersion);
+    return;
+  }
+  const nextData = advanceLinearBaseVersion(accountId, queued.message.data);
+  if (nextData !== queued.message.data) {
+    queued.message.data = nextData;
+    persistPendingPushEntry(accountId, queued);
+  }
+}
+
+async function clearPersistedPushIfIdle(accountId: string, response: SyncHandlerResponse): Promise<void> {
+  if (!shouldClearPersistedPush(response) || pendingPushes.has(accountId)) {
+    return;
+  }
+  await serializePendingPushStorage(accountId, async () => {
+    if (pendingPushes.has(accountId)) return;
+    try {
+      await storageLocalRemove(`${PENDING_PUSH_KEY_PREFIX}${accountId}`);
+    } catch {
+      // Best-effort cleanup
+    }
+  });
+}
+
+async function executeTrackedPush(accountId: string, pushMessage: SyncPushMessage): Promise<SyncHandlerResponse> {
+  const adjustedData = advanceLinearBaseVersion(accountId, pushMessage.data);
+  const effectiveMessage =
+    adjustedData === pushMessage.data ? pushMessage : { ...pushMessage, data: adjustedData };
+
+  inFlightPushVersions.set(accountId, effectiveMessage.data.version);
+  let response: SyncHandlerResponse;
+  try {
+    response = await handleSyncPush(effectiveMessage);
+  } catch (error) {
+    response = {
+      success: false,
+      error: 'network_error',
+      message: errorMessage(error)
+    };
+  } finally {
+    inFlightPushVersions.delete(accountId);
+  }
+
+  if (response.success) {
+    const pushedVersion = extractPushedVersion(response, effectiveMessage.data.version);
+    reconcileCommittedPush(accountId, pushedVersion, effectiveMessage.data.baseVersion);
+  }
+  await clearPersistedPushIfIdle(accountId, response);
+  return response;
+}
+
+async function handleSerializedDirectPush(message: SyncPushMessage): Promise<SyncHandlerResponse> {
+  const { accountId } = message;
+  while (inFlightAccountPushes.has(accountId)) {
+    await inFlightAccountPushes.get(accountId);
+  }
+
+  const queued = pendingPushes.get(accountId);
+  if (queued) {
+    if (queued.message.data.version > message.data.version) {
+      if (queued.timer !== null) {
+        clearTimeout(queued.timer);
+        queued.timer = null;
+      }
+      void drainPendingPush(accountId);
+      return { success: true, superseded: true, data: { version: queued.message.data.version } };
+    }
+    pendingPushes.delete(accountId);
+    resolveSupersededEntry(queued, message.data.version);
+  }
+
+  let response!: SyncHandlerResponse;
+  const task = (async () => {
+    response = await executeTrackedPush(accountId, message);
+  })().finally(() => {
+    inFlightAccountPushes.delete(accountId);
+  });
+
+  inFlightAccountPushes.set(accountId, task);
+  await task;
+  return response;
+}
 
 async function drainPendingPush(accountId: string): Promise<void> {
   const existing = inFlightAccountPushes.get(accountId);
@@ -473,32 +663,7 @@ async function drainPendingPush(accountId: string): Promise<void> {
       if (!entry || entry.timer !== null) break;
       pendingPushes.delete(accountId);
 
-      let response: SyncHandlerResponse;
-      try {
-        response = await handleSyncPush(entry.message);
-      } catch (error) {
-        response = {
-          success: false,
-          error: 'network_error',
-          message: errorMessage(error)
-        };
-      }
-
-      const shouldClearPersisted =
-        response.success ||
-        response.error === 'unauthorized' ||
-        response.error === 'forbidden' ||
-        response.error === 'conflict' ||
-        response.error === 'payload_too_large' ||
-        response.error === 'permission_denied';
-
-      if (shouldClearPersisted && !pendingPushes.has(accountId)) {
-        try {
-          await storageLocalRemove(`${PENDING_PUSH_KEY_PREFIX}${accountId}`);
-        } catch {
-          // Best-effort cleanup
-        }
-      }
+      const response = await executeTrackedPush(accountId, entry.message);
 
       for (const resolve of entry.resolvers) {
         try {
@@ -521,41 +686,27 @@ async function handleEnqueuePush(message: SyncEnqueuePushMessage): Promise<SyncH
     return { success: false, error: 'network_error', message: 'Invalid sync endpoint parameters.' };
   }
 
-  try {
-    await storageLocalSet({
-      [`${PENDING_PUSH_KEY_PREFIX}${message.accountId}`]: {
-        accountId: message.accountId,
-        serverUrl: message.serverUrl,
-        data: message.data,
-        queuedAt: Date.now()
-      }
-    });
-  } catch (error) {
-    console.warn('[gemini-projects] failed to persist pending push', error);
+  const inFlightVersion = inFlightPushVersions.get(message.accountId);
+  if (inFlightVersion !== undefined && message.data.version < inFlightVersion) {
+    return { success: true, superseded: true, data: { version: inFlightVersion } };
   }
 
   const prev = pendingPushes.get(message.accountId);
   if (prev) {
-    if (prev.timer !== null) {
-      clearTimeout(prev.timer);
-      prev.timer = null;
+    if (message.data.version < prev.message.data.version) {
+      return { success: true, superseded: true, data: { version: prev.message.data.version } };
     }
     pendingPushes.delete(message.accountId);
-    for (const resolve of prev.resolvers) {
-      try {
-        resolve({ success: true, superseded: true, data: { version: message.data.version } });
-      } catch {
-        // Ignore closed caller
-      }
-    }
+    resolveSupersededEntry(prev, message.data.version);
   }
 
+  const adjustedData = advanceLinearBaseVersion(message.accountId, message.data);
   const pushMessage: SyncPushMessage = {
     action: 'SYNC_PUSH',
     accountId: message.accountId,
     serverUrl: message.serverUrl,
     apiKey: message.apiKey,
-    data: message.data
+    data: adjustedData
   };
 
   const rawDelay = Number.isFinite(message.delayMs) ? message.delayMs : DEFAULT_PUSH_DEBOUNCE_MS;
@@ -569,6 +720,7 @@ async function handleEnqueuePush(message: SyncEnqueuePushMessage): Promise<SyncH
     };
     if (delayMs === 0) {
       pendingPushes.set(message.accountId, entry);
+      persistPendingPushEntry(message.accountId, entry);
       void drainPendingPush(message.accountId);
     } else {
       entry.timer = setTimeout(() => {
@@ -576,6 +728,24 @@ async function handleEnqueuePush(message: SyncEnqueuePushMessage): Promise<SyncH
         void drainPendingPush(message.accountId);
       }, delayMs);
       pendingPushes.set(message.accountId, entry);
+      persistPendingPushEntry(message.accountId, entry);
+    }
+  });
+}
+
+async function handleCancelPush(accountId: string): Promise<void> {
+  lastCommittedPush.delete(accountId);
+  const queued = pendingPushes.get(accountId);
+  if (queued) {
+    pendingPushes.delete(accountId);
+    resolveSupersededEntry(queued, 0);
+  }
+  await serializePendingPushStorage(accountId, async () => {
+    if (pendingPushes.has(accountId)) return;
+    try {
+      await storageLocalRemove(`${PENDING_PUSH_KEY_PREFIX}${accountId}`);
+    } catch {
+      // Best-effort cleanup
     }
   });
 }
@@ -771,6 +941,7 @@ async function handleSessionSet(message: SyncSessionSetMessage): Promise<SyncSes
 
 async function handleSessionClear(): Promise<SyncSessionWriteResult> {
   fallbackSessionPassphrases = null;
+  lastCommittedPush.clear();
   await storageSessionRemove(SYNC_SESSION_PASSPHRASE_KEY);
 
   pendingPushes.forEach((entry) => {
@@ -867,6 +1038,17 @@ webext.runtime.onMessage.addListener((
   if (isFlushPushMessage(message)) {
     sendResponse(handleFlushPush(message));
     return false;
+  }
+
+  if (isCancelPushMessage(message)) {
+    handleCancelPush(message.accountId)
+      .then(() => sendResponse({ success: true, data: { cancelled: true } }))
+      .catch((error: Error) => sendResponse({
+        success: false,
+        error: 'network_error',
+        message: error.message
+      }));
+    return true;
   }
 
   if (!isSyncMessage(message)) return false;

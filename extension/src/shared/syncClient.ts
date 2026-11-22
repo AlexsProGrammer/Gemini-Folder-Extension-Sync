@@ -3,6 +3,7 @@ import type {
   EncryptedSyncEnvelope,
   RemoteSyncBlob,
   SyncApiResponse,
+  SyncCancelPushMessage,
   SyncCheckPermissionMessage,
   SyncConfig,
   SyncEnqueuePushMessage,
@@ -239,5 +240,17 @@ export async function requestFlushPendingPushes(accountId?: string): Promise<voi
     await runtimeSendMessage<unknown>(message as SyncMessage);
   } catch {
     // Best-effort flush during pagehide / visibilitychange.
+  }
+}
+
+export async function requestCancelPendingPush(accountId: string): Promise<void> {
+  const message: SyncCancelPushMessage = {
+    action: 'SYNC_CANCEL_PUSH',
+    accountId
+  };
+  try {
+    await runtimeSendMessage<unknown>(message as SyncMessage);
+  } catch {
+    // Best-effort cancellation.
   }
 }
