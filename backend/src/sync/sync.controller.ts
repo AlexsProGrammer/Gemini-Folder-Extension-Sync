@@ -40,7 +40,7 @@ export class SyncController {
       throw new NotFoundException('No synced workspace found for this account.');
     }
 
-    const etag = `"v${blob.version}-${blob.updatedAt}"`;
+    const etag = this.formatETag(blob.version, blob.updatedAt);
     reply.header('ETag', etag);
 
     const ifNoneMatch = request.headers?.['if-none-match'];
@@ -53,11 +53,22 @@ export class SyncController {
   }
 
   @Post(':accountId')
-  pushBlob(@Param('accountId') accountId: string, @Body() dto: PushSyncDto, @Req() request: RequestWithApiKey): SyncConfirmation {
+  pushBlob(
+    @Param('accountId') accountId: string,
+    @Body() dto: PushSyncDto,
+    @Req() request: RequestWithApiKey,
+    @Res({ passthrough: true }) reply: FastifyReply
+  ): SyncConfirmation {
     this.assertValidAccountId(accountId);
     this.assertAccountAccess(request, accountId);
 
-    return this.syncService.upsertBlob(accountId, dto);
+    const confirmation = this.syncService.upsertBlob(accountId, dto);
+    reply.header('ETag', this.formatETag(confirmation.version, confirmation.updatedAt));
+    return confirmation;
+  }
+
+  private formatETag(version: number, updatedAt: number): string {
+    return `"v${version}-${updatedAt}"`;
   }
 
   private matchesETag(ifNoneMatchHeader: string | string[], etag: string): boolean {

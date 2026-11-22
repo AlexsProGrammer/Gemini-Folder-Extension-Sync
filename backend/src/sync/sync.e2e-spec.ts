@@ -9,6 +9,7 @@ import cors from '@fastify/cors';
 import supertest from 'supertest';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { AppModule } from '../app.module';
+import { parseTrustProxy } from '../main';
 
 const TEST_DB_PATH = join(tmpdir(), `gemini-sync-e2e-${process.pid}.db`);
 const ACCOUNT_ID = 'a'.repeat(64);
@@ -71,13 +72,14 @@ describe('Sync API (e2e)', () => {
     await request.get(`/api/v1/sync/${ACCOUNT_ID}`).set(auth('test_secret_key_1234567890')).expect(404);
   });
 
-  it('persists a POST payload with version 2', async () => {
+  it('persists a POST payload with version 2 and returns matching ETag', async () => {
     const response = await request
       .post(`/api/v1/sync/${ACCOUNT_ID}`)
       .set(auth('test_secret_key_1234567890'))
       .send({ version: 2, ciphertext: CIPHER_A, iv: IV_A, updatedAt: 1000 })
       .expect(201);
 
+    expect(response.headers.etag).toBe('"v2-1000"');
     expect(response.body).toEqual({ status: 'success', version: 2, updatedAt: 1000 });
   });
 
@@ -210,5 +212,67 @@ describe('Sync API (e2e)', () => {
     const response = await request.get(`/api/v1/sync/${ALICE_ACCOUNT_ID}`).set(auth('test_secret_key_1234567890')).expect(200);
 
     expect(response.body.ciphertext).toBe(CIPHER_ALICE);
+  });
+
+  it('uses POST ETag directly in If-None-Match to get 304 without a full GET', async () => {
+    const pushed = await request
+      .post(`/api/v1/sync/${ALICE_ACCOUNT_ID}`)
+      .set(auth('alice_test_key_1234567890'))
+      .send({ version: 2, baseVersion: 1, ciphertext: CIPHER_ALICE, iv: IV_ALICE, updatedAt: 2500 })
+      .expect(201);
+
+    expect(pushed.headers.etag).toBe('"v2-2500"');
+
+    const cached = await request
+      .get(`/api/v1/sync/${ALICE_ACCOUNT_ID}`)
+      .set(auth('alice_test_key_1234567890'))
+      .set('If-None-Match', pushed.headers.etag)
+      .expect(304);
+
+    expect(cached.headers.etag).toBe('"v2-2500"');
+    expect(cached.text).toBe('');
+  });
+});
+
+describe('parseTrustProxy', () => {
+  it('defaults to loopback and uniquelocal and parses explicit values', () => {
+    expect(parseTrustProxy(undefined)).toEqual(['loopback', 'uniquelocal']);
+    expect(parseTrustProxy('   ')).toEqual(['loopback', 'uniquelocal']);
+    expect(parseTrustProxy('true')).toBe(true);
+    expect(parseTrustProxy('FALSE')).toBe(false);
+    expect(parseTrustProxy('1')).toBe(1);
+    expect(parseTrustProxy('127.0.0.1')).toBe('127.0.0.1');
+    expect(parseTrustProxy('127.0.0.1, 172.18.0.1')).toEqual(['127.0.0.1', '172.18.0.1']);
+  });
+
+  it('trusts X-Forwarded-For from loopback and Docker bridge IPs but not public IPs', async () => {
+    const fastify = new FastifyAdapter({ trustProxy: parseTrustProxy(undefined) }).getInstance();
+    fastify.get('/ip', (req) => ({ ip: req.ip }));
+
+    const fromLoopback = await fastify.inject({
+      method: 'GET',
+      url: '/ip',
+      remoteAddress: '127.0.0.1',
+      headers: { 'x-forwarded-for': '198.51.100.10' }
+    });
+    expect(fromLoopback.json()).toEqual({ ip: '198.51.100.10' });
+
+    const fromDockerBridge = await fastify.inject({
+      method: 'GET',
+      url: '/ip',
+      remoteAddress: '172.18.0.1',
+      headers: { 'x-forwarded-for': '198.51.100.20' }
+    });
+    expect(fromDockerBridge.json()).toEqual({ ip: '198.51.100.20' });
+
+    const fromUntrustedPublic = await fastify.inject({
+      method: 'GET',
+      url: '/ip',
+      remoteAddress: '203.0.113.5',
+      headers: { 'x-forwarded-for': '198.51.100.30' }
+    });
+    expect(fromUntrustedPublic.json()).toEqual({ ip: '203.0.113.5' });
+
+    await fastify.close();
   });
 });

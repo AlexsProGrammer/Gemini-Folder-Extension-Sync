@@ -9,10 +9,10 @@ import { AppModule } from './app.module';
 
 loadEnv();
 
-function parseTrustProxy(raw: string | undefined): boolean | string {
+export function parseTrustProxy(raw: string | undefined): boolean | number | string | string[] {
   const trimmed = raw?.trim();
   if (!trimmed) {
-    return '127.0.0.1';
+    return ['loopback', 'uniquelocal'];
   }
   const lower = trimmed.toLowerCase();
   if (lower === 'true') {
@@ -21,7 +21,17 @@ function parseTrustProxy(raw: string | undefined): boolean | string {
   if (lower === 'false') {
     return false;
   }
-  return trimmed;
+  if (/^\d+$/.test(trimmed)) {
+    return Number(trimmed);
+  }
+  const parts = trimmed
+    .split(',')
+    .map((part) => part.trim())
+    .filter((part) => part.length > 0);
+  if (parts.length === 0) {
+    return ['loopback', 'uniquelocal'];
+  }
+  return parts.length === 1 ? parts[0] : parts;
 }
 
 function parseCorsOrigin(raw: string | undefined): boolean | string[] {
@@ -66,4 +76,6 @@ async function bootstrap(): Promise<void> {
   await app.listen(port, '0.0.0.0');
 }
 
-void bootstrap();
+if (!process.env.VITEST) {
+  void bootstrap();
+}

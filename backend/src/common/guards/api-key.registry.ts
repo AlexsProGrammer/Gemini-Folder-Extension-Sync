@@ -53,7 +53,14 @@ export class ApiKeyRegistry {
         matched = entry;
       }
     }
-    return matched;
+    if (!matched) {
+      return null;
+    }
+    return {
+      name: matched.name,
+      allowsAllAccounts: matched.allowsAllAccounts,
+      allowedAccounts: matched.allowedAccounts
+    };
   }
 
   private registerFromEnvironment(): void {

@@ -82,7 +82,7 @@ The backend reads its entire configuration from `backend/.env`, which is passed 
 PORT=3350                     # listen port (must match the reverse-proxy upstream)
 DB_PATH=/app/data/sync.db     # SQLite file inside the container (bind-mounted ./data)
 LOG_LEVEL=info                # Fastify log level
-TRUST_PROXY=127.0.0.1         # reverse-proxy IP/CIDR or true/false for per-IP rate limiting
+TRUST_PROXY=loopback,uniquelocal # reverse-proxy IP/CIDR, hop count, or true/false (covers loopback + Docker bridge)
 # CORS_ORIGINS=               # optional comma-separated allowlist (disabled by default)
 
 API_KEY=<secret>              # legacy single key; allowed on ALL accounts

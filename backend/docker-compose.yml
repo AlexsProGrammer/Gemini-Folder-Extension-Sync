@@ -19,4 +19,5 @@ services:
       PORT: ${PORT:-3350}
       DB_PATH: /app/data/sync.db
       LOG_LEVEL: ${LOG_LEVEL:-info}
+      TRUST_PROXY: ${TRUST_PROXY:-loopback,uniquelocal}
     restart: unless-stopped
