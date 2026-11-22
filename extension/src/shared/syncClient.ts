@@ -5,6 +5,8 @@ import type {
   SyncApiResponse,
   SyncCheckPermissionMessage,
   SyncConfig,
+  SyncEnqueuePushMessage,
+  SyncFlushPushMessage,
   SyncMessage,
   SyncOpenPermissionPageMessage,
   SyncOpenPermissionPageResult,
@@ -199,5 +201,43 @@ export async function requestRemotePush(
     return response;
   } catch (error) {
     return transportFailure(error);
+  }
+}
+
+export async function requestEnqueuedPush(
+  config: SyncConfig,
+  accountId: string,
+  payload: EncryptedSyncEnvelope,
+  delayMs: number
+): Promise<SyncApiResponse<{ version: number }>> {
+  const message: SyncEnqueuePushMessage = {
+    action: 'SYNC_ENQUEUE_PUSH',
+    accountId,
+    serverUrl: config.serverUrl,
+    apiKey: config.apiKey,
+    data: payload,
+    delayMs
+  };
+
+  try {
+    const response = await runtimeSendMessage<SyncApiResponse<{ version: number }> | null>(message as SyncMessage);
+    if (!response) {
+      return { success: false, error: 'network_error', message: 'Background worker returned no response.' };
+    }
+    return response;
+  } catch (error) {
+    return transportFailure(error);
+  }
+}
+
+export async function requestFlushPendingPushes(accountId?: string): Promise<void> {
+  const message: SyncFlushPushMessage = {
+    action: 'SYNC_FLUSH_PUSH',
+    ...(accountId ? { accountId } : {})
+  };
+  try {
+    await runtimeSendMessage<unknown>(message as SyncMessage);
+  } catch {
+    // Best-effort flush during pagehide / visibilitychange.
   }
 }

@@ -213,6 +213,20 @@ export interface SyncPushMessage {
   data: EncryptedSyncEnvelope;
 }
 
+export interface SyncEnqueuePushMessage {
+  action: 'SYNC_ENQUEUE_PUSH';
+  accountId: string;
+  serverUrl: string;
+  apiKey: string;
+  data: EncryptedSyncEnvelope;
+  delayMs: number;
+}
+
+export interface SyncFlushPushMessage {
+  action: 'SYNC_FLUSH_PUSH';
+  accountId?: string;
+}
+
 export interface SyncSessionGetMessage {
   action: 'SYNC_SESSION_GET';
 }
@@ -237,6 +251,8 @@ export type SyncSessionWriteResult =
 export type SyncMessage =
   | SyncPullMessage
   | SyncPushMessage
+  | SyncEnqueuePushMessage
+  | SyncFlushPushMessage
   | SyncCheckPermissionMessage
   | SyncOpenPermissionPageMessage
   | SyncSessionGetMessage
@@ -277,7 +293,7 @@ export type SyncErrorKind =
   | 'network_error';
 
 export type SyncApiResponse<T> =
-  | { success: true; data: T; etag?: string; notModified?: false }
+  | { success: true; data: T; etag?: string; notModified?: false; superseded?: boolean }
   | { success: true; notModified: true; etag?: string }
   | {
       success: false;

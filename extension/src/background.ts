@@ -4,6 +4,8 @@ import type {
   SessionPassphrasePayload,
   SyncApiResponse,
   SyncCheckPermissionMessage,
+  SyncEnqueuePushMessage,
+  SyncFlushPushMessage,
   SyncMessage,
   SyncOpenPermissionPageMessage,
   SyncOpenPermissionPageResult,
@@ -21,6 +23,7 @@ import {
   errorMessage,
   errorName,
   storageLocalGet,
+  storageLocalRemove,
   storageLocalSet,
   storageSessionGet,
   storageSessionRemove,
@@ -48,6 +51,10 @@ const PULL_RETRY_DELAYS_MS = [400, 1200] as const;
 const RETRYABLE_PULL_STATUSES = new Set([502, 503, 504]);
 const ACCOUNT_ID_RE = /^[0-9a-f]{64}$/;
 const SYNC_SESSION_PASSPHRASE_KEY = 'gemini_sync_session_passphrases';
+const SYNC_SETTINGS_KEY = 'gemini_sync_settings';
+const PENDING_PUSH_KEY_PREFIX = 'gp_pending_push_';
+const DEFAULT_PUSH_DEBOUNCE_MS = 750;
+const MAX_ENQUEUE_DELAY_MS = 5000;
 const MAX_PASSPHRASE_LENGTH = 4096;
 const MAX_PASSPHRASE_ACCOUNTS = 64;
 
@@ -65,6 +72,16 @@ function isSyncMessage(message: unknown): message is SyncPullMessage | SyncPushM
   if (!message || typeof message !== 'object') return false;
   const action = (message as { action?: unknown }).action;
   return action === 'SYNC_PULL' || action === 'SYNC_PUSH';
+}
+
+function isEnqueuePushMessage(message: unknown): message is SyncEnqueuePushMessage {
+  if (!message || typeof message !== 'object') return false;
+  return (message as { action?: unknown }).action === 'SYNC_ENQUEUE_PUSH';
+}
+
+function isFlushPushMessage(message: unknown): message is SyncFlushPushMessage {
+  if (!message || typeof message !== 'object') return false;
+  return (message as { action?: unknown }).action === 'SYNC_FLUSH_PUSH';
 }
 
 function isCheckPermissionMessage(message: unknown): message is SyncCheckPermissionMessage {
@@ -309,7 +326,22 @@ async function handleSyncPull(
   return { success: false, error: 'network_error', message: 'Sync pull failed.' };
 }
 
-async function persistPushSyncMeta(
+const syncMetaWriteQueues = new Map<string, Promise<void>>();
+
+function persistPushSyncMeta(
+  accountId: string,
+  pushedVersion: number,
+  etag?: string
+): Promise<void> {
+  const prev = syncMetaWriteQueues.get(accountId) ?? Promise.resolve();
+  const next = prev
+    .then(() => runPersistPushSyncMeta(accountId, pushedVersion, etag))
+    .catch(() => undefined);
+  syncMetaWriteQueues.set(accountId, next);
+  return next;
+}
+
+async function runPersistPushSyncMeta(
   accountId: string,
   pushedVersion: number,
   etag?: string
@@ -327,13 +359,15 @@ async function persistPushSyncMeta(
       typeof existing.localVersion === 'number' && Number.isFinite(existing.localVersion)
         ? existing.localVersion
         : undefined;
-    const stillDirty = localVersion !== undefined ? localVersion > pushedVersion : false;
+    const nextLastSynced = Math.max(prevLastSynced, pushedVersion);
+    const nextLocalVersion = localVersion !== undefined ? Math.max(localVersion, pushedVersion) : undefined;
+    const stillDirty = localVersion !== undefined ? localVersion > pushedVersion : existing.dirty === true;
     const nextEtag = etag ?? (!stillDirty && typeof existing.etag === 'string' && existing.etag ? existing.etag : undefined);
     await storageLocalSet({
       [key]: {
-        lastSyncedVersion: Math.max(prevLastSynced, pushedVersion),
+        lastSyncedVersion: nextLastSynced,
         dirty: stillDirty,
-        ...(localVersion !== undefined ? { localVersion } : {}),
+        ...(nextLocalVersion !== undefined ? { localVersion: nextLocalVersion } : {}),
         ...(nextEtag ? { etag: nextEtag } : {})
       }
     });
@@ -409,6 +443,193 @@ function handleSyncMessage(message: SyncPullMessage | SyncPushMessage): Promise<
     return handleSyncPull(message.accountId, message.serverUrl, message.apiKey, message.ifNoneMatch);
   }
   return handleSyncPush(message);
+}
+
+interface PendingPushEntry {
+  message: SyncPushMessage;
+  timer: ReturnType<typeof setTimeout> | null;
+  resolvers: Array<(res: SyncHandlerResponse) => void>;
+}
+
+const pendingPushes = new Map<string, PendingPushEntry>();
+const inFlightAccountPushes = new Map<string, Promise<void>>();
+
+async function drainPendingPush(accountId: string): Promise<void> {
+  const existing = inFlightAccountPushes.get(accountId);
+  if (existing) {
+    await existing;
+    const next = pendingPushes.get(accountId);
+    if (!next || next.timer !== null) {
+      return;
+    }
+  }
+  if (inFlightAccountPushes.has(accountId)) {
+    return drainPendingPush(accountId);
+  }
+
+  const task = (async () => {
+    while (true) {
+      const entry = pendingPushes.get(accountId);
+      if (!entry || entry.timer !== null) break;
+      pendingPushes.delete(accountId);
+
+      let response: SyncHandlerResponse;
+      try {
+        response = await handleSyncPush(entry.message);
+      } catch (error) {
+        response = {
+          success: false,
+          error: 'network_error',
+          message: errorMessage(error)
+        };
+      }
+
+      const shouldClearPersisted =
+        response.success ||
+        response.error === 'unauthorized' ||
+        response.error === 'forbidden' ||
+        response.error === 'conflict' ||
+        response.error === 'payload_too_large' ||
+        response.error === 'permission_denied';
+
+      if (shouldClearPersisted && !pendingPushes.has(accountId)) {
+        try {
+          await storageLocalRemove(`${PENDING_PUSH_KEY_PREFIX}${accountId}`);
+        } catch {
+          // Best-effort cleanup
+        }
+      }
+
+      for (const resolve of entry.resolvers) {
+        try {
+          resolve(response);
+        } catch {
+          // Originating tab may have already closed
+        }
+      }
+    }
+  })().finally(() => {
+    inFlightAccountPushes.delete(accountId);
+  });
+
+  inFlightAccountPushes.set(accountId, task);
+  await task;
+}
+
+async function handleEnqueuePush(message: SyncEnqueuePushMessage): Promise<SyncHandlerResponse> {
+  if (!validateSyncEndpoint(message.serverUrl, message.accountId)) {
+    return { success: false, error: 'network_error', message: 'Invalid sync endpoint parameters.' };
+  }
+
+  try {
+    await storageLocalSet({
+      [`${PENDING_PUSH_KEY_PREFIX}${message.accountId}`]: {
+        accountId: message.accountId,
+        serverUrl: message.serverUrl,
+        data: message.data,
+        queuedAt: Date.now()
+      }
+    });
+  } catch (error) {
+    console.warn('[gemini-projects] failed to persist pending push', error);
+  }
+
+  const prev = pendingPushes.get(message.accountId);
+  if (prev) {
+    if (prev.timer !== null) {
+      clearTimeout(prev.timer);
+      prev.timer = null;
+    }
+    pendingPushes.delete(message.accountId);
+    for (const resolve of prev.resolvers) {
+      try {
+        resolve({ success: true, superseded: true, data: { version: message.data.version } });
+      } catch {
+        // Ignore closed caller
+      }
+    }
+  }
+
+  const pushMessage: SyncPushMessage = {
+    action: 'SYNC_PUSH',
+    accountId: message.accountId,
+    serverUrl: message.serverUrl,
+    apiKey: message.apiKey,
+    data: message.data
+  };
+
+  const rawDelay = Number.isFinite(message.delayMs) ? message.delayMs : DEFAULT_PUSH_DEBOUNCE_MS;
+  const delayMs = Math.max(0, Math.min(rawDelay, MAX_ENQUEUE_DELAY_MS));
+
+  return new Promise<SyncHandlerResponse>((resolve) => {
+    const entry: PendingPushEntry = {
+      message: pushMessage,
+      timer: null,
+      resolvers: [resolve]
+    };
+    if (delayMs === 0) {
+      pendingPushes.set(message.accountId, entry);
+      void drainPendingPush(message.accountId);
+    } else {
+      entry.timer = setTimeout(() => {
+        entry.timer = null;
+        void drainPendingPush(message.accountId);
+      }, delayMs);
+      pendingPushes.set(message.accountId, entry);
+    }
+  });
+}
+
+function handleFlushPush(message: SyncFlushPushMessage): SyncHandlerResponse {
+  const keys = message.accountId ? [message.accountId] : Array.from(pendingPushes.keys());
+  let flushed = 0;
+  for (const accountId of keys) {
+    const entry = pendingPushes.get(accountId);
+    if (!entry) continue;
+    if (entry.timer !== null) {
+      clearTimeout(entry.timer);
+      entry.timer = null;
+    }
+    flushed += 1;
+    void drainPendingPush(accountId);
+  }
+  return { success: true, data: { flushed } };
+}
+
+async function recoverPendingPushes(): Promise<void> {
+  try {
+    const all = await storageLocalGet<Record<string, unknown>>(null);
+    const settingsRaw = all[SYNC_SETTINGS_KEY];
+    const settings = settingsRaw && typeof settingsRaw === 'object' ? (settingsRaw as Record<string, unknown>) : null;
+    const serverUrl = typeof settings?.serverUrl === 'string' ? settings.serverUrl.trim() : '';
+    const apiKey = typeof settings?.apiKey === 'string' ? settings.apiKey.trim() : '';
+    if (!serverUrl || !apiKey) return;
+
+    for (const [key, value] of Object.entries(all)) {
+      if (!key.startsWith(PENDING_PUSH_KEY_PREFIX)) continue;
+      const accountId = key.slice(PENDING_PUSH_KEY_PREFIX.length);
+      if (!ACCOUNT_ID_RE.test(accountId) || pendingPushes.has(accountId)) continue;
+      if (!value || typeof value !== 'object') continue;
+      const record = value as { serverUrl?: unknown; data?: unknown };
+      if (record.serverUrl !== serverUrl || !record.data || typeof record.data !== 'object') continue;
+
+      const entry: PendingPushEntry = {
+        message: {
+          action: 'SYNC_PUSH',
+          accountId,
+          serverUrl,
+          apiKey,
+          data: record.data as EncryptedSyncEnvelope
+        },
+        timer: null,
+        resolvers: []
+      };
+      pendingPushes.set(accountId, entry);
+      void drainPendingPush(accountId);
+    }
+  } catch (error) {
+    console.warn('[gemini-projects] pending push recovery failed', error);
+  }
 }
 
 async function handleCheckPermission(message: SyncCheckPermissionMessage): Promise<SyncPermissionResult> {
@@ -551,6 +772,32 @@ async function handleSessionSet(message: SyncSessionSetMessage): Promise<SyncSes
 async function handleSessionClear(): Promise<SyncSessionWriteResult> {
   fallbackSessionPassphrases = null;
   await storageSessionRemove(SYNC_SESSION_PASSPHRASE_KEY);
+
+  pendingPushes.forEach((entry) => {
+    if (entry.timer !== null) {
+      clearTimeout(entry.timer);
+      entry.timer = null;
+    }
+    for (const resolve of entry.resolvers) {
+      try {
+        resolve({ success: false, error: 'network_error', message: 'Sync session cleared.' });
+      } catch {
+        // Ignore closed caller
+      }
+    }
+  });
+  pendingPushes.clear();
+
+  try {
+    const all = await storageLocalGet<Record<string, unknown>>(null);
+    const pendingKeys = Object.keys(all).filter((k) => k.startsWith(PENDING_PUSH_KEY_PREFIX));
+    if (pendingKeys.length > 0) {
+      await storageLocalRemove(pendingKeys);
+    }
+  } catch {
+    // Best-effort cleanup
+  }
+
   return { ok: true, persistedInSession: true };
 }
 
@@ -606,6 +853,22 @@ webext.runtime.onMessage.addListener((
     return true;
   }
 
+  if (isEnqueuePushMessage(message)) {
+    handleEnqueuePush(message)
+      .then((response) => sendResponse(response))
+      .catch((error: Error) => sendResponse({
+        success: false,
+        error: 'network_error',
+        message: error.message
+      }));
+    return true;
+  }
+
+  if (isFlushPushMessage(message)) {
+    sendResponse(handleFlushPush(message));
+    return false;
+  }
+
   if (!isSyncMessage(message)) return false;
 
   handleSyncMessage(message)
@@ -617,3 +880,5 @@ webext.runtime.onMessage.addListener((
     }));
   return true;
 });
+
+void recoverPendingPushes();

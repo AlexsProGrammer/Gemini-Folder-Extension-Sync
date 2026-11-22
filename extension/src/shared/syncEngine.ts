@@ -19,7 +19,7 @@ import {
   WORKSPACE_SCHEMA_VERSION
 } from './storage';
 import { breakProjectParentCycles } from './schemas';
-import { requestRemotePull, requestRemotePush } from './syncClient';
+import { requestEnqueuedPush, requestFlushPendingPushes, requestRemotePull, requestRemotePush } from './syncClient';
 import { promptFingerprint } from './promptFingerprint';
 import { errorMessage, errorName } from './webext';
 import type {
@@ -242,6 +242,7 @@ export class SyncEngine {
   private pushRetryAttempts = new Map<string, number>();
   private inFlightPushes = new Map<string, Promise<void>>();
   private pendingRepush = new Set<string>();
+  private enqueueSeq = new Map<string, number>();
   private inFlightPulls = new Map<string, Promise<void>>();
   private online = isOnline();
   private coordChannel: BroadcastChannel | null = null;
@@ -348,9 +349,10 @@ export class SyncEngine {
 
   /**
    * Debounced push entry point: every local workspace save funnels through
-   * here; rapid modifications within 750ms coalesce into a single remote push.
+   * here; rapid modifications within 750ms coalesce into a single remote push
+   * owned by the background worker so tab-close does not drop the edit.
    */
-  schedulePush(accountHash: string): void {
+  schedulePush(accountHash: string, snapshot?: WorkspacePayload): void {
     if (!accountHash || this.pausedAccounts.has(accountHash)) return;
 
     this.clearPushRetryTimer(accountHash);
@@ -359,6 +361,12 @@ export class SyncEngine {
     const existingTimer = this.pushTimers.get(accountHash);
     if (existingTimer !== undefined) {
       window.clearTimeout(existingTimer);
+      this.pushTimers.delete(accountHash);
+    }
+
+    if (snapshot && this.keys.has(accountHash) && this.online) {
+      void this.enqueueSnapshotPush(accountHash, snapshot, PUSH_DEBOUNCE_MS);
+      return;
     }
 
     const timer = window.setTimeout(() => {
@@ -426,6 +434,9 @@ export class SyncEngine {
    * visibilitychange handlers flush here instead of losing the last edits.
    */
   async flushPendingPushes(): Promise<void> {
+    // Dispatch background flush synchronously before any await so unloading tabs
+    // signal background.ts to drain already-enqueued encrypted envelopes.
+    void requestFlushPendingPushes();
     const pending = Array.from(this.pushTimers.keys());
     this.pushTimers.forEach((timer) => window.clearTimeout(timer));
     this.pushTimers.clear();
@@ -486,6 +497,138 @@ export class SyncEngine {
     this.setStatus(accountHash, 'error', formatted);
   }
 
+  private async enqueueSnapshotPush(
+    accountHash: string,
+    snapshot: WorkspacePayload,
+    delayMs: number
+  ): Promise<void> {
+    const seq = (this.enqueueSeq.get(accountHash) ?? 0) + 1;
+    this.enqueueSeq.set(accountHash, seq);
+
+    const key = this.keys.get(accountHash);
+    if (!key) return;
+    if (!this.online) {
+      this.setStatus(accountHash, 'offline');
+      return;
+    }
+
+    const config = await getSyncConfig();
+    if (!config) {
+      this.setStatus(accountHash, 'idle', 'Sync is not configured.');
+      return;
+    }
+
+    try {
+      const meta = await getSyncMeta(accountHash);
+      const { ciphertext, iv } = await encryptWorkspace(snapshot, key);
+      if (this.enqueueSeq.get(accountHash) !== seq) {
+        return;
+      }
+
+      const envelope: EncryptedSyncEnvelope = {
+        version: snapshot.version,
+        baseVersion: meta.lastSyncedVersion,
+        ciphertext,
+        iv,
+        updatedAt: snapshot.updatedAt
+      };
+
+      this.setStatus(accountHash, 'syncing');
+      const response = await requestEnqueuedPush(config, accountHash, envelope, delayMs);
+      if (response.success && 'superseded' in response && response.superseded) {
+        return;
+      }
+
+      await this.withSyncLock(accountHash, false, () =>
+        this.handlePushResponse(accountHash, snapshot, envelope, key, response)
+      );
+    } catch (error) {
+      if (error instanceof PayloadTooLargeError || errorName(error) === 'PayloadTooLargeError') {
+        this.handleErrorOutcome(accountHash, 'payload_too_large', 413, errorMessage(error), undefined, true);
+        return;
+      }
+      debugWarn('enqueueSnapshotPush: failed (exception)', error);
+      this.setStatus(
+        accountHash,
+        this.online ? 'error' : 'offline',
+        errorMessage(error)
+      );
+      this.schedulePushRetry(accountHash);
+    }
+  }
+
+  private async handlePushResponse(
+    accountHash: string,
+    localState: WorkspacePayload,
+    envelope: EncryptedSyncEnvelope,
+    key: CryptoKey,
+    response: Awaited<ReturnType<typeof requestRemotePush>>
+  ): Promise<void> {
+    if (response.success) {
+      const pushedVersion = 'data' in response ? response.data.version : localState.version;
+      await this.finalizeSuccessfulPush(accountHash, pushedVersion, response.etag);
+      return;
+    }
+
+    if (response.error === 'conflict' && response.serverState) {
+      if (
+        response.serverState.version === envelope.version &&
+        response.serverState.updatedAt === envelope.updatedAt &&
+        response.serverState.iv === envelope.iv &&
+        response.serverState.ciphertext === envelope.ciphertext
+      ) {
+        debugLog('runPush: 409 matched exact pushed envelope; treating as idempotent success');
+        await this.finalizeSuccessfulPush(
+          accountHash,
+          envelope.version,
+          `"v${envelope.version}-${envelope.updatedAt}"`
+        );
+        return;
+      }
+      debugWarn('runPush: conflict detected; server state is newer');
+      this.pushRetryAttempts.delete(accountHash);
+      try {
+        const remoteState = await decryptWorkspace(
+          response.serverState.ciphertext,
+          response.serverState.iv,
+          key
+        );
+        if (
+          remoteState.version === localState.version &&
+          remoteState.updatedAt === localState.updatedAt &&
+          areWorkspacesEquivalent(localState, remoteState)
+        ) {
+          debugLog('runPush: 409 matched equivalent workspace payload; treating as idempotent success');
+          await this.finalizeSuccessfulPush(
+            accountHash,
+            remoteState.version,
+            `"v${remoteState.version}-${remoteState.updatedAt}"`
+          );
+          return;
+        }
+        await this.handleConflict(accountHash, localState, remoteState);
+      } catch (error) {
+        console.warn('[gemini-projects] conflict payload decryption failed', error);
+        if (errorName(error) === 'OperationError') {
+          this.handleErrorOutcome(accountHash, 'decryption_failed');
+        } else {
+          this.setStatus(accountHash, 'error', 'Conflicting remote state could not be decrypted.');
+        }
+      }
+      return;
+    }
+
+    debugWarn('runPush: push failed with error:', response.error, response.status, response.message);
+    this.handleErrorOutcome(
+      accountHash,
+      response.error,
+      response.status,
+      response.message,
+      response.retryAfterSeconds,
+      true
+    );
+  }
+
   private async runPush(accountHash: string): Promise<void> {
     const key = this.keys.get(accountHash);
     if (!key) {
@@ -533,70 +676,7 @@ export class SyncEngine {
       debugLog(`runPush: sending payload (version: ${localState.version}, baseVersion: ${meta.lastSyncedVersion}, updatedAt: ${localState.updatedAt})`);
       const response = await requestRemotePush(config, accountHash, envelope);
       debugLog('runPush: response received:', JSON.stringify(response));
-
-      if (response.success) {
-        const pushedVersion = 'data' in response ? response.data.version : localState.version;
-        await this.finalizeSuccessfulPush(accountHash, pushedVersion, response.etag);
-        return;
-      }
-
-      if (response.error === 'conflict' && response.serverState) {
-        if (
-          response.serverState.version === envelope.version &&
-          response.serverState.updatedAt === envelope.updatedAt &&
-          response.serverState.iv === envelope.iv &&
-          response.serverState.ciphertext === envelope.ciphertext
-        ) {
-          debugLog('runPush: 409 matched exact pushed envelope; treating as idempotent success');
-          await this.finalizeSuccessfulPush(
-            accountHash,
-            envelope.version,
-            `"v${envelope.version}-${envelope.updatedAt}"`
-          );
-          return;
-        }
-        debugWarn('runPush: conflict detected; server state is newer');
-        this.pushRetryAttempts.delete(accountHash);
-        try {
-          const remoteState = await decryptWorkspace(
-            response.serverState.ciphertext,
-            response.serverState.iv,
-            key
-          );
-          if (
-            remoteState.version === localState.version &&
-            remoteState.updatedAt === localState.updatedAt &&
-            areWorkspacesEquivalent(localState, remoteState)
-          ) {
-            debugLog('runPush: 409 matched equivalent workspace payload; treating as idempotent success');
-            await this.finalizeSuccessfulPush(
-              accountHash,
-              remoteState.version,
-              `"v${remoteState.version}-${remoteState.updatedAt}"`
-            );
-            return;
-          }
-          await this.handleConflict(accountHash, localState, remoteState);
-        } catch (error) {
-          console.warn('[gemini-projects] conflict payload decryption failed', error);
-          if (errorName(error) === 'OperationError') {
-            this.handleErrorOutcome(accountHash, 'decryption_failed');
-          } else {
-            this.setStatus(accountHash, 'error', 'Conflicting remote state could not be decrypted.');
-          }
-        }
-        return;
-      }
-
-      debugWarn('runPush: push failed with error:', response.error, response.status, response.message);
-      this.handleErrorOutcome(
-        accountHash,
-        response.error,
-        response.status,
-        response.message,
-        response.retryAfterSeconds,
-        true
-      );
+      await this.handlePushResponse(accountHash, localState, envelope, key, response);
     } catch (error) {
       if (error instanceof PayloadTooLargeError || errorName(error) === 'PayloadTooLargeError') {
         this.handleErrorOutcome(accountHash, 'payload_too_large', 413, errorMessage(error), undefined, true);

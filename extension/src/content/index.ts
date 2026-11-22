@@ -175,7 +175,7 @@ async function ensureSyncUnlocked(accountHash: string): Promise<boolean> {
  * remote updates refresh the sidebar without a page reload.
  */
 function initWorkspaceSync(): void {
-  onWorkspaceSaved((accountHash) => syncEngine.schedulePush(accountHash));
+  onWorkspaceSaved((accountHash, payload) => syncEngine.schedulePush(accountHash, payload));
 
   const resumeSync = () => {
     const accountHash = getActiveAccountHash();

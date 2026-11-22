@@ -486,7 +486,7 @@ export async function saveWorkspace(accountHash: string, data: WorkspacePayload)
   const validated = normalizeWorkspacePayload(next, accountHash);
   await writeWorkspaceEnvelope(accountHash, validated);
   await markSyncDirty(accountHash, validated.version);
-  notifyWorkspaceSaved(accountHash);
+  notifyWorkspaceSaved(accountHash, validated);
 }
 
 /**
@@ -563,14 +563,14 @@ export async function hasWorkspace(accountHash: string): Promise<boolean> {
   return result[key] !== undefined;
 }
 
-type WorkspaceSavedListener = (accountHash: string) => void;
+type WorkspaceSavedListener = (accountHash: string, payload: WorkspacePayload) => void;
 
 const workspaceSavedListeners = new Set<WorkspaceSavedListener>();
 
-function notifyWorkspaceSaved(accountHash: string): void {
+function notifyWorkspaceSaved(accountHash: string, payload: WorkspacePayload): void {
   workspaceSavedListeners.forEach((listener) => {
     try {
-      listener(accountHash);
+      listener(accountHash, payload);
     } catch (error) {
       console.warn('[gemini-projects] workspace saved listener failed', error);
     }
