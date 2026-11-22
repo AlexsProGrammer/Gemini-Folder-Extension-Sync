@@ -15,6 +15,18 @@ import { getWorkspace, saveWorkspace } from './storage';
 
 const BACKUP_VERSION = 3;
 const WORKSPACE_KEY_PREFIX = 'workspace_';
+const ACCOUNT_HASH_RE = /^[0-9a-f]{64}$/;
+
+function isValidLegacyProjectsSnapshot(raw: unknown): boolean {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return false;
+  return Array.isArray((raw as Record<string, unknown>).projects);
+}
+
+function isValidLegacyPromptsSnapshot(raw: unknown): boolean {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return false;
+  const prompts = (raw as Record<string, unknown>).prompts;
+  return Boolean(prompts && typeof prompts === 'object');
+}
 
 export interface BackupData {
   version: number;
@@ -155,12 +167,18 @@ export async function importData(file: File): Promise<{ success: boolean; messag
 
     // Never clobber live encrypted partitions: restoring must not downgrade
     // an existing sealed vault back to plaintext or overwrite newer data.
+    const candidateHashes = Object.keys({ ...(data.accounts ?? {}), ...(data.lockedAccounts ?? {}) })
+      .filter((hash) => ACCOUNT_HASH_RE.test(hash));
     const existingWorkspaces = await storageLocalGet<Record<string, unknown>>(
-      Object.keys({ ...(data.accounts ?? {}), ...(data.lockedAccounts ?? {}) }).map(getWorkspaceKey)
+      candidateHashes.map(getWorkspaceKey)
     );
 
     if (data.accounts && typeof data.accounts === 'object') {
       for (const [accountHash, workspace] of Object.entries(data.accounts)) {
+        if (!ACCOUNT_HASH_RE.test(accountHash)) {
+          skippedAccounts += 1;
+          continue;
+        }
         try {
           if (existingWorkspaces[getWorkspaceKey(accountHash)] === undefined) {
             const validated = parseWorkspace(workspace);
@@ -199,7 +217,7 @@ export async function importData(file: File): Promise<{ success: boolean; messag
       Object.entries(data.lockedAccounts).forEach(([accountHash, envelope]) => {
         if (
           isLocalVaultEnvelope(envelope) &&
-          /^[0-9a-f]{64}$/.test(accountHash) &&
+          ACCOUNT_HASH_RE.test(accountHash) &&
           existingWorkspaces[getWorkspaceKey(accountHash)] === undefined
         ) {
           updates[getWorkspaceKey(accountHash)] = envelope;
@@ -208,10 +226,10 @@ export async function importData(file: File): Promise<{ success: boolean; messag
       });
     }
 
-    if (data.projects !== null && data.projects !== void 0) {
+    if (isValidLegacyProjectsSnapshot(data.projects)) {
       updates[STORAGE_KEY] = data.projects;
     }
-    if (data.prompts !== null && data.prompts !== void 0) {
+    if (isValidLegacyPromptsSnapshot(data.prompts)) {
       updates[LEGACY_PROMPTS_KEY] = data.prompts;
     }
 
@@ -237,10 +255,10 @@ export async function importData(file: File): Promise<{ success: boolean; messag
     if (skippedAccounts > 0) {
       parts.push(`${skippedAccounts} skipped (invalid)`);
     }
-    if (data.projects !== null && data.projects !== void 0) {
+    if (updates[STORAGE_KEY] !== undefined) {
       parts.push('legacy projects');
     }
-    if (data.prompts !== null && data.prompts !== void 0) {
+    if (updates[LEGACY_PROMPTS_KEY] !== undefined) {
       parts.push('legacy prompts');
     }
 

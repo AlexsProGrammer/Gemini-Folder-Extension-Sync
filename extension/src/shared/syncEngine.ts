@@ -219,12 +219,14 @@ export class SyncEngine {
    * or discard page timers when the tab is backgrounded, so the pagehide /
    * visibilitychange handlers flush here instead of losing the last edits.
    */
-  flushPendingPushes(): void {
+  async flushPendingPushes(): Promise<void> {
     const pending = Array.from(this.pushTimers.keys());
     this.pushTimers.clear();
-    pending.forEach((accountHash) => {
-      void this.executePush(accountHash);
-    });
+    const tasks = pending.map((accountHash) => this.executePush(accountHash));
+    await Promise.all([
+      ...tasks,
+      ...Array.from(this.inFlightPushes.values())
+    ]);
   }
 
   private async executePush(accountHash: string): Promise<void> {

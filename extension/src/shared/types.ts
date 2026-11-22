@@ -162,6 +162,8 @@ export interface SyncSettings {
   globalPassphrase?: string;
   /** Account-hash -> passphrase map for per-account encryption. */
   accountPassphrases: Record<string, string>;
+  /** Opt-in to persist passphrases in storage.local across browser restarts. */
+  rememberPassphraseOnDisk?: boolean;
 }
 
 /** Encrypted envelope pushed to / received from the server. */

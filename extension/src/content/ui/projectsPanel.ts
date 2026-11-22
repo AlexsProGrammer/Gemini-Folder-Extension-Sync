@@ -1,8 +1,8 @@
-﻿import { ChatRef, Project, ProjectIcon, RuntimeState, SyncStatus, WorkspacePayload } from '../../shared/types';
+import { ChatRef, Project, ProjectIcon, RuntimeState, SyncStatus, WorkspacePayload } from '../../shared/types';
 import { resolveAccountRawIdentifier, withActiveAccountScope } from '../../shared/account';
 import { isMobileEnvironment } from '../../shared/env';
 import { getActiveAccountHash } from '../accountWatcher';
-import { getWorkspace, saveWorkspace, getSyncConfig } from '../../shared/storage';
+import { getWorkspace, getSyncConfig, updateProjectMetadata } from '../../shared/storage';
 import { SYNC_CONFLICT_EVENT, syncEngine } from '../../shared/syncEngine';
 import {
   ICON_OPTIONS,
@@ -33,7 +33,7 @@ let syncConflictListenerAttached = false;
 interface ProjectsPanelOptions {
   shadow: ShadowRoot;
   overlayShadow: ShadowRoot;
-  onSaveProject: (project: Project) => void;
+  onSaveProject: (project: Project) => void | Promise<void>;
   onToggleProjectPin: (projectId: string, isPinned: boolean) => Promise<void>;
   onToggleProjectExpand: (projectId: string) => void;
   onDeleteProject: (projectId: string) => void;
@@ -114,30 +114,12 @@ export function createProjectsPanel(options: ProjectsPanelOptions) {
     saveProjectMeta: async (projectId, updates) => {
       const local = currentState?.projects.find((item) => item.id === projectId);
       if (local) {
-        options.onSaveProject({ ...local, ...updates, updatedAt: Date.now() });
+        await options.onSaveProject({ ...local, ...updates, updatedAt: Date.now() });
+        return;
       }
       const accountHash = getActiveAccountHash();
       if (!accountHash) return;
-      const workspace = await getWorkspace(accountHash);
-      const existing = workspace.projects[projectId];
-      workspace.projects[projectId] = existing
-        ? { ...existing, ...updates, updatedAt: Date.now() }
-        : {
-            id: projectId,
-            name: local?.name ?? 'Untitled',
-            kind: local?.kind ?? 'project',
-            parentId: local?.parentId ?? null,
-            icon: local?.icon ?? 'default',
-            color: local?.color,
-            chatIds: local?.chatIds,
-            isPinned: local?.isPinned,
-            createdAt: local?.createdAt ?? Date.now(),
-            updatedAt: Date.now(),
-            sortIndex: local?.sortIndex ?? 0,
-            order: local?.order ?? 0,
-            ...updates
-          };
-      await saveWorkspace(accountHash, workspace);
+      await updateProjectMetadata(accountHash, projectId, updates);
     },
     onActiveProjectChange: (projectId) => {
       activeProjectId = projectId;

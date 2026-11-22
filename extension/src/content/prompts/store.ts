@@ -1,15 +1,13 @@
 // import { v4 as uuidv4 } from 'uuid';
 
-import { getAccountIdHash, resolveAccountRawIdentifier } from '../../shared/account';
 import {
   getWorkspace,
-  saveWorkspace,
   getWorkspaceKey,
-  WORKSPACE_SCHEMA_VERSION
+  updateWorkspacePrompts
 } from '../../shared/storage';
 import { PromptTemplate, TagMeta, WorkspacePayload } from '../../shared/types';
 import { webext } from '../../shared/webext';
-import { ACCOUNT_CHANGED_EVENT, getActiveAccountHash } from '../accountWatcher';
+import { ACCOUNT_CHANGED_EVENT, getActiveAccountHash, resolveActiveAccountHash } from '../accountWatcher';
 
 function uuidv4() {
     return crypto.randomUUID();
@@ -221,7 +219,6 @@ class PromptStore {
     private loadGeneration = 0;
 
     constructor() {
-        this.refresh();
         // Listen for workspace changes belonging to the active account.
         webext.storage?.onChanged?.addListener((
             changes: { [key: string]: { newValue?: unknown } },
@@ -249,8 +246,7 @@ class PromptStore {
                 this.accountHash = cached;
                 return cached;
             }
-            const raw = resolveAccountRawIdentifier();
-            this.accountHashPromise = getAccountIdHash(raw)
+            this.accountHashPromise = resolveActiveAccountHash()
                 .then((hash) => {
                     this.accountHash = hash;
                     return hash;
@@ -320,11 +316,7 @@ class PromptStore {
 
     private async writeWorkspace(data: PromptsData): Promise<void> {
         const accountHash = await this.ensureAccountHash();
-        const workspace = await getWorkspace(accountHash);
-        workspace.schemaVersion = WORKSPACE_SCHEMA_VERSION;
-        workspace.prompts = toPromptTemplates(data);
-        workspace.tagMeta = data.tagMeta;
-        await saveWorkspace(accountHash, workspace);
+        await updateWorkspacePrompts(accountHash, toPromptTemplates(data), data.tagMeta);
     }
 
     public async refresh() {

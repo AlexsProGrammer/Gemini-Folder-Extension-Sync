@@ -503,6 +503,7 @@ export function openSettingsModal(activeAccountId: string, activeAccountLabel: s
   const globalToggle = root.querySelector<HTMLInputElement>('[data-gp-global-toggle]')!;
   const passphraseInput = root.querySelector<HTMLInputElement>('[data-gp-passphrase]')!;
   const passphraseLabel = root.querySelector<HTMLElement>('[data-gp-passphrase-label]')!;
+  const rememberPassphraseToggle = root.querySelector<HTMLInputElement>('[data-gp-remember-passphrase]')!;
   const accountHint = root.querySelector<HTMLElement>('[data-gp-account-hint]')!;
   const syncErrorEl = root.querySelector<HTMLElement>('[data-gp-sync-error]')!;
   const saveButton = root.querySelector<HTMLButtonElement>('[data-gp-action="save"]')!;
@@ -620,6 +621,7 @@ export function openSettingsModal(activeAccountId: string, activeAccountLabel: s
       serverUrlInput.value = settings.serverUrl;
       apiKeyInput.value = settings.apiKey;
       globalToggle.checked = settings.useGlobalPassphrase;
+      rememberPassphraseToggle.checked = settings.rememberPassphraseOnDisk === true;
       passphraseInput.value = settings.useGlobalPassphrase
         ? (settings.globalPassphrase ?? '')
         : (settings.accountPassphrases[activeAccountId] ?? '');
@@ -769,6 +771,7 @@ export function openSettingsModal(activeAccountId: string, activeAccountLabel: s
       serverUrl,
       apiKey,
       useGlobalPassphrase: useGlobal,
+      rememberPassphraseOnDisk: rememberPassphraseToggle.checked,
       accountPassphrases: { ...currentSettings.accountPassphrases }
     };
     if (useGlobal) {
@@ -822,12 +825,16 @@ export function openSettingsModal(activeAccountId: string, activeAccountLabel: s
   importButton.addEventListener('click', () => {
     setIoError('');
     setIoStatus('', '');
-    triggerImport((result) => {
+    triggerImport(async (result) => {
       setIoStatus(result.message, result.success ? 'ok' : 'error');
       if (result.success) {
-        // The reload rebuilds all state from the restored workspace
-        // partitions; give the user a moment to read the summary first.
-        window.setTimeout(() => window.location.reload(), 900);
+        // Flush any debounced sync pushes triggered by workspace merges and
+        // give the user a moment to read the summary before reloading.
+        await Promise.all([
+          syncEngine.flushPendingPushes().catch(() => undefined),
+          new Promise((resolve) => window.setTimeout(resolve, 900))
+        ]);
+        window.location.reload();
       }
     });
   });
@@ -922,6 +929,14 @@ function buildMarkup(activeAccountLabel: string, activeAccountId: string): strin
               </div>
             </div>
             <p class="gp-sync-hint" data-gp-account-hint style="display: none;"></p>
+            <label class="gp-sync-check-row">
+              <input type="checkbox" data-gp-remember-passphrase />
+              <span>Remember passphrase on disk across browser restarts</span>
+            </label>
+            <p class="gp-sync-hint">
+              By default, your passphrase stays in session memory and is cleared when the browser closes.
+              Enable this only on trusted personal devices.
+            </p>
           </div>
 
           <div class="gp-sync-actions">
@@ -983,8 +998,8 @@ function buildMarkup(activeAccountLabel: string, activeAccountId: string): strin
               </button>
             </div>
             <p class="gp-sync-hint">
-              The backup contains every Google account's projects, folders, chat assignments, the prompt
-              library and sync settings. Importing never overwrites account data that already exists here.
+              The backup contains every Google account's projects, folders, chat assignments, and the prompt
+              library (sync credentials and passphrases are not included). Importing never overwrites account data that already exists here.
             </p>
             <p class="gp-io-status" data-gp-io-status role="status" aria-live="polite"></p>
           </div>

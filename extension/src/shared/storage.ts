@@ -1,5 +1,13 @@
 import { ChatRef, Project, PromptTemplate, StoredState, SyncConfig, SyncSettings, TagMeta, UiPrefs, WorkspacePayload } from './types';
-import { debugStep, errorName, storageLocalGet, storageLocalSet } from './webext';
+import {
+  debugStep,
+  errorName,
+  storageLocalGet,
+  storageLocalRemove,
+  storageLocalSet,
+  storageSessionGet,
+  storageSessionSet
+} from './webext';
 import { normalizeChatIndex, parseWorkspace } from './schemas';
 import { getRawIdentifierForHash } from './account';
 import { isLocalVaultEnvelope, openWorkspaceEnvelope, sealWorkspaceEnvelope, VaultLockedError, type VaultMeta } from './vault';
@@ -167,6 +175,30 @@ function toPromptTemplate(raw: LegacyPromptRecord, index: number): PromptTemplat
   };
 }
 
+const workspaceMutationQueues = new Map<string, Promise<unknown>>();
+
+/**
+ * Serializes read-modify-write workspace operations per account hash using
+ * navigator.locks when available, falling back to an in-memory promise queue.
+ */
+export function withWorkspaceLock<T>(accountHash: string, fn: () => Promise<T>): Promise<T> {
+  const lockManager = typeof navigator !== 'undefined' ? navigator.locks : undefined;
+  if (lockManager && typeof lockManager.request === 'function') {
+    return lockManager.request(`gp_ws_${accountHash}`, () => fn()) as Promise<T>;
+  }
+
+    const previous = workspaceMutationQueues.get(accountHash) ?? Promise.resolve();
+    const run = previous.then(fn, fn);
+  const tail = run.then(() => undefined, () => undefined);
+  workspaceMutationQueues.set(accountHash, tail);
+  void tail.finally(() => {
+    if (workspaceMutationQueues.get(accountHash) === tail) {
+      workspaceMutationQueues.delete(accountHash);
+    }
+  });
+  return run;
+}
+
 /**
  * Converts unpartitioned schema v1 data (flat projects, chat index, prompt
  * store) into a validated hierarchical WorkspacePayload for the given account
@@ -174,7 +206,7 @@ function toPromptTemplate(raw: LegacyPromptRecord, index: number): PromptTemplat
  * `workspace_${accountHash}`. Legacy keys are flagged (never deleted) so
  * migration never destroys user data.
  */
-export async function migrateLegacyData(accountHash: string): Promise<WorkspacePayload> {
+async function migrateLegacyDataUnlocked(accountHash: string): Promise<WorkspacePayload> {
   const gateResult = await storageLocalGet<Record<string, unknown>>([
     LEGACY_MIGRATION_GATE_KEY,
     STORAGE_KEY,
@@ -230,6 +262,10 @@ export async function migrateLegacyData(accountHash: string): Promise<WorkspaceP
   return payload;
 }
 
+export function migrateLegacyData(accountHash: string): Promise<WorkspacePayload> {
+  return withWorkspaceLock(accountHash, () => migrateLegacyDataUnlocked(accountHash));
+}
+
 /** Fills schema-v3 defaults so callers never see missing chats/uiPrefs. */
 function normalizeWorkspacePayload(payload: WorkspacePayload, accountHash: string): WorkspacePayload {
   return {
@@ -251,12 +287,7 @@ function notifyVaultLocked(accountHash: string): void {
   }
 }
 
-/**
- * Loads the account-partitioned workspace. The stored form is always an
- * encrypted vault envelope; plaintext payloads from before this update are
- * accepted once and sealed on the next write.
- */
-export async function getWorkspace(accountHash: string): Promise<WorkspacePayload> {
+async function getWorkspaceUnlocked(accountHash: string, insideLock: boolean): Promise<WorkspacePayload> {
   const key = getWorkspaceKey(accountHash);
   const result = await debugStep('getWorkspace:storage-read', () => storageLocalGet<Record<string, unknown>>([key]));
   const raw = result[key];
@@ -281,7 +312,16 @@ export async function getWorkspace(accountHash: string): Promise<WorkspacePayloa
     }
   }
 
-  return migrateLegacyData(accountHash);
+  return insideLock ? migrateLegacyDataUnlocked(accountHash) : migrateLegacyData(accountHash);
+}
+
+/**
+ * Loads the account-partitioned workspace. The stored form is always an
+ * encrypted vault envelope; plaintext payloads from before this update are
+ * accepted once and sealed on the next write.
+ */
+export function getWorkspace(accountHash: string): Promise<WorkspacePayload> {
+  return getWorkspaceUnlocked(accountHash, false);
 }
 
 /**
@@ -405,6 +445,7 @@ export async function getSyncConfig(): Promise<SyncConfig | null> {
   } else {
     await saveSyncSettings({ ...createDefaultSyncSettings(), ...legacy });
   }
+  await storageLocalRemove(SYNC_CONFIG_KEY);
   return legacy;
 }
 
@@ -430,47 +471,86 @@ export async function saveSyncConfig(config: SyncConfig): Promise<void> {
  * ------------------------------------------------------------------ */
 
 export const SYNC_SETTINGS_KEY = 'gemini_sync_settings';
+export const SYNC_SESSION_PASSPHRASE_KEY = 'gemini_sync_session_passphrases';
+
+interface SessionPassphraseStore {
+  globalPassphrase?: string;
+  accountPassphrases?: Record<string, string>;
+}
+
+function extractPassphraseMap(raw: unknown): Record<string, string> {
+  const result: Record<string, string> = {};
+  if (!raw || typeof raw !== 'object') return result;
+  Object.entries(raw as Record<string, unknown>).forEach(([accountId, value]) => {
+    if (typeof value === 'string') result[accountId] = value;
+  });
+  return result;
+}
 
 export function createDefaultSyncSettings(): SyncSettings {
   return {
     serverUrl: '',
     apiKey: '',
     useGlobalPassphrase: true,
-    accountPassphrases: {}
+    accountPassphrases: {},
+    rememberPassphraseOnDisk: false
   };
 }
 
 export async function getSyncSettings(): Promise<SyncSettings> {
-  const result = await storageLocalGet<Record<string, unknown>>([SYNC_SETTINGS_KEY]);
-  const raw = result[SYNC_SETTINGS_KEY];
-  if (!raw || typeof raw !== 'object') return createDefaultSyncSettings();
+  const [localResult, sessionResult] = await Promise.all([
+    storageLocalGet<Record<string, unknown>>([SYNC_SETTINGS_KEY]),
+    storageSessionGet<Record<string, unknown>>([SYNC_SESSION_PASSPHRASE_KEY])
+  ]);
+  const raw = localResult[SYNC_SETTINGS_KEY];
+  const sessionRaw = sessionResult?.[SYNC_SESSION_PASSPHRASE_KEY] as SessionPassphraseStore | undefined;
+
+  const sessionGlobal = typeof sessionRaw?.globalPassphrase === 'string' ? sessionRaw.globalPassphrase : undefined;
+  const sessionAccounts = extractPassphraseMap(sessionRaw?.accountPassphrases);
+
+  if (!raw || typeof raw !== 'object') {
+    const defaults = createDefaultSyncSettings();
+    return {
+      ...defaults,
+      ...(sessionGlobal !== undefined ? { globalPassphrase: sessionGlobal } : {}),
+      accountPassphrases: sessionAccounts
+    };
+  }
 
   const candidate = raw as Partial<SyncSettings>;
   const serverUrl = typeof candidate.serverUrl === 'string' ? candidate.serverUrl.trim().replace(/\/+$/, '') : '';
   const apiKey = typeof candidate.apiKey === 'string' ? candidate.apiKey : '';
-  const accountPassphrases: Record<string, string> = {};
-  if (candidate.accountPassphrases && typeof candidate.accountPassphrases === 'object') {
-    Object.entries(candidate.accountPassphrases as Record<string, unknown>).forEach(([accountId, value]) => {
-      if (typeof value === 'string') accountPassphrases[accountId] = value;
-    });
-  }
+  const localGlobal = typeof candidate.globalPassphrase === 'string' ? candidate.globalPassphrase : undefined;
+  const localAccounts = extractPassphraseMap(candidate.accountPassphrases);
+  const globalPassphrase = sessionGlobal ?? localGlobal;
 
   return {
     serverUrl,
     apiKey,
     useGlobalPassphrase: candidate.useGlobalPassphrase !== false,
-    ...(typeof candidate.globalPassphrase === 'string' ? { globalPassphrase: candidate.globalPassphrase } : {}),
-    accountPassphrases
+    ...(globalPassphrase !== undefined ? { globalPassphrase } : {}),
+    accountPassphrases: { ...localAccounts, ...sessionAccounts },
+    rememberPassphraseOnDisk: candidate.rememberPassphraseOnDisk === true
   };
 }
 
 export async function saveSyncSettings(settings: SyncSettings): Promise<void> {
+  const rememberOnDisk = settings.rememberPassphraseOnDisk === true;
+  const accountPassphrases = { ...(settings.accountPassphrases ?? {}) };
+  const sessionPayload: SessionPassphraseStore = {
+    ...(settings.globalPassphrase ? { globalPassphrase: settings.globalPassphrase } : {}),
+    accountPassphrases
+  };
+
+  await storageSessionSet({ [SYNC_SESSION_PASSPHRASE_KEY]: sessionPayload });
+
   const normalized: SyncSettings = {
     serverUrl: settings.serverUrl.trim().replace(/\/+$/, ''),
     apiKey: settings.apiKey,
     useGlobalPassphrase: settings.useGlobalPassphrase === true,
-    ...(settings.globalPassphrase ? { globalPassphrase: settings.globalPassphrase } : {}),
-    accountPassphrases: { ...(settings.accountPassphrases ?? {}) }
+    rememberPassphraseOnDisk: rememberOnDisk,
+    ...(rememberOnDisk && settings.globalPassphrase ? { globalPassphrase: settings.globalPassphrase } : {}),
+    accountPassphrases: rememberOnDisk ? accountPassphrases : {}
   };
   await storageLocalSet({ [SYNC_SETTINGS_KEY]: normalized });
 }
@@ -574,31 +654,33 @@ function nextSiblingOrder(workspace: WorkspacePayload, parentId: string | null):
     .reduce((max, project) => Math.max(max, project.order), -1) + 1;
 }
 
-export async function addFolder(
+export function addFolder(
   accountHash: string,
   parentId: string | null,
   name: string
 ): Promise<Project> {
-  const workspace = await getWorkspace(accountHash);
-  const now = Date.now();
-  const order = nextSiblingOrder(workspace, parentId);
+  return withWorkspaceLock(accountHash, async () => {
+    const workspace = await getWorkspaceUnlocked(accountHash, true);
+    const now = Date.now();
+    const order = nextSiblingOrder(workspace, parentId);
 
-  const folder: Project = {
-    id: crypto.randomUUID(),
-    name,
-    kind: 'folder',
-    parentId,
-    icon: 'default',
-    chatIds: [],
-    createdAt: now,
-    updatedAt: now,
-    sortIndex: order,
-    order
-  };
+    const folder: Project = {
+      id: crypto.randomUUID(),
+      name,
+      kind: 'folder',
+      parentId,
+      icon: 'default',
+      chatIds: [],
+      createdAt: now,
+      updatedAt: now,
+      sortIndex: order,
+      order
+    };
 
-  workspace.projects[folder.id] = folder;
-  await saveWorkspace(accountHash, workspace);
-  return folder;
+    workspace.projects[folder.id] = folder;
+    await saveWorkspace(accountHash, workspace);
+    return folder;
+  });
 }
 
 const MUTABLE_PROJECT_FIELDS = [
@@ -614,27 +696,29 @@ const MUTABLE_PROJECT_FIELDS = [
   'order'
 ] as const;
 
-export async function updateProjectMetadata(
+export function updateProjectMetadata(
   accountHash: string,
   id: string,
   updates: Partial<Project>
 ): Promise<void> {
-  const workspace = await getWorkspace(accountHash);
-  const existing = workspace.projects[id];
-  if (!existing) {
-    throw new Error(`Project not found: ${id}`);
-  }
-
-  const merged: Project = { ...existing };
-  for (const field of MUTABLE_PROJECT_FIELDS) {
-    if (field in updates && updates[field] !== undefined) {
-      (merged as unknown as Record<string, unknown>)[field] = updates[field];
+  return withWorkspaceLock(accountHash, async () => {
+    const workspace = await getWorkspaceUnlocked(accountHash, true);
+    const existing = workspace.projects[id];
+    if (!existing) {
+      throw new Error(`Project not found: ${id}`);
     }
-  }
-  merged.updatedAt = Date.now();
 
-  workspace.projects[id] = merged;
-  await saveWorkspace(accountHash, workspace);
+    const merged: Project = { ...existing };
+    for (const field of MUTABLE_PROJECT_FIELDS) {
+      if (field in updates && updates[field] !== undefined) {
+        (merged as unknown as Record<string, unknown>)[field] = updates[field];
+      }
+    }
+    merged.updatedAt = Date.now();
+
+    workspace.projects[id] = merged;
+    await saveWorkspace(accountHash, workspace);
+  });
 }
 
 /* ------------------------------------------------------------------ *
@@ -657,139 +741,167 @@ export function workspaceToStoredState(workspace: WorkspacePayload): StoredState
   };
 }
 
-export async function upsertWorkspaceProject(
+export function upsertWorkspaceProject(
   accountHash: string,
   project: Project
 ): Promise<StoredState> {
-  const workspace = await debugStep('upsert:get-workspace', () => getWorkspace(accountHash));
-  const existing = workspace.projects[project.id];
-  workspace.projects[project.id] = existing
-    ? { ...existing, ...project, updatedAt: project.updatedAt ?? Date.now() }
-    : project;
-  await debugStep('upsert:save-workspace', () => saveWorkspace(accountHash, workspace));
-  return workspaceToStoredState(workspace);
+  return withWorkspaceLock(accountHash, async () => {
+    const workspace = await debugStep('upsert:get-workspace', () => getWorkspaceUnlocked(accountHash, true));
+    const existing = workspace.projects[project.id];
+    workspace.projects[project.id] = existing
+      ? { ...existing, ...project, updatedAt: project.updatedAt ?? Date.now() }
+      : project;
+    await debugStep('upsert:save-workspace', () => saveWorkspace(accountHash, workspace));
+    return workspaceToStoredState(workspace);
+  });
 }
 
-export async function setWorkspaceProjectPinned(
+export function setWorkspaceProjectPinned(
   accountHash: string,
   projectId: string,
   isPinned: boolean
 ): Promise<StoredState> {
-  const workspace = await getWorkspace(accountHash);
-  const project = workspace.projects[projectId];
-  if (!project) {
-    throw new Error('Project not found');
-  }
-  workspace.projects[projectId] = { ...project, isPinned, updatedAt: Date.now() };
-  await saveWorkspace(accountHash, workspace);
-  return workspaceToStoredState(workspace);
+  return withWorkspaceLock(accountHash, async () => {
+    const workspace = await getWorkspaceUnlocked(accountHash, true);
+    const project = workspace.projects[projectId];
+    if (!project) {
+      throw new Error('Project not found');
+    }
+    workspace.projects[projectId] = { ...project, isPinned, updatedAt: Date.now() };
+    await saveWorkspace(accountHash, workspace);
+    return workspaceToStoredState(workspace);
+  });
 }
 
-export async function deleteWorkspaceProject(
+export function deleteWorkspaceProject(
   accountHash: string,
   projectId: string
 ): Promise<StoredState> {
-  const workspace = await getWorkspace(accountHash);
-  const doomed = new Set<string>([projectId]);
-  let grew = true;
-  while (grew) {
-    grew = false;
-    Object.values(workspace.projects).forEach((item) => {
-      if (item.parentId && doomed.has(item.parentId) && !doomed.has(item.id)) {
-        doomed.add(item.id);
-        grew = true;
+  return withWorkspaceLock(accountHash, async () => {
+    const workspace = await getWorkspaceUnlocked(accountHash, true);
+    const doomed = new Set<string>([projectId]);
+    let grew = true;
+    while (grew) {
+      grew = false;
+      Object.values(workspace.projects).forEach((item) => {
+        if (item.parentId && doomed.has(item.parentId) && !doomed.has(item.id)) {
+          doomed.add(item.id);
+          grew = true;
+        }
+      });
+    }
+
+    doomed.forEach((id) => {
+      delete workspace.projects[id];
+    });
+
+    const chats = workspace.chats ?? {};
+    Object.keys(chats).forEach((conversationId) => {
+      const chat = chats[conversationId];
+      if (chat.projectId && doomed.has(chat.projectId)) {
+        chats[conversationId] = { ...chat, projectId: null };
       }
     });
-  }
 
-  doomed.forEach((id) => {
-    delete workspace.projects[id];
+    await saveWorkspace(accountHash, workspace);
+    return workspaceToStoredState(workspace);
   });
-
-  const chats = workspace.chats ?? {};
-  Object.keys(chats).forEach((conversationId) => {
-    const chat = chats[conversationId];
-    if (chat.projectId && doomed.has(chat.projectId)) {
-      chats[conversationId] = { ...chat, projectId: null };
-    }
-  });
-
-  await saveWorkspace(accountHash, workspace);
-  return workspaceToStoredState(workspace);
 }
 
-export async function moveWorkspaceChat(
+export function moveWorkspaceChat(
   accountHash: string,
   conversationId: string,
   projectId: string | null
 ): Promise<StoredState> {
-  const workspace = await getWorkspace(accountHash);
-  const chats = workspace.chats ?? (workspace.chats = {});
-  const existing = chats[conversationId];
-  chats[conversationId] = {
-    conversationId,
-    title: existing?.title ?? '',
-    isPinned: existing?.isPinned ?? false,
-    projectId,
-    updatedAt: Date.now(),
-    lastUrl: existing?.lastUrl
-  };
-  await saveWorkspace(accountHash, workspace);
-  return workspaceToStoredState(workspace);
+  return withWorkspaceLock(accountHash, async () => {
+    const workspace = await getWorkspaceUnlocked(accountHash, true);
+    const chats = workspace.chats ?? (workspace.chats = {});
+    const existing = chats[conversationId];
+    chats[conversationId] = {
+      conversationId,
+      title: existing?.title ?? '',
+      isPinned: existing?.isPinned ?? false,
+      projectId,
+      updatedAt: Date.now(),
+      lastUrl: existing?.lastUrl
+    };
+    await saveWorkspace(accountHash, workspace);
+    return workspaceToStoredState(workspace);
+  });
 }
 
-export async function setWorkspaceChatPinned(
+export function setWorkspaceChatPinned(
   accountHash: string,
   conversationId: string,
   isPinned: boolean
 ): Promise<StoredState> {
-  const workspace = await getWorkspace(accountHash);
-  const chats = workspace.chats ?? (workspace.chats = {});
-  const existing = chats[conversationId];
-  // A chat can be pinned before it ever gets a workspace record (e.g. pinned
-  // in Gemini's sidebar and then moved into a project): create the record so
-  // the pin state survives instead of being silently dropped.
-  chats[conversationId] = {
-    conversationId,
-    title: existing?.title ?? '',
-    isPinned,
-    projectId: existing?.projectId ?? null,
-    updatedAt: Date.now(),
-    lastUrl: existing?.lastUrl
-  };
-  await saveWorkspace(accountHash, workspace);
-  return workspaceToStoredState(workspace);
+  return withWorkspaceLock(accountHash, async () => {
+    const workspace = await getWorkspaceUnlocked(accountHash, true);
+    const chats = workspace.chats ?? (workspace.chats = {});
+    const existing = chats[conversationId];
+    // A chat can be pinned before it ever gets a workspace record (e.g. pinned
+    // in Gemini's sidebar and then moved into a project): create the record so
+    // the pin state survives instead of being silently dropped.
+    chats[conversationId] = {
+      conversationId,
+      title: existing?.title ?? '',
+      isPinned,
+      projectId: existing?.projectId ?? null,
+      updatedAt: Date.now(),
+      lastUrl: existing?.lastUrl
+    };
+    await saveWorkspace(accountHash, workspace);
+    return workspaceToStoredState(workspace);
+  });
 }
 
-export async function upsertWorkspaceChatRefs(
+export function upsertWorkspaceChatRefs(
   accountHash: string,
   chats: ChatRef[]
 ): Promise<StoredState> {
-  const workspace = await getWorkspace(accountHash);
-  const index = workspace.chats ?? (workspace.chats = {});
-  chats.forEach((chat) => {
-    const existing = index[chat.conversationId];
-    index[chat.conversationId] = {
-      conversationId: chat.conversationId,
-      title: chat.title || existing?.title || '',
-      isPinned: typeof chat.isPinned === 'boolean' ? chat.isPinned : (existing?.isPinned ?? false),
-      projectId: chat.projectId ?? existing?.projectId ?? null,
-      updatedAt: chat.updatedAt ?? existing?.updatedAt ?? Date.now(),
-      lastUrl: chat.lastUrl ?? existing?.lastUrl
-    };
+  return withWorkspaceLock(accountHash, async () => {
+    const workspace = await getWorkspaceUnlocked(accountHash, true);
+    const index = workspace.chats ?? (workspace.chats = {});
+    chats.forEach((chat) => {
+      const existing = index[chat.conversationId];
+      index[chat.conversationId] = {
+        conversationId: chat.conversationId,
+        title: chat.title || existing?.title || '',
+        isPinned: typeof chat.isPinned === 'boolean' ? chat.isPinned : (existing?.isPinned ?? false),
+        projectId: chat.projectId ?? existing?.projectId ?? null,
+        updatedAt: chat.updatedAt ?? existing?.updatedAt ?? Date.now(),
+        lastUrl: chat.lastUrl ?? existing?.lastUrl
+      };
+    });
+    await saveWorkspace(accountHash, workspace);
+    return workspaceToStoredState(workspace);
   });
-  await saveWorkspace(accountHash, workspace);
-  return workspaceToStoredState(workspace);
 }
 
-export async function updateWorkspaceUiPrefs(
+export function updateWorkspaceUiPrefs(
   accountHash: string,
   prefs: Partial<UiPrefs>
 ): Promise<StoredState> {
-  const workspace = await getWorkspace(accountHash);
-  workspace.uiPrefs = { ...normalizeUiPrefs(workspace.uiPrefs), ...prefs };
-  await saveWorkspace(accountHash, workspace);
-  return workspaceToStoredState(workspace);
+  return withWorkspaceLock(accountHash, async () => {
+    const workspace = await getWorkspaceUnlocked(accountHash, true);
+    workspace.uiPrefs = { ...normalizeUiPrefs(workspace.uiPrefs), ...prefs };
+    await saveWorkspace(accountHash, workspace);
+    return workspaceToStoredState(workspace);
+  });
+}
+
+export function updateWorkspacePrompts(
+  accountHash: string,
+  prompts: PromptTemplate[],
+  tagMeta?: Record<string, TagMeta>
+): Promise<void> {
+  return withWorkspaceLock(accountHash, async () => {
+    const workspace = await getWorkspaceUnlocked(accountHash, true);
+    workspace.schemaVersion = WORKSPACE_SCHEMA_VERSION;
+    workspace.prompts = prompts;
+    workspace.tagMeta = tagMeta;
+    await saveWorkspace(accountHash, workspace);
+  });
 }
 
 /** Builds the per-project JSON export (project metadata + chat listing). */

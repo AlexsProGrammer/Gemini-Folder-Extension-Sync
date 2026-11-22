@@ -5,6 +5,13 @@ type WebextApi = {
     local: {
       get: AnyFn;
       set: AnyFn;
+      remove?: AnyFn;
+      clear?: AnyFn;
+    };
+    session?: {
+      get: AnyFn;
+      set: AnyFn;
+      remove?: AnyFn;
       clear?: AnyFn;
     };
     onChanged: { addListener: AnyFn };
@@ -108,6 +115,9 @@ async function resolveApi(): Promise<WebextApi> {
  * lossless way to obtain plain objects.
  */
 export function sanitizeStorageValue<T>(value: T): T {
+  const hasXrayWrappers =
+    typeof (globalThis as { wrappedJSObject?: unknown }).wrappedJSObject !== 'undefined';
+  if (!hasXrayWrappers) return value;
   if (value === null || typeof value !== 'object') return value;
   try {
     return JSON.parse(JSON.stringify(value)) as T;
@@ -148,6 +158,50 @@ export async function storageLocalGet<T = Record<string, unknown>>(
 export async function storageLocalSet(items: Record<string, unknown>): Promise<void> {
   const api = await resolveApi();
   return invokeCompat<void>(api.storage.local.set.bind(api.storage.local), [items]);
+}
+
+export async function storageLocalRemove(keys: string | string[]): Promise<void> {
+  const api = await resolveApi();
+  const remove = api.storage.local.remove;
+  if (typeof remove !== 'function') return;
+  return invokeCompat<void>(remove.bind(api.storage.local), [keys]);
+}
+
+export async function storageSessionGet<T = Record<string, unknown>>(
+  keys?: string | string[] | Record<string, unknown> | null
+): Promise<T | null> {
+  try {
+    const api = await resolveApi();
+    const session = api.storage?.session;
+    if (!session || typeof session.get !== 'function') return null;
+    const result = await invokeCompat<T>(session.get.bind(session), [keys]);
+    return sanitizeStorageValue(result);
+  } catch {
+    return null;
+  }
+}
+
+export async function storageSessionSet(items: Record<string, unknown>): Promise<boolean> {
+  try {
+    const api = await resolveApi();
+    const session = api.storage?.session;
+    if (!session || typeof session.set !== 'function') return false;
+    await invokeCompat<void>(session.set.bind(session), [items]);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+export async function storageSessionRemove(keys: string | string[]): Promise<void> {
+  try {
+    const api = await resolveApi();
+    const session = api.storage?.session;
+    if (!session || typeof session.remove !== 'function') return;
+    await invokeCompat<void>(session.remove.bind(session), [keys]);
+  } catch {
+    // Session storage unavailable or unsupported in this context.
+  }
 }
 
 export async function runtimeSendMessage<TResponse = unknown>(message: unknown): Promise<TResponse> {
