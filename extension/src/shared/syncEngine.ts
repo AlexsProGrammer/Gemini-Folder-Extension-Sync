@@ -368,6 +368,9 @@ export class SyncEngine {
    */
   schedulePush(accountHash: string, snapshot?: WorkspacePayload): void {
     if (!accountHash || this.pausedAccounts.has(accountHash)) return;
+    if (!this.keys.has(accountHash)) {
+      return;
+    }
 
     this.clearPushRetryTimer(accountHash);
     this.pushRetryAttempts.delete(accountHash);
@@ -700,8 +703,14 @@ export class SyncEngine {
   private async runPush(accountHash: string): Promise<void> {
     const key = this.keys.get(accountHash);
     if (!key) {
-      debugWarn('runPush: no key in memory; push aborted (status=idle). Passphrase not unlocked for', accountHash.slice(0, 8));
-      this.setStatus(accountHash, 'idle', 'No passphrase available; push aborted.');
+      const config = await getSyncConfig().catch(() => null);
+      if (config) {
+        debugWarn('runPush: no key in memory; preserving locked state for', accountHash.slice(0, 8));
+        this.setLockedState(accountHash);
+      } else {
+        debugWarn('runPush: no key in memory; push aborted (status=idle).');
+        this.setStatus(accountHash, 'idle', 'Sync is not configured.');
+      }
       return;
     }
     if (!this.online) {
@@ -883,8 +892,8 @@ export class SyncEngine {
 
       const key = this.keys.get(accountHash);
       if (!key) {
-        debugWarn('runPull: no key in memory; pull aborted');
-        this.setStatus(accountHash, 'idle', 'No passphrase available; pull aborted.');
+        debugWarn('runPull: no key in memory; preserving locked state');
+        this.setLockedState(accountHash);
         return;
       }
 
