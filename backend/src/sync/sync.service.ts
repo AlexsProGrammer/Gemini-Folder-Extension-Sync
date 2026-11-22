@@ -35,6 +35,15 @@ export class SyncService {
       const existing = this.getBlob(accountId);
 
       if (existing) {
+        if (
+          existing.version === dto.version &&
+          existing.updatedAt === dto.updatedAt &&
+          existing.iv === dto.iv &&
+          existing.ciphertext === dto.ciphertext
+        ) {
+          return { status: 'success', version: existing.version, updatedAt: existing.updatedAt };
+        }
+
         const hasConflict =
           dto.baseVersion !== undefined
             ? existing.version !== dto.baseVersion || dto.version <= existing.version

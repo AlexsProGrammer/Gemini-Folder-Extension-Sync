@@ -232,6 +232,44 @@ describe('Sync API (e2e)', () => {
     expect(cached.headers.etag).toBe('"v2-2500"');
     expect(cached.text).toBe('');
   });
+
+  it('treats identical POST replays as idempotent while rejecting different payloads at the same version', async () => {
+    const firstPush = await request
+      .post(`/api/v1/sync/${ALICE_ACCOUNT_ID}`)
+      .set(auth('alice_test_key_1234567890'))
+      .send({ version: 3, baseVersion: 2, ciphertext: CIPHER_ALICE, iv: IV_ALICE, updatedAt: 3000 })
+      .expect(201);
+
+    expect(firstPush.headers.etag).toBe('"v3-3000"');
+    expect(firstPush.body).toEqual({ status: 'success', version: 3, updatedAt: 3000 });
+
+    const replay = await request
+      .post(`/api/v1/sync/${ALICE_ACCOUNT_ID}`)
+      .set(auth('alice_test_key_1234567890'))
+      .send({ version: 3, baseVersion: 2, ciphertext: CIPHER_ALICE, iv: IV_ALICE, updatedAt: 3000 })
+      .expect(201);
+
+    expect(replay.headers.etag).toBe('"v3-3000"');
+    expect(replay.body).toEqual({ status: 'success', version: 3, updatedAt: 3000 });
+
+    const divergentCipher = await request
+      .post(`/api/v1/sync/${ALICE_ACCOUNT_ID}`)
+      .set(auth('alice_test_key_1234567890'))
+      .send({ version: 3, baseVersion: 2, ciphertext: CIPHER_X, iv: IV_ALICE, updatedAt: 3000 })
+      .expect(409);
+
+    expect(divergentCipher.body.statusCode).toBe(409);
+    expect(divergentCipher.body.serverState.ciphertext).toBe(CIPHER_ALICE);
+
+    const divergentIv = await request
+      .post(`/api/v1/sync/${ALICE_ACCOUNT_ID}`)
+      .set(auth('alice_test_key_1234567890'))
+      .send({ version: 3, baseVersion: 2, ciphertext: CIPHER_ALICE, iv: IV_X, updatedAt: 3000 })
+      .expect(409);
+
+    expect(divergentIv.body.statusCode).toBe(409);
+    expect(divergentIv.body.serverState.iv).toBe(IV_ALICE);
+  });
 });
 
 describe('parseTrustProxy', () => {
