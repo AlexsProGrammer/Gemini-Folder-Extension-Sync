@@ -1,4 +1,4 @@
-﻿import {
+import {
   findChatsListContainer,
   findChatsSection,
   findChatRowElement,
@@ -101,6 +101,7 @@ let menuObserver: MutationObserver | null = null;
 let menuActionSyncHandler: ((event: MouseEvent) => void) | null = null;
 let activeRowTimeout: number | null = null;
 let observedMenuRoot: HTMLElement | null = null;
+const injectedMenuItems = new Set<HTMLElement>();
 
 function log(...args: unknown[]) {
   if (DEBUG) {
@@ -314,6 +315,7 @@ export function attachChatMenuEnhancer(options: ChatMenuEnhancerOptions): ChatMe
   );
 
   document.addEventListener('click', (event) => {
+    if (!currentMenuRoot && injectedMenuItems.size === 0) return;
     const target = event.target as HTMLElement | null;
     if (!target) return;
 
@@ -433,11 +435,19 @@ export async function openNativeChatMenu(conversationId: string, anchorRect: DOM
  * appears next to the requested anchor rectangle.
  */
 function positionMenuToAnchor(menuRoot: HTMLElement, anchorRect: DOMRect): void {
+  const MAX_POSITION_ATTEMPTS = 30;
+  let attempts = 0;
+
   const place = () => {
+    if (!menuRoot.isConnected) return;
     const pane = (menuRoot.closest('.cdk-overlay-pane') as HTMLElement | null) || menuRoot;
+    if (!pane.isConnected) return;
     const rect = pane.getBoundingClientRect();
     if (rect.width <= 0 && rect.height <= 0) {
-      requestAnimationFrame(place);
+      attempts += 1;
+      if (attempts < MAX_POSITION_ATTEMPTS) {
+        requestAnimationFrame(place);
+      }
       return;
     }
     const width = rect.width || 240;
@@ -687,12 +697,16 @@ export function injectChatMenuItems(root: HTMLElement, conversationId: string): 
   currentMenuRoot = menuRoot;
 
   // Clean stale items outside menuRoot
-  queryAllInRoots(`[${MENU_ITEM_ATTR}]`).forEach((node) => {
-    if (!menuRoot.contains(node)) {
+  for (const node of Array.from(injectedMenuItems)) {
+    if (!node.isConnected || !menuRoot.contains(node)) {
       node.remove();
+      injectedMenuItems.delete(node);
     }
+  }
+  menuRoot.querySelectorAll<HTMLElement>(`[${MENU_ITEM_ATTR}]`).forEach((node) => {
+    node.remove();
+    injectedMenuItems.delete(node);
   });
-  menuRoot.querySelectorAll(`[${MENU_ITEM_ATTR}]`).forEach((node) => node.remove());
 
   const { container, deleteItem } = findMenuListContainer(menuRoot);
   if (!container || container === document.body || container === document.documentElement) {
@@ -748,6 +762,7 @@ function createInjectedMenuItem(action: string, iconPaths: string, label: string
   const item = document.createElement('div');
   item.setAttribute('role', 'menuitem');
   item.setAttribute(MENU_ITEM_ATTR, action);
+  injectedMenuItems.add(item);
 
   // Match Gemini's native menu rows: compact 36px items on desktop, 44px
   // touch targets on mobile, 0 12px padding, icon, "Google Sans Flex",
@@ -976,8 +991,19 @@ function countMenuTokens(container: HTMLElement, tokens: string[]): number {
 }
 
 function cleanupMenuArtifacts(reason: string) {
-  const moveItems = Array.from(queryAllInRoots(`[${MENU_ITEM_ATTR}]`));
-  moveItems.forEach((node) => node.remove());
+  if (injectedMenuItems.size === 0 && !currentMenuRoot && !observedMenuRoot && !menuObserver) {
+    return;
+  }
+
+  let removedCount = 0;
+  for (const node of injectedMenuItems) {
+    node.remove();
+    removedCount += 1;
+  }
+  injectedMenuItems.clear();
+  if (currentMenuRoot) {
+    currentMenuRoot.querySelectorAll(`[${MENU_ITEM_ATTR}]`).forEach((node) => node.remove());
+  }
 
   const hadMenu = currentMenuRoot !== null;
   if (menuObserver) {
@@ -997,7 +1023,7 @@ function cleanupMenuArtifacts(reason: string) {
     currentMenuRoot = null;
   }
 
-  log('cleanup removed:', `moveItem=${moveItems.length}`, reason);
+  log('cleanup removed:', `moveItem=${removedCount}`, reason);
 
   if (hadMenu) {
     enhancerOptions?.onMenuClosed();

@@ -40,6 +40,7 @@ interface AccountIdentityRegistry {
 }
 
 const memoryByHash = new Map<string, string>();
+const memoryByIndex = new Map<string, string>();
 
 function emptyRegistry(): AccountIdentityRegistry {
   return { byHash: {}, byIndex: {} };
@@ -73,10 +74,25 @@ export async function rememberAccountIdentity(
   accountHash: string,
   accountIndex?: string
 ): Promise<void> {
+  const hashMatches = memoryByHash.get(accountHash) === rawIdentifier;
+  const indexMatches = accountIndex === undefined || memoryByIndex.get(accountIndex) === rawIdentifier;
+  if (hashMatches && indexMatches) {
+    return;
+  }
+
   memoryByHash.set(accountHash, rawIdentifier);
+  if (accountIndex !== undefined) {
+    memoryByIndex.set(accountIndex, rawIdentifier);
+  }
   try {
     const result = await storageLocalGet<Record<string, unknown>>([IDENTITY_REGISTRY_KEY]);
     const registry = asRegistry(result[IDENTITY_REGISTRY_KEY]);
+    if (
+      registry.byHash[accountHash] === rawIdentifier &&
+      (accountIndex === undefined || registry.byIndex[accountIndex] === rawIdentifier)
+    ) {
+      return;
+    }
     registry.byHash[accountHash] = rawIdentifier;
     if (accountIndex !== undefined) {
       registry.byIndex[accountIndex] = rawIdentifier;

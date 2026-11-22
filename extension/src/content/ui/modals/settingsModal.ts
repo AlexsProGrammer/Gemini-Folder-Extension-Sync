@@ -478,11 +478,14 @@ function isValidServerUrl(value: string): boolean {
   }
 }
 
+let activeSettingsCleanup: (() => void) | null = null;
+
 /**
  * Combined settings dialog. The "Sync" tab (default) configures the sync
  * backend, the "Settings" tab holds backup/restore and the local-data wipe.
  */
 export function openSettingsModal(activeAccountId: string, activeAccountLabel: string): void {
+  activeSettingsCleanup?.();
   document.getElementById(ROOT_ID)?.remove();
 
   const root = document.createElement('div');
@@ -534,11 +537,15 @@ export function openSettingsModal(activeAccountId: string, activeAccountLabel: s
   themeObserver.observe(document.body, { attributes: true, attributeFilter: ['class'] });
 
   function cleanup(): void {
+    if (activeSettingsCleanup === cleanup) {
+      activeSettingsCleanup = null;
+    }
     themeObserver.disconnect();
     document.removeEventListener('keydown', onKeyDown);
     window.removeEventListener('pagehide', cleanup);
     root.remove();
   }
+  activeSettingsCleanup = cleanup;
 
   function onKeyDown(event: KeyboardEvent): void {
     if (event.key === 'Escape') cleanup();

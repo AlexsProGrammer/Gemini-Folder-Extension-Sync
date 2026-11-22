@@ -1,5 +1,6 @@
 import { getAccountIdHash, resolveStableAccountRawIdentifier } from '../shared/account';
 import { debugStep } from '../shared/webext';
+import { onSpaNavigation } from './dom/spaNavigation';
 
 export const ACCOUNT_CHANGED_EVENT = 'gemini-workspace:account-changed';
 
@@ -8,12 +9,11 @@ export interface AccountChangeDetail {
   newHash: string;
 }
 
-const REEVALUATE_DELAY_MS = 150;
+const REEVALUATE_DELAY_MS = 500;
 
 let currentHash: string | null = null;
 let hasResolved = false;
 let initialized = false;
-let historyPatched = false;
 let profileObserver: MutationObserver | null = null;
 let reevaluateTimer: number | null = null;
 
@@ -54,26 +54,6 @@ function scheduleReevaluate(): void {
   }, REEVALUATE_DELAY_MS);
 }
 
-type HistoryStateSetter = (data: unknown, unused: string, url?: string | URL | null) => void;
-
-function patchHistoryApi(): void {
-  if (historyPatched) return;
-  historyPatched = true;
-
-  const patch = (name: 'pushState' | 'replaceState') => {
-    const original = history[name].bind(history) as HistoryStateSetter;
-    const wrapped: HistoryStateSetter = (...args) => {
-      const result = original(...args);
-      scheduleReevaluate();
-      return result;
-    };
-    history[name] = wrapped as typeof history.pushState;
-  };
-
-  patch('pushState');
-  patch('replaceState');
-}
-
 function observeProfileContainers(): void {
   profileObserver?.disconnect();
   profileObserver = new MutationObserver(() => scheduleReevaluate());
@@ -86,8 +66,7 @@ export function initAccountWatcher(): void {
   if (initialized) return;
   initialized = true;
 
-  patchHistoryApi();
-  window.addEventListener('popstate', () => scheduleReevaluate());
+  onSpaNavigation(() => scheduleReevaluate());
   observeProfileContainers();
   void resolveActiveAccountHash().catch((error) =>
     console.warn('[gemini-projects] initial account resolution failed', error)

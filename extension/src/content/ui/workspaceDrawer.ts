@@ -19,6 +19,7 @@ export interface WorkspaceDrawerHandle {
   open: (project: Project) => Promise<void>;
   close: () => void;
   isOpen: () => boolean;
+  destroy: () => void;
 }
 
 const SAVE_DEBOUNCE_MS = 400;
@@ -93,6 +94,8 @@ export function createWorkspaceDrawer(options: WorkspaceDrawerOptions): Workspac
   let saveTimer: number | null = null;
   let statusTimer: number | null = null;
   let closed = true;
+  const abortController = new AbortController();
+  const { signal } = abortController;
 
   function setStatus(text: string): void {
     if (statusEl) statusEl.textContent = text;
@@ -227,16 +230,37 @@ export function createWorkspaceDrawer(options: WorkspaceDrawerOptions): Workspac
     });
   });
 
-  document.addEventListener('keydown', (event) => {
-    if (event.key === 'Escape' && !closed) {
-      close();
+  document.addEventListener(
+    'keydown',
+    (event) => {
+      if (event.key === 'Escape' && !closed) {
+        close();
+      }
+    },
+    { signal }
+  );
+
+  function destroy(): void {
+    if (saveTimer !== null) {
+      window.clearTimeout(saveTimer);
+      saveTimer = null;
     }
-  });
+    if (statusTimer !== null) {
+      window.clearTimeout(statusTimer);
+      statusTimer = null;
+    }
+    closed = true;
+    currentProject = null;
+    abortController.abort();
+    backdrop.remove();
+    drawer.remove();
+  }
 
   return {
     open,
     close,
-    isOpen: () => !closed
+    isOpen: () => !closed,
+    destroy
   };
 }
 

@@ -75,12 +75,14 @@ function renderProjectActionIcon(action: keyof typeof PROJECT_ACTION_PATHS): str
 }
 
 export function createProjectsPanel(options: ProjectsPanelOptions) {
+  const lifecycleController = new AbortController();
+  const { signal } = lifecycleController;
   const panelRoot = ensurePanelRoot(options.shadow);
   const overlayLayer = ensureOverlayLayer(options.overlayShadow);
   const modal = createModal(overlayLayer);
-  const projectMenu = createProjectMenu(overlayLayer);
+  const projectMenu = createProjectMenu(overlayLayer, signal);
   const toast = createToast(overlayLayer);
-  const targetPicker = createTargetPickerModal(overlayLayer);
+  const targetPicker = createTargetPickerModal(overlayLayer, signal);
   const detailsModal = createDetailsModal(overlayLayer, (project, systemPrompt, notes) => {
     options.onSaveProject({ ...project, systemPrompt, notes, updatedAt: Date.now() });
     showToast(systemPrompt || notes ? 'Project details saved' : 'Project details cleared');
@@ -127,7 +129,7 @@ export function createProjectsPanel(options: ProjectsPanelOptions) {
   });
 
   // Initialize theme observer
-  attachThemeObserver(panelRoot, overlayLayer);
+  const themeObserver = attachThemeObserver(panelRoot, overlayLayer, signal);
 
   function openConflictResolutionModal(accountId: string, conflict: SyncConflictDetail): void {
     openConflictModal(conflict, (choice) => {
@@ -198,7 +200,7 @@ export function createProjectsPanel(options: ProjectsPanelOptions) {
     PromptPicker.getInstance().toggle(promptsBadge.getBoundingClientRect(), promptsBadge);
   });
   PromptPicker.getInstance().registerTrigger(promptsBadge);
-  promptStore.subscribe(() => promptsBadge.updateCount(promptStore.getAll().length));
+  const unsubscribePrompts = promptStore.subscribe(() => promptsBadge.updateCount(promptStore.getAll().length));
   void promptStore.refresh().catch(() => undefined);
 
   function updateSyncStatus(status: SyncStatus, message?: string): void {
@@ -238,7 +240,7 @@ export function createProjectsPanel(options: ProjectsPanelOptions) {
   }
 
   // 用于存储当前 state 以供 chatMenu 获取项目列表
-  const chatMenu = createChatMenu(overlayLayer);
+  const chatMenu = createChatMenu(overlayLayer, signal);
   targetPicker.setProjectsProvider(() => currentState?.projects ?? []);
   let panelEventsController: AbortController | null = null;
 
@@ -694,9 +696,25 @@ export function createProjectsPanel(options: ProjectsPanelOptions) {
     toast.hide();
   }
 
+  function destroy(): void {
+    lifecycleController.abort();
+    panelEventsController?.abort();
+    panelEventsController = null;
+    themeObserver.disconnect();
+    unsubscribePrompts();
+    drawer.destroy();
+    modal.element.remove();
+    detailsModal.element.remove();
+    projectMenu.element.remove();
+    chatMenu.element.remove();
+    targetPicker.element.remove();
+    toast.element.remove();
+  }
+
   return {
     render,
     closeAllOverlays,
+    destroy,
     showToast,
     openCreateModal,
     openDetailsModal,
@@ -2706,10 +2724,10 @@ function createDetailsModal(
     close();
   });
 
-  return { open, close };
+  return { element: backdrop, open, close };
 }
 
-function createProjectMenu(layer: HTMLElement) {
+function createProjectMenu(layer: HTMLElement, signal: AbortSignal) {
   const menu = document.createElement('div');
   menu.className = 'gp-menu gp-project-menu';
   menu.setAttribute('role', 'menu');
@@ -2814,27 +2832,35 @@ function createProjectMenu(layer: HTMLElement) {
     items[index]?.focus();
   });
 
-  document.addEventListener('click', (event) => {
-    // A click originating in the panel is retargeted to the Shadow DOM host
-    // before it reaches document. Ignore the opening click, then use the
-    // composed path so later clicks inside the overlay remain distinguishable.
-    if (performance.now() - openedAt < 50) return;
-    if (!event.composedPath().includes(menu)) {
-      close();
-    }
-  });
+  document.addEventListener(
+    'click',
+    (event) => {
+      // A click originating in the panel is retargeted to the Shadow DOM host
+      // before it reaches document. Ignore the opening click, then use the
+      // composed path so later clicks inside the overlay remain distinguishable.
+      if (performance.now() - openedAt < 50) return;
+      if (!event.composedPath().includes(menu)) {
+        close();
+      }
+    },
+    { signal }
+  );
 
-  document.addEventListener('keydown', (event) => {
-    if (event.key === 'Escape') {
-      close();
-    }
-  });
+  document.addEventListener(
+    'keydown',
+    (event) => {
+      if (event.key === 'Escape') {
+        close();
+      }
+    },
+    { signal }
+  );
 
-  return { open, close };
+  return { element: menu, open, close };
 }
 
 // 聊天项菜单 (Chat row fallback menu, used when Gemini's native menu cannot be opened)
-function createChatMenu(layer: HTMLElement) {
+function createChatMenu(layer: HTMLElement, signal: AbortSignal) {
   const menu = document.createElement('div');
   menu.className = 'gp-menu gp-chat-menu';
   layer.appendChild(menu);
@@ -2908,20 +2934,28 @@ function createChatMenu(layer: HTMLElement) {
     }
   });
 
-  document.addEventListener('click', (event) => {
-    if (performance.now() - openedAt < 50) return;
-    if (!event.composedPath().includes(menu)) {
-      close();
-    }
-  });
+  document.addEventListener(
+    'click',
+    (event) => {
+      if (performance.now() - openedAt < 50) return;
+      if (!event.composedPath().includes(menu)) {
+        close();
+      }
+    },
+    { signal }
+  );
 
-  document.addEventListener('keydown', (event) => {
-    if (event.key === 'Escape') {
-      close();
-    }
-  });
+  document.addEventListener(
+    'keydown',
+    (event) => {
+      if (event.key === 'Escape') {
+        close();
+      }
+    },
+    { signal }
+  );
 
-  return { open, close };
+  return { element: menu, open, close };
 }
 
 /**
@@ -2929,7 +2963,7 @@ function createChatMenu(layer: HTMLElement) {
  * "Move to project or folder…". Renders the full folder structure (projects,
  * folders and nested subfolders) with search across all levels.
  */
-function createTargetPickerModal(layer: HTMLElement) {
+function createTargetPickerModal(layer: HTMLElement, signal: AbortSignal) {
   const backdrop = document.createElement('div');
   backdrop.className = 'gp-modal-backdrop';
   backdrop.innerHTML = `
@@ -3219,13 +3253,18 @@ function createTargetPickerModal(layer: HTMLElement) {
     }
   });
 
-  document.addEventListener('keydown', (event) => {
-    if (event.key === 'Escape' && backdrop.style.display === 'flex') {
-      close();
-    }
-  });
+  document.addEventListener(
+    'keydown',
+    (event) => {
+      if (event.key === 'Escape' && backdrop.style.display === 'flex') {
+        close();
+      }
+    },
+    { signal }
+  );
 
   return {
+    element: backdrop,
     open,
     openReparent,
     close,
@@ -3256,7 +3295,7 @@ function createToast(layer: HTMLElement) {
     toast.style.display = 'none';
   }
 
-  return { show, hide };
+  return { element: toast, show, hide };
 }
 
 function navigateToProjectChat(conversationId: string, fallbackHref: string) {
@@ -3292,7 +3331,7 @@ function findNativeChatLink(conversationId: string): HTMLAnchorElement | null {
   }) || null;
 }
 
-function attachThemeObserver(panelRoot: HTMLElement, overlayLayer: HTMLElement) {
+function attachThemeObserver(panelRoot: HTMLElement, overlayLayer: HTMLElement, signal: AbortSignal): MutationObserver {
   const getHost = (el: HTMLElement) => (el.getRootNode() as ShadowRoot).host as HTMLElement;
   const panelHost = getHost(panelRoot);
   const overlayHost = getHost(overlayLayer);
@@ -3316,7 +3355,8 @@ function attachThemeObserver(panelRoot: HTMLElement, overlayLayer: HTMLElement) 
 
   const observer = new MutationObserver(applyEnvironment);
   observer.observe(document.body, { attributes: true, attributeFilter: ['class'] });
-  window.addEventListener('resize', applyEnvironment, { passive: true });
-  window.addEventListener('orientationchange', applyEnvironment, { passive: true });
+  window.addEventListener('resize', applyEnvironment, { passive: true, signal });
+  window.addEventListener('orientationchange', applyEnvironment, { passive: true, signal });
   applyEnvironment(); // Initial check
+  return observer;
 }

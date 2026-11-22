@@ -36,9 +36,13 @@ const INSTRUCTIONS_ICON_SVG = `
 let observer: MutationObserver | null = null;
 let currentButton: HTMLElement | null = null;
 let currentInstructionsButton: HTMLElement | null = null;
+let currentComposerRoot: HTMLElement | null = null;
+let injectDebounceTimer: number | null = null;
 let onClickHandler: (() => void) | null = null;
 let onInstructionsClick: (() => void) | null = null;
 let instructionsButtonVisible = false;
+
+const INJECT_DEBOUNCE_MS = 250;
 
 /**
  * Registers the click handler for the optional "Add project instructions"
@@ -449,29 +453,51 @@ export function injectPromptButton(onClick: () => void) {
     tryInject();
 }
 
+function scheduleTryInject() {
+    if (injectDebounceTimer !== null) {
+        window.clearTimeout(injectDebounceTimer);
+    }
+    injectDebounceTimer = window.setTimeout(() => {
+        injectDebounceTimer = null;
+        tryInject();
+    }, INJECT_DEBOUNCE_MS);
+}
+
 function startObserver() {
     if (observer) return;
     observer = new MutationObserver((mutations) => {
-        // Only try inject if something relevant changed, or just throttle
         const shouldCheck = mutations.some(m => m.type === 'childList' && (m.addedNodes.length > 0 || m.removedNodes.length > 0));
         if (shouldCheck) {
-            tryInject();
+            scheduleTryInject();
         }
     });
     observer.observe(document.body, { childList: true, subtree: true });
 }
 
 function tryInject() {
+    if (
+        currentButton?.isConnected &&
+        currentComposerRoot?.isConnected &&
+        currentComposerRoot.contains(currentButton) &&
+        !currentButton.closest('gem-segmented-button, gem-segmented-button-group, [role="tablist"]')
+    ) {
+        return;
+    }
+
     const composer = findComposer();
     if (!composer) return;
+    const root = findComposerRoot(composer);
     if (currentButton && document.body.contains(currentButton)) {
-        const root = findComposerRoot(composer);
-        if (root.contains(currentButton) && !currentButton.closest('gem-segmented-button, gem-segmented-button-group, [role="tablist"]')) return;
+        if (root.contains(currentButton) && !currentButton.closest('gem-segmented-button, gem-segmented-button-group, [role="tablist"]')) {
+            currentComposerRoot = root;
+            return;
+        }
         // Gemini 可能保留旧节点但把输入区换走，避免入口留在模式切换或旧输入区中。
         currentButton.remove();
         currentButton = null;
         currentInstructionsButton?.remove();
         currentInstructionsButton = null;
+        currentComposerRoot = null;
     }
 
     const anchorButton = findToolsAnchorByText(composer) || findAnchorNearComposer(composer);
@@ -489,8 +515,9 @@ function tryInject() {
     }
 
     const insertion = resolveInsertionTarget(composer, anchorButton);
-    const targetContainer = insertion.container || findComposerRoot(composer);
+    const targetContainer = insertion.container || root;
     if (!targetContainer) return;
+    currentComposerRoot = root;
 
     log('Found anchor:', anchorButton, 'Container:', targetContainer);
 

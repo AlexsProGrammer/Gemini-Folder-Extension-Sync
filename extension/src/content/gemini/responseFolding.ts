@@ -1,5 +1,6 @@
 import { storageLocalGet, storageLocalSet } from '../../shared/webext';
 import { getConversationId } from '../dom/anchors';
+import { onSpaNavigation } from '../dom/spaNavigation';
 
 const STYLE_ID = 'gp-response-fold-style';
 const FEATURE_ENABLED_KEY = 'gp_feature_response_folding_enabled';
@@ -18,6 +19,7 @@ const DEFAULT_COLLAPSED_HEIGHT = 220;
 const DEFAULT_MAX_REMEMBERED = 1200;
 const DEFAULT_ERROR_THRESHOLD = 3;
 const PERSIST_DELAY_MS = 180;
+const SCAN_DEBOUNCE_MS = 350;
 
 const RESPONSE_ROOT_SELECTORS = [
   'main model-response',
@@ -70,8 +72,10 @@ interface RuntimeState {
   observedRoots: Set<HTMLElement>;
   contentByRoot: WeakMap<HTMLElement, HTMLElement>;
   observer: MutationObserver | null;
-  rafId: number | null;
+  observedTarget: HTMLElement | null;
+  scanTimerId: number | null;
   persistTimerId: number | null;
+  unsubscribeSpa: (() => void) | null;
   initialized: boolean;
   tripped: boolean;
   consecutiveErrors: number;
@@ -86,8 +90,10 @@ const runtime: RuntimeState = {
   observedRoots: new Set<HTMLElement>(),
   contentByRoot: new WeakMap<HTMLElement, HTMLElement>(),
   observer: null,
-  rafId: null,
+  observedTarget: null,
+  scanTimerId: null,
   persistTimerId: null,
+  unsubscribeSpa: null,
   initialized: false,
   tripped: false,
   consecutiveErrors: 0
@@ -127,19 +133,33 @@ async function readFeatureGate(): Promise<{ enabled: boolean; tripped: boolean }
   }
 }
 
-function startObservers(): void {
-  if (runtime.observer) {
+function attachObserverTarget(): void {
+  const main = document.querySelector<HTMLElement>('main, [role="main"]');
+  const target = main && !isExcluded(main) ? main : document.body;
+  if (runtime.observer && runtime.observedTarget === target && target.isConnected) {
     return;
   }
-
+  runtime.observer?.disconnect();
   runtime.observer = new MutationObserver(() => {
     scheduleScan();
   });
-  runtime.observer.observe(document.body, { childList: true, subtree: true, characterData: true });
+  runtime.observedTarget = target;
+  runtime.observer.observe(target, { childList: true, subtree: true });
+}
+
+function startObservers(): void {
+  if (runtime.observer) {
+    attachObserverTarget();
+    return;
+  }
+
+  attachObserverTarget();
 
   window.addEventListener('resize', onPassiveSignal, { passive: true });
-  window.addEventListener('popstate', onPassiveSignal);
-  window.addEventListener('hashchange', onPassiveSignal);
+  runtime.unsubscribeSpa = onSpaNavigation(() => {
+    attachObserverTarget();
+    scheduleScan();
+  });
 }
 
 function onPassiveSignal(): void {
@@ -150,17 +170,18 @@ function scheduleScan(): void {
   if (runtime.tripped) {
     return;
   }
-  if (runtime.rafId !== null) {
-    return;
+  if (runtime.scanTimerId !== null) {
+    window.clearTimeout(runtime.scanTimerId);
   }
 
-  runtime.rafId = window.requestAnimationFrame(() => {
-    runtime.rafId = null;
+  runtime.scanTimerId = window.setTimeout(() => {
+    runtime.scanTimerId = null;
+    attachObserverTarget();
     void guardedAsync('scan', async () => {
       renderResponseFolding();
       runtime.consecutiveErrors = 0;
     });
-  });
+  }, SCAN_DEBOUNCE_MS);
 }
 
 function renderResponseFolding(): void {
@@ -209,7 +230,16 @@ function collectCandidates(): ResponseCandidate[] {
     // Gemini's current response DOM matches both the outer <model-response>
     // and nested content nodes whose class names also contain "model-response".
     // Keep the outermost candidate so one response receives one toggle button.
-    if (Array.from(rootSet).some((other) => other !== root && other.contains(root))) {
+    let hasAncestorRoot = false;
+    let ancestor = root.parentElement;
+    while (ancestor && ancestor !== main) {
+      if (rootSet.has(ancestor)) {
+        hasAncestorRoot = true;
+        break;
+      }
+      ancestor = ancestor.parentElement;
+    }
+    if (hasAncestorRoot) {
       continue;
     }
     if (!isUsableNode(root)) {
@@ -508,10 +538,11 @@ function stopRuntime(): void {
     runtime.observer.disconnect();
     runtime.observer = null;
   }
+  runtime.observedTarget = null;
 
-  if (runtime.rafId !== null) {
-    window.cancelAnimationFrame(runtime.rafId);
-    runtime.rafId = null;
+  if (runtime.scanTimerId !== null) {
+    window.clearTimeout(runtime.scanTimerId);
+    runtime.scanTimerId = null;
   }
 
   if (runtime.persistTimerId !== null) {
@@ -520,8 +551,8 @@ function stopRuntime(): void {
   }
 
   window.removeEventListener('resize', onPassiveSignal);
-  window.removeEventListener('popstate', onPassiveSignal);
-  window.removeEventListener('hashchange', onPassiveSignal);
+  runtime.unsubscribeSpa?.();
+  runtime.unsubscribeSpa = null;
 }
 
 function removeInjectedUi(): void {

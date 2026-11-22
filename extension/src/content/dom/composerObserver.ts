@@ -1,4 +1,5 @@
 import { getConversationId } from './anchors';
+import { onSpaNavigation } from './spaNavigation';
 
 export interface ComposerObserverCallbacks {
   /**
@@ -101,16 +102,6 @@ export function initComposerObserver(callbacks: ComposerObserverCallbacks): Comp
   let debounceTimer: number | null = null;
   let disposed = false;
 
-  const historyPatch = (method: 'pushState' | 'replaceState') => {
-    const original = history[method].bind(history);
-    const wrapped: typeof history.pushState = (...args: Parameters<typeof history.pushState>) => {
-      const result = original(...args);
-      scheduleCheck();
-      return result;
-    };
-    history[method] = wrapped;
-  };
-
   function check(): void {
     if (disposed) return;
 
@@ -183,13 +174,13 @@ export function initComposerObserver(callbacks: ComposerObserverCallbacks): Comp
   }
 
   const observer = new MutationObserver(scheduleCheck);
-  observer.observe(document.body, { childList: true, subtree: true, characterData: true });
+  observer.observe(document.body, { childList: true, subtree: true });
 
-  window.addEventListener('popstate', scheduleCheck);
-  window.addEventListener('hashchange', scheduleCheck);
-  window.addEventListener('focus', scheduleCheck);
-  historyPatch('pushState');
-  historyPatch('replaceState');
+  const onFocus = () => scheduleCheck();
+  const onInput = () => scheduleCheck();
+  const unsubscribeSpa = onSpaNavigation(scheduleCheck);
+  window.addEventListener('focus', onFocus);
+  document.addEventListener('input', onInput, true);
 
   check();
 
@@ -197,6 +188,9 @@ export function initComposerObserver(callbacks: ComposerObserverCallbacks): Comp
     stop: () => {
       disposed = true;
       observer.disconnect();
+      unsubscribeSpa();
+      window.removeEventListener('focus', onFocus);
+      document.removeEventListener('input', onInput, true);
       if (debounceTimer !== null) window.clearTimeout(debounceTimer);
       if (fireTimer !== null) window.clearTimeout(fireTimer);
     }

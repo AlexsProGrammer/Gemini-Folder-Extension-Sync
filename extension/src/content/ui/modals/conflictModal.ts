@@ -316,10 +316,13 @@ function buildMarkup(
   `;
 }
 
+let activeConflictCleanup: (() => void) | null = null;
+
 export function openConflictModal(
   detail: SyncConflictDetail,
   onResolve: (choice: SyncResolution) => void
 ): void {
+  activeConflictCleanup?.();
   document.getElementById(ROOT_ID)?.remove();
 
   const { localState, remoteState } = detail;
@@ -351,16 +354,23 @@ export function openConflictModal(
   let touchResumeTimer: number | null = null;
 
   function cleanup(): void {
+    if (activeConflictCleanup === cleanup) {
+      activeConflictCleanup = null;
+    }
     if (intervalId !== null) {
       window.clearInterval(intervalId);
       intervalId = null;
     }
     document.removeEventListener('keydown', onKeyDown);
     window.removeEventListener('pagehide', cleanup);
-    if (touchResumeTimer !== null) window.clearTimeout(touchResumeTimer);
+    if (touchResumeTimer !== null) {
+      window.clearTimeout(touchResumeTimer);
+      touchResumeTimer = null;
+    }
     themeObserver.disconnect();
     root.remove();
   }
+  activeConflictCleanup = cleanup;
 
   function renderCountdown(): void {
     const pct = (remaining / COUNTDOWN_SECONDS) * 100;

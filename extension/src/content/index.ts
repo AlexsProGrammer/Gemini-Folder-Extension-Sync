@@ -5,6 +5,8 @@ import {
   createDefaultFeatureSettings,
   deleteWorkspaceProject,
   FEATURE_SETTINGS_CHANGED_EVENT,
+  FEATURE_SETTINGS_KEY,
+  FeatureSettings,
   getFeatureSettings,
   getLocalUiPrefs,
   getLocalUiPrefsKey,
@@ -47,6 +49,7 @@ import {
   injectProjectsSection
 } from './dom/anchors';
 import { attachChatMenuEnhancer } from './dom/menus';
+import { onSpaNavigation } from './dom/spaNavigation';
 import { findChatComposer, initComposerObserver, hasUserTurnsInChat } from './dom/composerObserver';
 import { initGeminiResponseFolding } from './gemini/responseFolding';
 import * as prompts from './prompts';
@@ -236,6 +239,15 @@ function initWorkspaceSync(): void {
     changes: Record<string, unknown>,
     area: string
   ) => {
+    if (area === 'local' && changes[FEATURE_SETTINGS_KEY]) {
+      void getFeatureSettings()
+        .then((settings) => {
+          cachedFeatureSettings = settings;
+          refreshInstructionsButton();
+        })
+        .catch(() => undefined);
+    }
+
     const accountHash = getActiveAccountHash();
     if (!accountHash) return;
 
@@ -282,9 +294,15 @@ function refreshSyncStatusBadge(): void {
 async function bootstrap() {
   document.documentElement.setAttribute('data-gp-build', BUILD_MARKER);
   console.info('[gemini-projects] build', BUILD_MARKER);
-  // Load the debug-logging gate from persisted settings before any sync
-  // activity can run, so [sync-debug] output matches the checkbox state.
+  // Load the debug-logging gate and feature settings from persisted settings
+  // before any sync or render activity runs.
   void initDebugLoggingFlag();
+  void getFeatureSettings()
+    .then((settings) => {
+      cachedFeatureSettings = settings;
+      refreshInstructionsButton();
+    })
+    .catch(() => undefined);
 
   if (window.location.hostname.includes('chatgpt.com') || window.location.hostname.includes('openai.com')) {
     initChatGPT();
@@ -409,23 +427,18 @@ function currentInstructionProjectId(): string | null {
   return projectId ?? activeProjectId ?? pendingNewChatProjectId;
 }
 
+let cachedFeatureSettings: FeatureSettings = createDefaultFeatureSettings();
+
 /**
  * Shows/hides the composer-toolbar "Add instructions" button: only when the
  * setting is enabled AND the current conversation's project chain has
  * instructions configured.
  */
 function refreshInstructionsButton(): void {
-  void (async () => {
-    try {
-      const settings = await getFeatureSettings();
-      const visible =
-        settings.showInstructionsButton &&
-        projectChainHasInstructions(currentInstructionProjectId());
-      setInstructionsButtonVisible(visible);
-    } catch (error) {
-      console.warn('[gemini-projects] instructions button refresh failed', error);
-    }
-  })();
+  const visible =
+    cachedFeatureSettings.showInstructionsButton &&
+    projectChainHasInstructions(currentInstructionProjectId());
+  setInstructionsButtonVisible(visible);
 }
 
 /** Composer-toolbar action: manually add the project instructions to the composer. */
@@ -497,7 +510,20 @@ function initProjectInstructionInjection(): void {
     }
   }
 
-  window.addEventListener(FEATURE_SETTINGS_CHANGED_EVENT, () => refreshInstructionsButton());
+  window.addEventListener(FEATURE_SETTINGS_CHANGED_EVENT, (event) => {
+    const detail = (event as CustomEvent<FeatureSettings | undefined>).detail;
+    if (detail) {
+      cachedFeatureSettings = detail;
+      refreshInstructionsButton();
+      return;
+    }
+    void getFeatureSettings()
+      .then((settings) => {
+        cachedFeatureSettings = settings;
+        refreshInstructionsButton();
+      })
+      .catch(() => undefined);
+  });
   configureInstructionsButton(() => handleManualInjectInstructions());
 
   composerObserver = initComposerObserver({
@@ -673,10 +699,16 @@ function persistCollapsedFolders(accountHash: string | null): void {
   );
 }
 
+function ensureRootObserver() {
+  if (rootObserver) return;
+  rootObserver = new MutationObserver(() => scheduleRescan());
+  rootObserver.observe(document.body, { childList: true, subtree: true });
+}
+
 function observeDocumentForSidebar() {
   rootObserver?.disconnect();
-  rootObserver = new MutationObserver(() => scheduleRescan());
-  rootObserver.observe(document.body, { childList: true, subtree: true, characterData: true });
+  rootObserver = null;
+  ensureRootObserver();
   scheduleRescan(0);
 }
 
@@ -739,6 +771,7 @@ function rescanSidebar() {
 
   const nextSidebar = findSidebarRoot();
   if (!nextSidebar) {
+    ensureRootObserver();
     if (pendingPanelRetryCount < PANEL_READY_RETRY_LIMIT) {
       pendingPanelRetryCount += 1;
       scheduleRescan(PANEL_READY_RETRY_MS);
@@ -757,7 +790,8 @@ function rescanSidebar() {
     sidebarRoot = nextSidebar;
     sidebarObserver?.disconnect();
     sidebarObserver = new MutationObserver(() => scheduleRescan());
-    sidebarObserver.observe(sidebarRoot, { childList: true, subtree: true, characterData: true });
+    sidebarObserver.observe(sidebarRoot, { childList: true, subtree: true });
+    panel?.destroy();
     panel = null;
     panelHost = null;
     chatsList = null;
@@ -765,11 +799,16 @@ function rescanSidebar() {
   }
 
   if (!ensurePanel()) {
+    ensureRootObserver();
     if (pendingPanelRetryCount < PANEL_READY_RETRY_LIMIT) {
       pendingPanelRetryCount += 1;
       scheduleRescan(PANEL_READY_RETRY_MS);
     }
     return;
+  }
+  if (sidebarRoot?.isConnected && rootObserver) {
+    rootObserver.disconnect();
+    rootObserver = null;
   }
   pendingPanelRetryCount = 0;
   ensureChatsList();
@@ -782,7 +821,12 @@ function rescanSidebar() {
 function installLifecycleRescans() {
   window.addEventListener('pageshow', () => scheduleRescan(0));
   window.addEventListener('focus', () => scheduleRescan(0));
-  window.addEventListener('popstate', () => scheduleRescan(0));
+  onSpaNavigation(() => {
+    if (!sidebarRoot?.isConnected) {
+      ensureRootObserver();
+    }
+    scheduleRescan(0);
+  });
   document.addEventListener('visibilitychange', () => {
     if (document.visibilityState === 'visible') {
       scheduleRescan(0);
@@ -1427,6 +1471,7 @@ function isSparkSurface(): boolean {
 }
 
 function cleanupInjectedProjects() {
+  panel?.destroy();
   panel = null;
   panelHost = null;
   chatMenuOverlayShadow = null;
