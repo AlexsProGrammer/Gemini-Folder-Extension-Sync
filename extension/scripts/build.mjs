@@ -7,6 +7,7 @@ const scriptDir = dirname(fileURLToPath(import.meta.url));
 const rootDir = resolve(scriptDir, '..');
 const contentEntry = resolve(rootDir, 'src/content/index.ts');
 const backgroundEntry = resolve(rootDir, 'src/background.ts');
+const grantPermissionEntry = resolve(rootDir, 'src/grantPermission.ts');
 
 const supportedTargets = ['chrome', 'firefox'];
 
@@ -71,6 +72,29 @@ async function buildBackground(outDir) {
   });
 }
 
+async function buildGrantPermission(outDir) {
+  await build({
+    configFile: false,
+    root: rootDir,
+    publicDir: false,
+    build: {
+      outDir,
+      emptyOutDir: false,
+      sourcemap: true,
+      rollupOptions: {
+        input: {
+          grantPermission: grantPermissionEntry
+        },
+        output: {
+          entryFileNames: 'grant-permission.js',
+          format: 'iife',
+          inlineDynamicImports: true
+        }
+      }
+    }
+  });
+}
+
 async function patchManifestForTarget(manifestPath, target) {
   const manifest = JSON.parse(await readFile(manifestPath, 'utf8'));
 
@@ -89,6 +113,7 @@ async function buildTarget(target) {
 
   await buildContent(target, outDir);
   await buildBackground(outDir);
+  await buildGrantPermission(outDir);
   await patchManifestForTarget(resolve(rootDir, outDir, 'manifest.json'), target);
 
   console.log(`[build] target=${target} -> ${outDir}`);

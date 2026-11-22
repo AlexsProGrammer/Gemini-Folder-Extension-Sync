@@ -1,4 +1,4 @@
-import { ensureServerHostPermission, requestRemotePull } from '../../../shared/syncClient';
+import { ensureServerHostPermission, openServerHostPermissionPage, requestRemotePull } from '../../../shared/syncClient';
 import { syncEngine } from '../../../shared/syncEngine';
 import { getFeatureSettings, getSyncSettings, saveFeatureSettings, saveSyncSettings } from '../../../shared/storage';
 import type { SyncSettings } from '../../../shared/types';
@@ -683,9 +683,23 @@ export function openSettingsModal(activeAccountId: string, activeAccountLabel: s
     try {
       const permission = await ensureServerHostPermission(serverUrl);
       if (!permission.granted) {
-        const detail = permission.error ? ` (${permission.error})` : '';
-        console.warn('[gemini-projects] sync host permission not granted.', detail, 'Fix: about:addons → "Synced Projects for Gemini" → Permissions → enable access for', serverUrl);
-        showTestResult(`Host access to the sync server was denied. Enable it under about:addons → this extension → Permissions.${detail}`, 'error');
+        if (permission.error) {
+          showTestResult(`Could not verify host permission for the sync server (${permission.error}).`, 'error');
+          return;
+        }
+        const opened = await openServerHostPermissionPage(serverUrl);
+        if (opened.opened) {
+          showTestResult(
+            'Host permission is required. Click "Grant Permission" in the opened window, then click Test Connection again.',
+            'error'
+          );
+        } else {
+          const detail = opened.error ? ` (${opened.error})` : '';
+          showTestResult(
+            `Host access to the sync server was denied. Enable it in your browser's extension permissions settings.${detail}`,
+            'error'
+          );
+        }
         return;
       }
       // Probe the ACTIVE account so the result reflects this account's real
@@ -702,6 +716,8 @@ export function openSettingsModal(activeAccountId: string, activeAccountLabel: s
         showTestResult('Invalid API Key (401).', 'error');
       } else if (response.error === 'forbidden') {
         showTestResult('API key is not authorized for this account (403).', 'error');
+      } else if (response.error === 'permission_denied') {
+        showTestResult(response.message || 'Host permission for sync server is not granted.', 'error');
       } else {
         showTestResult(`Server unreachable${response.message ? ` (${response.message})` : '.'}`, 'error');
       }
@@ -735,9 +751,17 @@ export function openSettingsModal(activeAccountId: string, activeAccountLabel: s
 
     const permission = await ensureServerHostPermission(serverUrl);
     if (!permission.granted) {
-      const detail = permission.error ? ` (${permission.error})` : '';
-      console.warn('[gemini-projects] sync host permission not granted.', detail, 'Fix: about:addons → "Synced Projects for Gemini" → Permissions → enable access for', serverUrl);
-      setSyncError(`Host access to the sync server was denied. Enable it under about:addons → this extension → Permissions.${detail}`);
+      if (permission.error) {
+        setSyncError(`Could not verify host permission for the sync server (${permission.error}).`);
+        return;
+      }
+      const opened = await openServerHostPermissionPage(serverUrl);
+      if (opened.opened) {
+        setSyncError('Host permission is required. Click "Grant Permission" in the opened window, then click Save again.');
+      } else {
+        const detail = opened.error ? ` (${opened.error})` : '';
+        setSyncError(`Host access to the sync server was denied. Enable it in your browser's extension permissions settings.${detail}`);
+      }
       return;
     }
 

@@ -1,0 +1,144 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Grant Sync Server Permission — Synced Projects for Gemini</title>
+    <style>
+      :root {
+        color-scheme: light dark;
+        --bg: #ffffff;
+        --fg: #1f1f1f;
+        --muted: #5f6368;
+        --border: rgba(60, 64, 67, 0.16);
+        --surface: #f8fafd;
+        --accent: #1a73e8;
+        --on-accent: #ffffff;
+        --success: #188038;
+        --danger: #b3261e;
+      }
+
+      @media (prefers-color-scheme: dark) {
+        :root {
+          --bg: #1e1f20;
+          --fg: #e3e3e3;
+          --muted: #a8abb0;
+          --border: rgba(255, 255, 255, 0.14);
+          --surface: #282a2c;
+          --accent: #8ab4f8;
+          --on-accent: #0b192c;
+          --success: #81c995;
+          --danger: #f28b82;
+        }
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
+      body {
+        margin: 0;
+        padding: 24px;
+        font-family: "Google Sans", "Segoe UI", Roboto, Arial, sans-serif;
+        background: var(--bg);
+        color: var(--fg);
+        line-height: 1.5;
+      }
+
+      .card {
+        max-width: 440px;
+        margin: 0 auto;
+        padding: 20px;
+        border: 1px solid var(--border);
+        border-radius: 12px;
+        background: var(--surface);
+      }
+
+      h1 {
+        margin: 0 0 8px;
+        font-size: 18px;
+        font-weight: 600;
+      }
+
+      p {
+        margin: 0 0 14px;
+        font-size: 14px;
+        color: var(--muted);
+      }
+
+      .origin-box {
+        padding: 10px 12px;
+        margin-bottom: 16px;
+        border-radius: 8px;
+        border: 1px solid var(--border);
+        background: var(--bg);
+        font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+        font-size: 13px;
+        word-break: break-all;
+      }
+
+      .actions {
+        display: flex;
+        gap: 10px;
+        align-items: center;
+      }
+
+      button {
+        border: 0;
+        border-radius: 8px;
+        padding: 10px 16px;
+        font-size: 14px;
+        font-weight: 500;
+        cursor: pointer;
+      }
+
+      button.primary {
+        background: var(--accent);
+        color: var(--on-accent);
+      }
+
+      button.primary:disabled {
+        opacity: 0.5;
+        cursor: not-allowed;
+      }
+
+      button.secondary {
+        background: transparent;
+        color: var(--fg);
+        border: 1px solid var(--border);
+      }
+
+      .status {
+        margin-top: 14px;
+        font-size: 13px;
+        min-height: 20px;
+      }
+
+      .status.ok {
+        color: var(--success);
+      }
+
+      .status.error {
+        color: var(--danger);
+      }
+    </style>
+  </head>
+  <body>
+    <main class="card">
+      <h1>Allow Sync Server Access</h1>
+      <p>
+        Synced Projects for Gemini needs host permission to communicate with your
+        self-hosted sync server:
+      </p>
+      <div id="gp-origin" class="origin-box">Checking server origin…</div>
+      <div class="actions">
+        <button id="gp-grant-btn" type="button" class="primary" disabled>
+          Grant Permission
+        </button>
+        <button id="gp-close-btn" type="button" class="secondary">Close</button>
+      </div>
+      <div id="gp-status" class="status" role="status" aria-live="polite"></div>
+    </main>
+    <script src="grant-permission.js"></script>
+  </body>
+</html>

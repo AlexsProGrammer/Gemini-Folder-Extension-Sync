@@ -3,9 +3,11 @@ import type {
   EncryptedSyncEnvelope,
   RemoteSyncBlob,
   SyncApiResponse,
+  SyncCheckPermissionMessage,
   SyncConfig,
   SyncMessage,
-  SyncPermissionMessage,
+  SyncOpenPermissionPageMessage,
+  SyncOpenPermissionPageResult,
   SyncPermissionResult,
   SyncPullMessage,
   SyncPushMessage
@@ -30,58 +32,104 @@ function transportFailure(error: unknown): SyncApiResponse<never> {
 export type HostPermissionResult =
   | { granted: true; requested: false }
   | { granted: true; requested: true }
-  | { granted: true; unavailable: true }
-  | { granted: false; requested: true; error?: string };
+  | { granted: false; requested: boolean; error?: string };
+
+function parseServerOrigin(serverUrl: string): string | null {
+  try {
+    const url = new URL(serverUrl.trim());
+    if (url.protocol !== 'https:' && url.protocol !== 'http:') return null;
+    return url.origin;
+  } catch {
+    return null;
+  }
+}
 
 /**
- * Ensures the extension holds host permission for the given server URL's
- * origin. MV3 does not grant `optional_host_permissions` automatically, and a
- * cross-origin fetch from the background script without that permission fails
- * with a browser-level `NetworkError`. This must be called from a user gesture
- * (button click).
+ * Checks whether the extension holds host permission for the given server
+ * URL's origin. MV3 does not grant `optional_host_permissions` automatically,
+ * and a cross-origin fetch from the background script without that permission
+ * fails with a browser-level `NetworkError`.
  *
- * Firefox does not expose the permissions API to content scripts, so the
- * check/request is proxied to the background worker via `SYNC_ENSURE_PERMISSION`
- * whenever the API is unavailable locally (Firefox content-script context).
+ * Content scripts cannot call `permissions.request()` directly (and proxying it
+ * through `runtime.sendMessage` forfeits user activation), so when permission
+ * is missing from a content script this returns `{ granted: false, requested: false }`
+ * and callers should open the extension-origin permission page via
+ * `openServerHostPermissionPage()`.
  */
 export async function ensureServerHostPermission(serverUrl: string): Promise<HostPermissionResult> {
-  let origin: string;
-  try {
-    origin = new URL(serverUrl.trim()).origin;
-  } catch {
-    return { granted: true, requested: false };
+  const origin = parseServerOrigin(serverUrl);
+  if (!origin) {
+    return { granted: false, requested: false, error: 'Invalid server URL.' };
   }
   const origins = [`${origin}/*`];
-  const contains = await permissionsContains(origins);
+  let contains: boolean | null;
+  try {
+    contains = await permissionsContains(origins);
+  } catch (error) {
+    return { granted: false, requested: false, error: errorMessage(error) };
+  }
+
   if (contains === null) {
-    // Permissions API unavailable in this context (Firefox content script):
-    // ask the background worker, which owns the API, to check and request.
+    // Permissions API unavailable in content scripts: ask background to check.
     try {
-      const result = await runtimeSendMessage<SyncPermissionResult>({
-        action: 'SYNC_ENSURE_PERMISSION',
+      const message: SyncCheckPermissionMessage = {
+        action: 'SYNC_CHECK_PERMISSION',
         origin
-      });
+      };
+      const result = await runtimeSendMessage<SyncPermissionResult | null>(message);
       if (result && typeof result === 'object' && 'granted' in result) {
         if (result.granted) {
-          return { granted: true, requested: true };
+          return { granted: true, requested: false };
         }
-        const detail = 'error' in result && result.error ? result.error : undefined;
-        if (detail) console.warn('[gemini-projects] sync host permission request failed:', detail);
-        return { granted: false, requested: true, error: detail };
+        return {
+          granted: false,
+          requested: false,
+          ...(result.error ? { error: result.error } : {})
+        };
       }
-      return { granted: true, unavailable: true };
-    } catch {
-      return { granted: true, unavailable: true };
+      return { granted: false, requested: false, error: 'Permission check returned an invalid response.' };
+    } catch (error) {
+      return { granted: false, requested: false, error: errorMessage(error) };
     }
   }
+
   if (contains) {
     return { granted: true, requested: false };
   }
-  const granted = await permissionsRequest(origins);
-  if (granted === null) {
-    return { granted: true, unavailable: true };
+
+  try {
+    const granted = await permissionsRequest(origins);
+    if (granted === null) {
+      return { granted: false, requested: false, error: 'Permissions API is unavailable in this context.' };
+    }
+    return { granted, requested: true };
+  } catch (error) {
+    return { granted: false, requested: true, error: errorMessage(error) };
   }
-  return { granted, requested: true };
+}
+
+/**
+ * Asks the background worker to open the extension-origin permission helper
+ * page so the user can grant host access with a direct user gesture.
+ */
+export async function openServerHostPermissionPage(serverUrl: string): Promise<SyncOpenPermissionPageResult> {
+  const origin = parseServerOrigin(serverUrl);
+  if (!origin) {
+    return { opened: false, error: 'Invalid server URL.' };
+  }
+  try {
+    const message: SyncOpenPermissionPageMessage = {
+      action: 'SYNC_OPEN_PERMISSION_PAGE',
+      origin
+    };
+    const result = await runtimeSendMessage<SyncOpenPermissionPageResult | null>(message);
+    if (result && typeof result === 'object' && 'opened' in result) {
+      return result;
+    }
+    return { opened: false, error: 'Background worker returned an invalid response.' };
+  } catch (error) {
+    return { opened: false, error: errorMessage(error) };
+  }
 }
 
 export async function requestRemotePull(

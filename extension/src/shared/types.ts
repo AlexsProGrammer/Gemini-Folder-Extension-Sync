@@ -1,4 +1,4 @@
-﻿export const PROJECT_ICONS = [
+export const PROJECT_ICONS = [
   'investing',
   'homework',
   'writing',
@@ -192,21 +192,43 @@ export interface SyncPushMessage {
   data: EncryptedSyncEnvelope;
 }
 
-export type SyncMessage = SyncPullMessage | SyncPushMessage | SyncPermissionMessage;
+export type SyncMessage =
+  | SyncPullMessage
+  | SyncPushMessage
+  | SyncCheckPermissionMessage
+  | SyncOpenPermissionPageMessage;
 
-/** Ask the background worker (which owns the permissions API) to grant host access for a custom sync server origin. */
-export interface SyncPermissionMessage {
-  action: 'SYNC_ENSURE_PERMISSION';
+/** Ask the background worker (which owns the permissions API) whether host access is already granted for an origin. */
+export interface SyncCheckPermissionMessage {
+  action: 'SYNC_CHECK_PERMISSION';
+  origin: string;
+}
+
+/** Ask the background worker to open the extension-origin permission prompt page for a custom sync server origin. */
+export interface SyncOpenPermissionPageMessage {
+  action: 'SYNC_OPEN_PERMISSION_PAGE';
   origin: string;
 }
 
 export type SyncPermissionResult =
-  | { granted: true; requested: false }
-  | { granted: true; requested: true }
-  | { granted: false }
-  | { granted: false; error: string };
+  | { granted: true; requested?: boolean }
+  | { granted: false; requested?: boolean; error?: string };
 
-export type SyncErrorKind = 'unauthorized' | 'forbidden' | 'not_found' | 'conflict' | 'network_error';
+export type SyncOpenPermissionPageResult =
+  | { opened: true }
+  | { opened: false; error?: string };
+
+export type SyncErrorKind =
+  | 'unauthorized'
+  | 'forbidden'
+  | 'not_found'
+  | 'conflict'
+  | 'permission_denied'
+  | 'rate_limited'
+  | 'payload_too_large'
+  | 'server_error'
+  | 'timeout'
+  | 'network_error';
 
 export type SyncApiResponse<T> =
   | { success: true; data: T }
@@ -216,6 +238,7 @@ export type SyncApiResponse<T> =
       serverState?: RemoteSyncBlob;
       status?: number;
       message?: string;
+      retryAfterSeconds?: number;
     };
 
 /* ------------------------------------------------------------------ *

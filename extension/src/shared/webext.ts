@@ -10,6 +10,8 @@ type WebextApi = {
     onChanged: { addListener: AnyFn };
   };
   runtime: {
+    id?: string;
+    getURL?: (path: string) => string;
     sendMessage: AnyFn;
     onMessage: { addListener: AnyFn };
     lastError?: { message?: string } | null;
@@ -18,7 +20,12 @@ type WebextApi = {
     contains: AnyFn;
     request: AnyFn;
   };
-  tabs?: unknown;
+  tabs?: {
+    create?: AnyFn;
+  };
+  windows?: {
+    create?: AnyFn;
+  };
 };
 
 const globalApi = globalThis as typeof globalThis & {
@@ -216,7 +223,7 @@ export async function permissionsContains(origins: string[]): Promise<boolean | 
     console.warn('[gemini-projects] permissions API unavailable; cannot check host permission.');
     return null;
   }
-  const granted = await invokeCompat<boolean>(permissions.contains.bind(permissions), [origins]);
+  const granted = await invokeCompat<boolean>(permissions.contains.bind(permissions), [{ origins }]);
   return Boolean(granted);
 }
 
@@ -234,6 +241,6 @@ export async function permissionsRequest(origins: string[]): Promise<boolean | n
     console.warn('[gemini-projects] permissions API unavailable; cannot request host permission.');
     return null;
   }
-  const granted = await invokeCompat<boolean>(permissions.request.bind(permissions), [origins]);
+  const granted = await invokeCompat<boolean>(permissions.request.bind(permissions), [{ origins }]);
   return Boolean(granted);
 }
