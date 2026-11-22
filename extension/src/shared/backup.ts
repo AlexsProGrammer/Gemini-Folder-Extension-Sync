@@ -11,7 +11,7 @@ import { isLocalVaultEnvelope, openWorkspaceEnvelope, type LocalVaultEnvelope } 
 import { WorkspacePayload } from './types';
 import { promptFingerprint } from './promptFingerprint';
 import { errorMessage, errorName, storageLocalGet, storageLocalSet } from './webext';
-import { getWorkspace, saveWorkspace } from './storage';
+import { getWorkspaceInLock, saveWorkspace, withWorkspaceLock } from './storage';
 
 const BACKUP_VERSION = 3;
 const WORKSPACE_KEY_PREFIX = 'workspace_';
@@ -196,9 +196,11 @@ export async function importData(file: File): Promise<{ success: boolean; messag
           // "delete all data, then re-import" flow a no-op). Merge instead:
           // open the live partition and add every entry the backup has that
           // the live workspace is missing.
-          const existing = await getWorkspace(accountHash);
           const imported = parseWorkspace(workspace);
-          await saveWorkspace(accountHash, mergeWorkspaces(existing, imported));
+          await withWorkspaceLock(accountHash, async () => {
+            const existing = await getWorkspaceInLock(accountHash);
+            await saveWorkspace(accountHash, mergeWorkspaces(existing, imported));
+          });
           mergedAccounts += 1;
         } catch (error) {
           if (errorName(error) === 'VaultLockedError') {

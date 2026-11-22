@@ -266,6 +266,26 @@ function normalizeUiPrefsRecord(raw: unknown): UiPrefs {
   };
 }
 
+export function breakProjectParentCycles(projects: Record<string, Project>): void {
+  for (const project of Object.values(projects)) {
+    if (!project.parentId) continue;
+    if (project.parentId === project.id) {
+      project.parentId = null;
+      continue;
+    }
+    const visited = new Set<string>([project.id]);
+    let parentId: string | null = project.parentId;
+    while (parentId) {
+      if (visited.has(parentId)) {
+        project.parentId = null;
+        break;
+      }
+      visited.add(parentId);
+      parentId = projects[parentId]?.parentId ?? null;
+    }
+  }
+}
+
 /**
  * Validates and normalizes an untrusted workspace payload into a plain,
  * fully-populated WorkspacePayload. Safe on cross-compartment (Xray-wrapped)
@@ -281,6 +301,7 @@ export function parseWorkspace(raw: unknown): WorkspacePayload {
     const fallbackId = asString(isRecordLike(value) ? safeGet(value, 'id') : undefined) || key || `project_${Object.keys(projects).length}`;
     projects[fallbackId] = normalizeProjectRecord(value, fallbackId);
   });
+  breakProjectParentCycles(projects);
 
   const rawPrompts = safeGet(source, 'prompts');
   const prompts = Array.isArray(rawPrompts)

@@ -2,8 +2,6 @@ import type { SyncResolution, SyncConflictDetail, WorkspacePayload } from '../..
 import { isMobileEnvironment } from '../../../shared/env';
 
 const ROOT_ID = 'gp-sync-conflict-root';
-const COUNTDOWN_SECONDS = 10;
-const COUNTDOWN_TICK_MS = 100;
 
 const CLOSE_ICON = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>';
 const WARN_ICON = '<svg viewBox="0 0 24 24" width="26" height="26" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M17.5 19H9a7 7 0 1 1 6.71-9h1.79a4.5 4.5 0 1 1 0 9Z"/><path d="M12 11v3.5"/><path d="M12 17.5h.01"/></svg>';
@@ -149,24 +147,6 @@ const STYLE = `
   color: var(--gp-fg);
 }
 .gp-sync-conflict-root .gp-sync-card-row span:last-child { font-weight: 600; }
-.gp-sync-conflict-root .gp-sync-countdown { display: flex; flex-direction: column; gap: 6px; }
-.gp-sync-conflict-root .gp-sync-countdown-track {
-  height: 4px;
-  border-radius: 999px;
-  background: var(--gp-hover);
-  overflow: hidden;
-}
-.gp-sync-conflict-root .gp-sync-countdown-fill {
-  height: 100%;
-  width: 100%;
-  background: var(--gp-warn);
-  border-radius: 999px;
-  transition: width 100ms linear;
-}
-.gp-sync-conflict-root .gp-sync-countdown-text {
-  font-size: 12.5px;
-  color: var(--gp-muted);
-}
 .gp-sync-conflict-root .gp-sync-choices {
   display: grid;
   grid-template-columns: 1fr 1fr;
@@ -288,11 +268,6 @@ function buildMarkup(
           ${cardMarkup('Remote Server Workspace', remoteState, newestIsRemote)}
         </div>
 
-        <div class="gp-sync-countdown">
-          <div class="gp-sync-countdown-track" aria-hidden="true"><div class="gp-sync-countdown-fill" data-gp-countdown-fill></div></div>
-          <div class="gp-sync-countdown-text" data-gp-countdown-text role="status" aria-live="polite"></div>
-        </div>
-
         <div class="gp-sync-choices">
           <button class="gp-sync-choice primary" type="button" data-gp-choice="newest">
             <span class="gp-sync-choice-title">Use Newest (${newestSide})</span>
@@ -337,9 +312,6 @@ export function openConflictModal(
   document.body.appendChild(root);
 
   const backdrop = root.querySelector<HTMLElement>('[data-gp-sync-backdrop]')!;
-  const dialog = root.querySelector<HTMLElement>('[data-gp-dialog]')!;
-  const fill = root.querySelector<HTMLElement>('[data-gp-countdown-fill]')!;
-  const text = root.querySelector<HTMLElement>('[data-gp-countdown-text]')!;
 
   const applyTheme = () =>
     root.classList.toggle('gp-sync-dark', document.body.className.toLowerCase().includes('dark'));
@@ -347,41 +319,22 @@ export function openConflictModal(
   const themeObserver = new MutationObserver(applyTheme);
   themeObserver.observe(document.body, { attributes: true, attributeFilter: ['class'] });
 
-  let remaining = COUNTDOWN_SECONDS;
-  let paused = false;
   let finished = false;
-  let intervalId: number | null = null;
-  let touchResumeTimer: number | null = null;
 
   function cleanup(): void {
     if (activeConflictCleanup === cleanup) {
       activeConflictCleanup = null;
     }
-    if (intervalId !== null) {
-      window.clearInterval(intervalId);
-      intervalId = null;
-    }
     document.removeEventListener('keydown', onKeyDown);
     window.removeEventListener('pagehide', cleanup);
-    if (touchResumeTimer !== null) {
-      window.clearTimeout(touchResumeTimer);
-      touchResumeTimer = null;
-    }
     themeObserver.disconnect();
     root.remove();
   }
   activeConflictCleanup = cleanup;
 
-  function renderCountdown(): void {
-    const pct = (remaining / COUNTDOWN_SECONDS) * 100;
-    fill.style.width = `${Math.max(0, Math.min(100, pct))}%`;
-    text.textContent = `Auto-resolving with newest change in ${remaining.toFixed(1)}s…`;
-  }
-
   function finish(choice: SyncResolution): void {
     if (finished) return;
     finished = true;
-    if (intervalId !== null) window.clearInterval(intervalId);
     cleanup();
     onResolve(choice);
   }
@@ -389,42 +342,15 @@ export function openConflictModal(
   function cancel(): void {
     if (finished) return;
     finished = true;
-    if (intervalId !== null) window.clearInterval(intervalId);
     cleanup();
-  }
-
-  function tick(): void {
-    if (paused || document.hidden) return;
-    remaining = Math.max(0, remaining - COUNTDOWN_TICK_MS / 1000);
-    renderCountdown();
-    if (remaining <= 0) finish(newestChoice);
   }
 
   function onKeyDown(event: KeyboardEvent): void {
     if (event.key === 'Escape') cancel();
   }
 
-  renderCountdown();
-  intervalId = window.setInterval(tick, COUNTDOWN_TICK_MS);
   document.addEventListener('keydown', onKeyDown);
   window.addEventListener('pagehide', cleanup);
-
-  dialog.addEventListener('mouseenter', () => {
-    paused = true;
-  });
-  dialog.addEventListener('mouseleave', () => {
-    paused = false;
-  });
-  // Touch devices have no hover: a tap/hold anywhere in the dialog pauses the
-  // countdown briefly so the choices can be read while deciding.
-  dialog.addEventListener('pointerdown', () => {
-    paused = true;
-    if (touchResumeTimer !== null) window.clearTimeout(touchResumeTimer);
-    touchResumeTimer = window.setTimeout(() => {
-      touchResumeTimer = null;
-      paused = false;
-    }, 2500);
-  });
 
   backdrop.addEventListener('click', (event) => {
     if (event.target === backdrop) cancel();

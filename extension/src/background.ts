@@ -20,6 +20,8 @@ import { RemoteSyncBlobSchema, SyncConfirmationSchema } from './shared/schemas';
 import {
   errorMessage,
   errorName,
+  storageLocalGet,
+  storageLocalSet,
   storageSessionGet,
   storageSessionRemove,
   storageSessionSet,
@@ -307,6 +309,39 @@ async function handleSyncPull(
   return { success: false, error: 'network_error', message: 'Sync pull failed.' };
 }
 
+async function persistPushSyncMeta(
+  accountId: string,
+  pushedVersion: number,
+  etag?: string
+): Promise<void> {
+  const key = `sync_meta_${accountId}`;
+  try {
+    const result = await storageLocalGet<Record<string, unknown>>([key]);
+    const raw = result[key];
+    const existing = raw && typeof raw === 'object' ? (raw as Record<string, unknown>) : {};
+    const prevLastSynced =
+      typeof existing.lastSyncedVersion === 'number' && Number.isFinite(existing.lastSyncedVersion)
+        ? existing.lastSyncedVersion
+        : 0;
+    const localVersion =
+      typeof existing.localVersion === 'number' && Number.isFinite(existing.localVersion)
+        ? existing.localVersion
+        : undefined;
+    const stillDirty = localVersion !== undefined ? localVersion > pushedVersion : false;
+    const nextEtag = etag ?? (!stillDirty && typeof existing.etag === 'string' && existing.etag ? existing.etag : undefined);
+    await storageLocalSet({
+      [key]: {
+        lastSyncedVersion: Math.max(prevLastSynced, pushedVersion),
+        dirty: stillDirty,
+        ...(localVersion !== undefined ? { localVersion } : {}),
+        ...(nextEtag ? { etag: nextEtag } : {})
+      }
+    });
+  } catch (error) {
+    console.warn('[gemini-projects] background sync_meta update failed', error);
+  }
+}
+
 async function handleSyncPush(message: SyncPushMessage): Promise<SyncHandlerResponse> {
   const { accountId, serverUrl, apiKey, data } = message;
   const target = validateSyncEndpoint(serverUrl, accountId);
@@ -317,40 +352,56 @@ async function handleSyncPush(message: SyncPushMessage): Promise<SyncHandlerResp
     return permissionDeniedResponse();
   }
 
-  try {
-    const response = await fetchWithTimeout(target.endpoint, {
-      method: 'POST',
-      headers: {
-        'Authorization': `Bearer ${apiKey}`,
-        'Content-Type': 'application/json'
-      },
-      body: JSON.stringify(data satisfies EncryptedSyncEnvelope)
-    });
+  for (let attempt = 0; attempt <= PULL_RETRY_DELAYS_MS.length; attempt++) {
+    try {
+      const response = await fetchWithTimeout(target.endpoint, {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${apiKey}`,
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify(data satisfies EncryptedSyncEnvelope)
+      });
 
-    if (response.status === 200 || response.status === 201) {
-      const body = await parseJsonResponse(response);
-      const parsed = SyncConfirmationSchema.safeParse(body);
-      if (parsed.success) {
-        return { success: true, data: { version: parsed.data.version } };
+      if (response.status === 200 || response.status === 201) {
+        const body = await parseJsonResponse(response);
+        const parsed = SyncConfirmationSchema.safeParse(body);
+        const pushedVersion = parsed.success ? parsed.data.version : data.version;
+        const etag = response.headers?.get('ETag') ?? undefined;
+        await persistPushSyncMeta(accountId, pushedVersion, etag);
+        return {
+          success: true,
+          data: { version: pushedVersion },
+          ...(etag ? { etag } : {})
+        };
       }
-      return { success: true, data: { version: data.version } };
+      if (response.status === 409) {
+        const body = await parseJsonResponse(response);
+        const serverState = (body as { serverState?: unknown } | null)?.serverState;
+        const parsedServerState = RemoteSyncBlobSchema.safeParse(serverState);
+        return {
+          success: false,
+          error: 'conflict',
+          status: 409,
+          message: 'Sync conflict detected (409).',
+          ...(parsedServerState.success ? { serverState: parsedServerState.data as RemoteSyncBlob } : {})
+        };
+      }
+      if (RETRYABLE_PULL_STATUSES.has(response.status) && attempt < PULL_RETRY_DELAYS_MS.length) {
+        await delay(PULL_RETRY_DELAYS_MS[attempt]);
+        continue;
+      }
+      return mapHttpErrorResponse(response);
+    } catch (error) {
+      const failure = await mapFetchException(error, target.origin);
+      if (failure.error === 'permission_denied' || attempt >= PULL_RETRY_DELAYS_MS.length) {
+        return failure;
+      }
+      await delay(PULL_RETRY_DELAYS_MS[attempt]);
     }
-    if (response.status === 409) {
-      const body = await parseJsonResponse(response);
-      const serverState = (body as { serverState?: unknown } | null)?.serverState;
-      const parsedServerState = RemoteSyncBlobSchema.safeParse(serverState);
-      return {
-        success: false,
-        error: 'conflict',
-        status: 409,
-        message: 'Sync conflict detected (409).',
-        ...(parsedServerState.success ? { serverState: parsedServerState.data as RemoteSyncBlob } : {})
-      };
-    }
-    return mapHttpErrorResponse(response);
-  } catch (error) {
-    return mapFetchException(error, target.origin);
   }
+
+  return { success: false, error: 'network_error', message: 'Sync push failed.' };
 }
 
 function handleSyncMessage(message: SyncPullMessage | SyncPushMessage): Promise<SyncHandlerResponse> {

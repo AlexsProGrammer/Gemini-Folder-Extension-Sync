@@ -150,6 +150,8 @@ export function createProjectsPanel(options: ProjectsPanelOptions) {
         openConflictResolutionModal(activeAccountId, unresolved);
         return;
       }
+      void syncEngine.pull(activeAccountId, { force: true });
+      return;
     }
     const activeAccountLabel = resolveAccountRawIdentifier();
     openSettingsModal(activeAccountId, activeAccountLabel);
@@ -802,7 +804,10 @@ export function renderProjectsSection(
         `;
   };
 
-  const renderNode = (project: Project, depth: number): string => {
+  const renderNode = (project: Project, depth: number, visited: Set<string> = new Set()): string => {
+    if (visited.has(project.id)) return '';
+    const nextVisited = new Set(visited);
+    nextVisited.add(project.id);
     const isExpanded = !collapsedProjectIds.has(project.id);
     const accentColor = getProjectAccentColor(project);
     const isFolder = project.kind === 'folder';
@@ -813,7 +818,7 @@ export function renderProjectsSection(
 
     const chatRows = renderChatRows(project, accentColor, isExpanded, chats);
     const childRows = isExpanded && children.length
-      ? `<div class="gp-project-children">${children.map((child) => renderNode(child, depth + 1)).join('')}</div>`
+      ? `<div class="gp-project-children">${children.map((child) => renderNode(child, depth + 1, nextVisited)).join('')}</div>`
       : '';
 
     const iconMarkup = isFolder
@@ -3019,11 +3024,18 @@ function createTargetPickerModal(layer: HTMLElement, signal: AbortSignal) {
   let reparentExcludeId: string | null = null;
 
   /** True when the node (or any of its ancestors) is the reparenting target. */
-  function isExcludedFromReparent(projects: Project[], projectId: string | null): boolean {
+  function isExcludedFromReparent(
+    projects: Project[],
+    projectId: string | null,
+    visited: Set<string> = new Set()
+  ): boolean {
     if (!reparentExcludeId || !projectId) return false;
+    if (visited.has(projectId)) return false;
     if (projectId === reparentExcludeId) return true;
+    const nextVisited = new Set(visited);
+    nextVisited.add(projectId);
     const project = projects.find((item) => item.id === projectId);
-    return project ? isExcludedFromReparent(projects, project.parentId) : false;
+    return project ? isExcludedFromReparent(projects, project.parentId, nextVisited) : false;
   }
 
   function buildForest(projects: Project[], mode: TargetPickerMode): PickerEntry[] {
@@ -3036,13 +3048,16 @@ function createTargetPickerModal(layer: HTMLElement, signal: AbortSignal) {
         a.project.sortIndex - b.project.sortIndex
       );
 
-    const buildChildren = (parentId: string, depth: number): PickerEntry[] => {
+    const buildChildren = (parentId: string, depth: number, visited: Set<string> = new Set()): PickerEntry[] => {
+      if (visited.has(parentId)) return [];
+      const nextVisited = new Set(visited);
+      nextVisited.add(parentId);
       const children = projects
         .filter((project) => (project.parentId ?? null) === parentId && !isExcludedFromReparent(projects, project.id))
         .map((project) => ({
           project,
           depth,
-          children: buildChildren(project.id, depth + 1),
+          children: buildChildren(project.id, depth + 1, nextVisited),
           chatCount: chatCountOf(project.id)
         }));
       return sortEntries(children);

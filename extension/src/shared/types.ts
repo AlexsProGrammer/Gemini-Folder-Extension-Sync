@@ -189,6 +189,7 @@ export interface SyncMeta {
   lastSyncedVersion: number;
   dirty: boolean;
   etag?: string;
+  localVersion?: number;
 }
 
 /** Full server-side blob row (GET /api/v1/sync/:accountId response). */

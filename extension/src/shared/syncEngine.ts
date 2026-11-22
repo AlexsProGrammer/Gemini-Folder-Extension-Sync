@@ -10,11 +10,15 @@ import {
   getSyncConfig,
   getSyncMeta,
   getWorkspace,
+  getWorkspaceInLock,
   hasWorkspace,
   putWorkspace,
+  reconcileSyncMetaAfterPush,
   setSyncMeta,
+  withWorkspaceLock,
   WORKSPACE_SCHEMA_VERSION
 } from './storage';
+import { breakProjectParentCycles } from './schemas';
 import { requestRemotePull, requestRemotePush } from './syncClient';
 import { promptFingerprint } from './promptFingerprint';
 import { errorMessage, errorName } from './webext';
@@ -133,6 +137,7 @@ function mergeProjects(
     merged[id] = localProject ?? remoteProject;
   });
 
+  breakProjectParentCycles(merged);
   return merged;
 }
 
@@ -496,11 +501,18 @@ export class SyncEngine {
       if (response.success) {
         this.pushRetryAttempts.delete(accountHash);
         this.pausedAccounts.delete(accountHash);
-        await setSyncMeta(accountHash, {
-          lastSyncedVersion: localState.version,
-          dirty: false
-        });
-        this.setStatus(accountHash, 'synced');
+        const pushedVersion = 'data' in response ? response.data.version : localState.version;
+        const { stillDirty } = await reconcileSyncMetaAfterPush(
+          accountHash,
+          pushedVersion,
+          response.etag
+        );
+        if (stillDirty) {
+          this.schedulePush(accountHash);
+          this.setStatus(accountHash, 'syncing');
+        } else {
+          this.setStatus(accountHash, 'synced');
+        }
         return;
       }
 
@@ -603,6 +615,7 @@ export class SyncEngine {
 
       if (!response.success) {
         if (response.error === 'not_found') {
+          this.pausedAccounts.delete(accountHash);
           // Server has no state yet: seed it from the local workspace.
           debugLog(`runPull: 404 not_found; local workspace exists: ${localExists}. ${localExists ? 'Scheduling initial push (seed).' : 'Nothing to seed.'}`);
           if (localExists) {
@@ -625,6 +638,7 @@ export class SyncEngine {
       }
 
       if ('notModified' in response && response.notModified) {
+        this.pausedAccounts.delete(accountHash);
         debugLog('runPull: 304 Not Modified; skipping decryption');
         if (response.etag && response.etag !== preMeta.etag) {
           await setSyncMeta(accountHash, { ...preMeta, etag: response.etag });
@@ -660,62 +674,80 @@ export class SyncEngine {
         throw error;
       }
 
-      const [localState, meta] = await Promise.all([
-        getWorkspace(accountHash),
-        getSyncMeta(accountHash)
-      ]);
-      const nextEtag = response.etag ?? meta.etag;
-      debugLog(`runPull: version comparison — remote: ${remoteState.version}, local: ${localState.version}, dirty: ${meta.dirty}`);
+      this.pausedAccounts.delete(accountHash);
 
-      if (remoteState.version > localState.version) {
+      const outcome = await withWorkspaceLock(accountHash, async () => {
+        const [localState, meta] = await Promise.all([
+          getWorkspaceInLock(accountHash),
+          getSyncMeta(accountHash)
+        ]);
+        const nextEtag = response.etag ?? meta.etag;
+        debugLog(`runPull: version comparison — remote: ${remoteState.version}, local: ${localState.version}, dirty: ${meta.dirty}`);
+
+        if (remoteState.version > localState.version) {
+          if (meta.dirty) {
+            return { kind: 'conflict' as const, localState };
+          }
+          // Local-first guard: a remote payload without any content (fresh,
+          // reset or mis-bound server partition) must never wipe a populated
+          // local workspace — that is how a briefly unreachable/empty server
+          // turned into an empty sidebar with no way back. Keep the locally
+          // saved folders/projects and re-seed the server from this device
+          // instead. (Intentional "delete everything" still propagates: the
+          // re-seed push then conflicts and the conflict modal decides.)
+          if (!workspaceHasContent(remoteState) && workspaceHasContent(localState)) {
+            return { kind: 'keep_local_empty_remote' as const };
+          }
+          debugLog('runPull: remote is newer; adopting remote state');
+          await putWorkspace(accountHash, remoteState);
+          await setSyncMeta(accountHash, {
+            lastSyncedVersion: remoteState.version,
+            dirty: false,
+            localVersion: remoteState.version,
+            ...(nextEtag ? { etag: nextEtag } : {})
+          });
+          return { kind: 'adopted' as const };
+        }
+
+        if (localState.version > remoteState.version) {
+          return { kind: 'push_local' as const };
+        }
+
         if (meta.dirty) {
-          debugWarn('runPull: remote is newer while local has unsynced edits; raising conflict');
-          await this.handleConflict(accountHash, localState, remoteState);
-          return;
+          return { kind: 'conflict' as const, localState };
         }
-        // Local-first guard: a remote payload without any content (fresh,
-        // reset or mis-bound server partition) must never wipe a populated
-        // local workspace — that is how a briefly unreachable/empty server
-        // turned into an empty sidebar with no way back. Keep the locally
-        // saved folders/projects and re-seed the server from this device
-        // instead. (Intentional "delete everything" still propagates: the
-        // re-seed push then conflicts and the conflict modal decides.)
-        if (!workspaceHasContent(remoteState) && workspaceHasContent(localState)) {
-          debugWarn('runPull: remote is newer but carries no content; keeping local data and re-seeding the server');
-          this.schedulePush(accountHash);
-          this.setStatus(accountHash, 'synced', 'Server state was empty; kept the locally saved data.');
-          return;
+
+        if (meta.lastSyncedVersion !== remoteState.version || (nextEtag && meta.etag !== nextEtag)) {
+          await setSyncMeta(accountHash, {
+            lastSyncedVersion: remoteState.version,
+            dirty: false,
+            localVersion: localState.version,
+            ...(nextEtag ? { etag: nextEtag } : {})
+          });
         }
-        debugLog('runPull: remote is newer; adopting remote state');
-        await putWorkspace(accountHash, remoteState);
-        await setSyncMeta(accountHash, {
-          lastSyncedVersion: remoteState.version,
-          dirty: false,
-          ...(nextEtag ? { etag: nextEtag } : {})
-        });
+        return { kind: 'in_sync' as const };
+      });
+
+      if (outcome.kind === 'conflict') {
+        debugWarn('runPull: conflicting local and remote state; raising conflict');
+        await this.handleConflict(accountHash, outcome.localState, remoteState);
+        return;
+      }
+      if (outcome.kind === 'keep_local_empty_remote') {
+        debugWarn('runPull: remote is newer but carries no content; keeping local data and re-seeding the server');
+        this.schedulePush(accountHash);
+        this.setStatus(accountHash, 'synced', 'Server state was empty; kept the locally saved data.');
+        return;
+      }
+      if (outcome.kind === 'adopted') {
         dispatchWindowEvent(WORKSPACE_UPDATED_EVENT, { accountId: accountHash });
         this.setStatus(accountHash, 'synced');
         return;
       }
-
-      if (localState.version > remoteState.version) {
+      if (outcome.kind === 'push_local') {
         debugLog('runPull: local is newer; scheduling push');
         this.schedulePush(accountHash);
         return;
-      }
-
-      if (meta.dirty) {
-        debugWarn('runPull: equal versions with local dirty edits; raising conflict');
-        await this.handleConflict(accountHash, localState, remoteState);
-        return;
-      }
-
-      if (meta.lastSyncedVersion !== remoteState.version || (nextEtag && meta.etag !== nextEtag)) {
-        await setSyncMeta(accountHash, {
-          lastSyncedVersion: remoteState.version,
-          dirty: false,
-          ...(nextEtag ? { etag: nextEtag } : {})
-        });
       }
       debugLog('runPull: versions in sync');
       this.setStatus(accountHash, 'synced');
@@ -743,10 +775,13 @@ export class SyncEngine {
     this.unresolvedConflicts.delete(accountHash);
 
     if (resolution === 'keep_remote') {
-      await putWorkspace(accountHash, conflict.remoteState);
-      await setSyncMeta(accountHash, {
-        lastSyncedVersion: conflict.remoteState.version,
-        dirty: false
+      await withWorkspaceLock(accountHash, async () => {
+        await putWorkspace(accountHash, conflict.remoteState);
+        await setSyncMeta(accountHash, {
+          lastSyncedVersion: conflict.remoteState.version,
+          dirty: false,
+          localVersion: conflict.remoteState.version
+        });
       });
       dispatchWindowEvent(WORKSPACE_UPDATED_EVENT, { accountId: accountHash });
       this.setStatus(accountHash, 'synced');
@@ -759,20 +794,26 @@ export class SyncEngine {
         version: Math.max(conflict.localState.version, conflict.remoteState.version) + 1,
         updatedAt: Date.now()
       };
-      await putWorkspace(accountHash, next);
-      await setSyncMeta(accountHash, {
-        lastSyncedVersion: conflict.remoteState.version,
-        dirty: true
+      await withWorkspaceLock(accountHash, async () => {
+        await putWorkspace(accountHash, next);
+        await setSyncMeta(accountHash, {
+          lastSyncedVersion: conflict.remoteState.version,
+          dirty: true,
+          localVersion: next.version
+        });
       });
       await this.executePush(accountHash);
       return;
     }
 
     const merged = mergeWorkspaces(conflict.localState, conflict.remoteState, accountHash);
-    await putWorkspace(accountHash, merged);
-    await setSyncMeta(accountHash, {
-      lastSyncedVersion: conflict.remoteState.version,
-      dirty: true
+    await withWorkspaceLock(accountHash, async () => {
+      await putWorkspace(accountHash, merged);
+      await setSyncMeta(accountHash, {
+        lastSyncedVersion: conflict.remoteState.version,
+        dirty: true,
+        localVersion: merged.version
+      });
     });
     dispatchWindowEvent(WORKSPACE_UPDATED_EVENT, { accountId: accountHash });
     await this.executePush(accountHash);

@@ -65,7 +65,10 @@ export async function getSyncMeta(accountHash: string): Promise<SyncMeta> {
         ? candidate.lastSyncedVersion
         : 0,
     dirty: candidate.dirty === true,
-    ...(typeof candidate.etag === 'string' && candidate.etag ? { etag: candidate.etag } : {})
+    ...(typeof candidate.etag === 'string' && candidate.etag ? { etag: candidate.etag } : {}),
+    ...(typeof candidate.localVersion === 'number' && Number.isFinite(candidate.localVersion)
+      ? { localVersion: candidate.localVersion }
+      : {})
   };
 }
 
@@ -74,15 +77,26 @@ export async function setSyncMeta(accountHash: string, meta: SyncMeta): Promise<
     [getSyncMetaKey(accountHash)]: {
       lastSyncedVersion: meta.lastSyncedVersion,
       dirty: meta.dirty,
-      ...(typeof meta.etag === 'string' && meta.etag ? { etag: meta.etag } : {})
+      ...(typeof meta.etag === 'string' && meta.etag ? { etag: meta.etag } : {}),
+      ...(typeof meta.localVersion === 'number' && Number.isFinite(meta.localVersion)
+        ? { localVersion: meta.localVersion }
+        : {})
     }
   });
 }
 
-export async function markSyncDirty(accountHash: string): Promise<void> {
+export async function markSyncDirty(accountHash: string, localVersion?: number): Promise<void> {
   const current = await getSyncMeta(accountHash);
-  if (!current.dirty) {
-    await setSyncMeta(accountHash, { ...current, dirty: true });
+  const nextLocalVersion =
+    typeof localVersion === 'number' && Number.isFinite(localVersion)
+      ? localVersion
+      : current.localVersion;
+  if (!current.dirty || nextLocalVersion !== current.localVersion) {
+    await setSyncMeta(accountHash, {
+      ...current,
+      dirty: true,
+      ...(nextLocalVersion !== undefined ? { localVersion: nextLocalVersion } : {})
+    });
   }
 }
 
@@ -376,6 +390,11 @@ export function getWorkspace(accountHash: string): Promise<WorkspacePayload> {
   return getWorkspaceUnlocked(accountHash, false);
 }
 
+/** Reads the workspace when the caller already holds `withWorkspaceLock(accountHash, ...)`. */
+export function getWorkspaceInLock(accountHash: string): Promise<WorkspacePayload> {
+  return getWorkspaceUnlocked(accountHash, true);
+}
+
 /**
  * Resolves the raw account identity that owns a workspace partition. Without
  * it the vault key cannot be derived, so a missing identity is fatal for
@@ -457,8 +476,59 @@ export async function saveWorkspace(accountHash: string, data: WorkspacePayload)
   };
   const validated = normalizeWorkspacePayload(next, accountHash);
   await writeWorkspaceEnvelope(accountHash, validated);
-  await markSyncDirty(accountHash);
+  await markSyncDirty(accountHash, validated.version);
   notifyWorkspaceSaved(accountHash);
+}
+
+/**
+ * Reconciles sync metadata after a push succeeds while holding the workspace
+ * lock, preserving `dirty: true` if a concurrent local edit bumped the
+ * workspace version while the network request was in flight.
+ */
+export function reconcileSyncMetaAfterPush(
+  accountHash: string,
+  pushedVersion: number,
+  etag?: string
+): Promise<{ stillDirty: boolean; currentVersion: number }> {
+  return withWorkspaceLock(accountHash, async () => {
+    const [currentWorkspace, currentMeta] = await Promise.all([
+      getWorkspaceUnlocked(accountHash, true),
+      getSyncMeta(accountHash)
+    ]);
+    const stillDirty = currentWorkspace.version > pushedVersion;
+    const nextEtag = etag ?? (!stillDirty ? currentMeta.etag : undefined);
+    await setSyncMeta(accountHash, {
+      lastSyncedVersion: Math.max(currentMeta.lastSyncedVersion, pushedVersion),
+      dirty: stillDirty,
+      localVersion: currentWorkspace.version,
+      ...(nextEtag ? { etag: nextEtag } : {})
+    });
+    return { stillDirty, currentVersion: currentWorkspace.version };
+  });
+}
+
+/**
+ * Seeds default prompts on a brand-new v1 workspace without bumping the
+ * revision counter, marking sync dirty, or scheduling a push.
+ */
+export function seedWorkspacePrompts(
+  accountHash: string,
+  prompts: PromptTemplate[],
+  tagMeta?: Record<string, TagMeta>
+): Promise<boolean> {
+  return withWorkspaceLock(accountHash, async () => {
+    const workspace = await getWorkspaceUnlocked(accountHash, true);
+    if (workspace.version !== 1 || workspace.prompts.length > 0) {
+      return false;
+    }
+    const seeded = normalizeWorkspacePayload({
+      ...workspace,
+      prompts,
+      ...(tagMeta !== undefined ? { tagMeta } : {})
+    }, accountHash);
+    await writeWorkspaceEnvelope(accountHash, seeded);
+    return true;
+  });
 }
 
 /**

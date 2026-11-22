@@ -3,6 +3,7 @@
 import {
   getWorkspace,
   getWorkspaceKey,
+  seedWorkspacePrompts,
   updateWorkspacePrompts
 } from '../../shared/storage';
 import { PromptTemplate, TagMeta, WorkspacePayload } from '../../shared/types';
@@ -317,11 +318,11 @@ class PromptStore {
             });
         }
 
-        // First activation under the workspace schema: seed the library once.
-        // version === 1 marks a workspace that saveWorkspace has never revised.
+        // First activation under the workspace schema: seed the library once
+        // without bumping workspace.version or marking sync dirty.
         if (Object.keys(data.prompts).length === 0 && workspace.version === 1) {
             data = this.seed(data);
-            await this.writeWorkspace(data);
+            await seedWorkspacePrompts(accountHash, toPromptTemplates(data), data.tagMeta);
         } else {
             const { data: sanitized, dirty } = sanitizePromptsData(data);
             data = sanitized;
